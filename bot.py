@@ -23,6 +23,7 @@ from execution.polymarket_client import (
     parse_time,
     position_quantity,
 )
+from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
 from execution.trade_journal import TradeJournal, pending_plan
 
 
@@ -33,7 +34,7 @@ def main() -> int:
         "--check", action="store_true", help="Check account and market data; no orders"
     )
     mode.add_argument(
-        "--live", action="store_true", help="Enable real orders, capped at $1 including fees"
+        "--live", action="store_true", help="Enable real orders with bankroll percentage sizing"
     )
     parser.add_argument(
         "--once", action="store_true", help="Run one paper/live observation and stop"
@@ -151,10 +152,10 @@ class TradingBot:
             "min_consensus": 40,
             "take_profit": "0.20",
             "stop_loss": "-0.30",
-            "budget_usd": "1",
+            "entry_bankroll_fraction": str(ENTRY_BANKROLL_FRACTION),
             "max_open_positions": 5,
-            "max_exposure_usd": "10",
-            "daily_loss_usd": "5",
+            "max_exposure_fraction": str(MAX_EXPOSURE_FRACTION),
+            "daily_loss_fraction": str(DAILY_LOSS_FRACTION),
             "fusion_weights": self.strategy.fusion.weights.copy(),
         }
         self.market = None
@@ -179,7 +180,8 @@ class TradingBot:
             return
         if self.one_trade and self.trade_slug is not None:
             return
-        account = self._account_guard() if self.live else None
+        if self.live:
+            self._account_guard()
         now = datetime.now(timezone.utc)
         if self.market is None or now >= self.market.end:
             if time.monotonic() < self.next_discovery:
@@ -253,9 +255,19 @@ class TradingBot:
                         self.market, book, "entry_window_closed", outcome, self.settings
                     )
                 return
-            plan = self.exchange.buy_plan(
-                self.market, book, outcome, number(self.settings["budget_usd"])
-            )
+            # Funds and marks may change during market/strategy reads. Make the
+            # definitive sizing decision only after refreshing the account.
+            account = self._account_guard() if self.live else self.exchange.account()
+            if not self._in_entry_window():
+                if capture:
+                    self.journal.record_opportunity(
+                        self.market, book, "entry_window_closed", outcome, self.settings
+                    )
+                return
+            plan = self._entry_plan(book, outcome, account)
+            if plan is None:
+                return
+
         except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
             if not _unavailable_book(exc):
                 raise
@@ -265,23 +277,6 @@ class TradingBot:
                 )
             self._wait_for_data(exc)
             return
-        try:
-            self.journal.risk_check(plan.budget)
-        except (ValueError, RuntimeError):
-            if capture:
-                self.journal.record_opportunity(
-                    self.market, book, "risk_rejected", outcome, self.settings
-                )
-            return
-        if self.live:
-            account = self._account_guard()
-            if account.buying_power < plan.budget:
-                if capture:
-                    self.journal.record_opportunity(
-                        self.market, book, "insufficient_buying_power", outcome, self.settings
-                    )
-                logger.info("Entry skipped: insufficient USD buying power")
-                return
         if self.journal.reserve_entry(plan, self.market.end, settings=self.settings):
             if capture:
                 self.journal.record_opportunity(
@@ -293,6 +288,65 @@ class TradingBot:
     def _in_entry_window(self) -> bool:
         elapsed = (datetime.now(timezone.utc) - self.market.start).total_seconds()
         return self.settings["entry_start_seconds"] <= elapsed < self.settings["entry_end_seconds"]
+
+    def _entry_plan(self, book, outcome, account):
+        capture = self._in_entry_window()
+        if account.bankroll is None:
+            logger.info(
+                "Entry skipped: bankroll unavailable; cash or position valuation is invalid"
+            )
+            if capture:
+                self.journal.record_opportunity(
+                    self.market, book, "bankroll_unavailable", outcome, self.settings
+                )
+            return None
+        try:
+            budget, reason = self.journal.entry_budget(account.bankroll, account.buying_power)
+        except (ValueError, RuntimeError) as exc:
+            logger.info("Entry skipped: {}", exc)
+            if capture:
+                self.journal.record_opportunity(
+                    self.market, book, "risk_rejected", outcome, self.settings
+                )
+            return None
+        logger.info(
+            "Entry sizing | bankroll=${} | target=${} | budget=${} | exposure=${} | "
+            "buying power=${} | limit={}",
+            account.bankroll,
+            account.bankroll * ENTRY_BANKROLL_FRACTION,
+            budget,
+            self.journal.exposure(),
+            account.buying_power,
+            reason,
+        )
+        if budget <= 0:
+            if capture:
+                self.journal.record_opportunity(
+                    self.market,
+                    book,
+                    "insufficient_buying_power" if reason == "buying power" else "risk_rejected",
+                    outcome,
+                    self.settings,
+                )
+            return None
+        try:
+            plan = self.exchange.buy_plan(self.market, book, outcome, budget)
+        except ValueError as exc:
+            logger.info("Entry skipped: {}", exc)
+            if capture:
+                self.journal.record_opportunity(
+                    self.market, book, "plan_rejected", outcome, self.settings
+                )
+            return None
+        try:
+            self.journal.risk_check(plan.budget, account.bankroll)
+        except (ValueError, RuntimeError):
+            if capture:
+                self.journal.record_opportunity(
+                    self.market, book, "risk_rejected", outcome, self.settings
+                )
+            return None
+        return plan
 
     def _execute(self, plan, market) -> None:
         if self.live:

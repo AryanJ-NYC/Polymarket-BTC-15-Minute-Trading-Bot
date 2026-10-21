@@ -85,7 +85,7 @@ def test_unknown_fee_remains_unknown_after_zero_settlement(venue, clock, tmp_pat
     assert result["win_rate"] is None
     assert result["unresolved"][0]["issues"]
     with pytest.raises(RuntimeError, match="unknown or disputed"):
-        journal.risk_check(Decimal("1"))
+        journal.risk_check(Decimal("1"), Decimal("100"))
     journal.close()
 
 
