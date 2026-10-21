@@ -24,7 +24,10 @@ from pathlib import Path
 import httpx
 
 from core.strategy_brain.context import ContextRefresher
-from core.strategy_brain.strategies.btc_15min_strategy import BTCStrategy15Min
+from core.strategy_brain.strategies.btc_15min_strategy import (
+    BASELINE_POLICY_VERSION,
+    BTCStrategy15Min,
+)
 from execution.market_stream import MarketStream
 from execution.polymarket_client import PolymarketClient
 
@@ -197,7 +200,7 @@ def main() -> int:
         "duration_s": elapsed,
         "requested_duration_s": args.duration,
         "sample_interval_s": SAMPLE_INTERVAL,
-        "strategy": {"policy_version": "btc-15m-fusion-v1", "model": None},
+        "strategy": {"policy_version": BASELINE_POLICY_VERSION, "model": None},
         "fatal_error_class": fatal,
         "baseline_worker_stopped": baseline is None or not baseline.is_alive(),
         "subscriptions": subscriptions,

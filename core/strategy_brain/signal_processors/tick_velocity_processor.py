@@ -1,41 +1,9 @@
-"""
-Tick Velocity Signal Processor
-Measures how fast the Polymarket UP probability is moving in the
-last 60 seconds before the trade window opens.
+"""Heuristic contract returns over the quote's preceding 30 and 60 seconds.
 
-WHY THIS WORKS:
-  If the "Up" probability moves from 0.50 → 0.57 in the last 45 seconds,
-  BEFORE your bot even looks at it, that reflects real order flow from
-  other traders reacting to BTC spot movement. The probability is being
-  pushed by real money, and it often continues in the same direction
-  for at least another 30–60 seconds.
-
-  This is "price action" on the Polymarket itself — not a lagging
-  external indicator. It's the most direct signal available.
-
-HOW IT WORKS:
-  The strategy stores a rolling tick buffer:
-    self._tick_buffer = deque of {'ts': datetime, 'price': Decimal}
-
-  This processor receives that buffer via metadata['tick_buffer'].
-
-  It computes:
-    1. 60s velocity  = (now_price - price_60s_ago) / price_60s_ago
-    2. 30s velocity  = (now_price - price_30s_ago) / price_30s_ago
-    3. Acceleration  = 30s_velocity - (60s_velocity - 30s_velocity)
-                       (is it speeding up or slowing down?)
-
-  Signal thresholds (for 0–1 probability prices):
-    velocity > +1.5%  in 60s → BULLISH
-    velocity < -1.5%  in 60s → BEARISH
-    acceleration bonus: if move is accelerating → higher confidence
-
-INTEGRATION:
-  In bot.py on_quote_tick(), add:
-    self._tick_buffer.append({'ts': now, 'price': mid_price})
-
-  In _fetch_market_context(), add:
-    metadata['tick_buffer'] = list(self._tick_buffer)
+The current price and the lookback endpoints use observation timestamps, not
+wall-clock decision time. Endpoints use the nearest sampled quote within 15s of
+the target, as before; a missing endpoint supplies no return. The confidence
+and acceleration adjustment are heuristic scores, not settlement probabilities.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -54,11 +22,7 @@ from core.strategy_brain.signal_processors.base_processor import (
 
 
 class TickVelocityProcessor(BaseSignalProcessor):
-    """
-    Measures Polymarket probability velocity over the last 60 seconds.
-
-    Fast moves in probability = real order flow = tradeable signal.
-    """
+    """Measure recent contract-price changes at their observation times."""
 
     def __init__(
         self,
@@ -123,7 +87,8 @@ class TickVelocityProcessor(BaseSignalProcessor):
             )
             return None
 
-        now = datetime.now(timezone.utc)
+        # The current price belongs to this quote, not the later decision time.
+        now = metadata["observation_time"]
         curr = float(current_price)
 
         # Get historical prices from the buffer

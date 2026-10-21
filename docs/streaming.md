@@ -111,7 +111,7 @@ it adds no production testing interface. Natural outages and induced transport
 closure are distinguished in the report. If injection cannot close a connection,
 the report records it as unavailable or failed instead of fabricating recovery.
 
-The stream lane runs the default `btc-15m-fusion-v1` policy with `model=None`
+The stream lane runs the default `btc-15m-fusion-v2` policy with `model=None`
 read-only, recording each outcome, feature-sample count, calculation duration,
 and receipt-to-decision latency. It does not measure the optional probability
 model's inference or EV selection, account-based sizing, or order submission. Its

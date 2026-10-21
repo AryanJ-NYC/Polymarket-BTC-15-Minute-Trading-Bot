@@ -1,6 +1,6 @@
 # Supporting strategy context
 
-The default `btc-15m-fusion-v1` strategy uses optional Coinbase BTC spot,
+The default `btc-15m-fusion-v2` strategy uses optional Coinbase BTC spot,
 Alternative.me Fear & Greed sentiment, and Deribit BTC options context. One
 in-process refresher fetches those public sources in the background. The serial
 trading loop selects one snapshot for each entry decision and reads it immediately;
@@ -48,6 +48,33 @@ success available. Failure never renews that success's receipt/source timestamps
 and retention ends when its freshness limit is reached. Recovery publishes a
 complete successful value atomically. A previously selected decision snapshot
 does not change when another refresh finishes.
+
+## Baseline feature timing
+
+Contract velocity measures 30s and 60s returns ending at the current quote's
+provider timestamp, even when decision processing occurs later. Each historical
+endpoint is the nearest sampled quote within 15s of its target. Missing endpoints
+remain unavailable. The existing five-sample contract momentum and 20-sample
+spike calculations remain count-based, with the same three-second sampling and
+20-observation warmup.
+
+Spot momentum compares distinct observations about 30s apart (nearest within 5s).
+The divergence processor retains at most 20 observations from the latest 60s of
+spot history. It uses source time when supplied, otherwise the refresher's receipt
+time; repeated cached reads do not add observations. This prevents old contracts'
+entry-time spot values from becoming a current return. Restart or missing lookback
+history yields no divergence signal while fresh spot history warms up. When spot
+itself is unavailable, the existing contract-momentum fallback remains in use.
+Coinbase's response has no source time, so receipt time cannot establish upstream
+price latency. Source expiry and failure handling remain the refresher's job.
+
+The saved policy version is `btc-15m-fusion-v2`; its `min_consensus: 50` is an
+exclusive threshold, and the dominant direction must support the .60/.40 favorite.
+Fusion consensus is the dominant share of weight × confidence × strength
+contributions. Fusion confidence is the mean indicator confidence. Neither score
+estimates settlement probability. Options use the validated short-dated PCR,
+including zero; the parser supplies the overall ratio only when short call open
+interest is absent. Existing sizing, entry timing, and risk limits are unchanged.
 
 ## Provider failures and lifecycle
 

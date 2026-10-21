@@ -310,7 +310,7 @@ def test_varying_rest_and_stream_replay_preserves_real_feature_horizons_and_deci
     features = []
     for strategy in (streamed, rest):
         history = [tick["price"] for tick in strategy.ticks]
-        metadata = {"tick_buffer": list(strategy.ticks)}
+        metadata = {"tick_buffer": list(strategy.ticks), "observation_time": stream_book.timestamp}
         spike = SpikeDetectionProcessor()
         assert spike.process(history[-1], history[-19:], metadata) is None
         spike_signal = spike.process(history[-1], history, metadata)

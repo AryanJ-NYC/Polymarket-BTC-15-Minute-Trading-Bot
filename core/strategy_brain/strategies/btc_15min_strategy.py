@@ -9,6 +9,7 @@ from time import monotonic
 from loguru import logger
 
 from core.strategy_brain.fusion_engine.signal_fusion import SignalFusionEngine
+from core.strategy_brain.signal_processors.base_processor import SignalDirection
 from core.strategy_brain.signal_processors.deribit_pcr_processor import DeribitPCRProcessor
 from core.strategy_brain.signal_processors.divergence_processor import PriceDivergenceProcessor
 from core.strategy_brain.signal_processors.orderbook_processor import OrderBookImbalanceProcessor
@@ -70,6 +71,7 @@ class BTCStrategy15Min:
             return None
         prices = [tick["price"] for tick in self.ticks]
         metadata = {
+            "observation_time": book.timestamp,
             "tick_buffer": list(self.ticks),
             "order_book": book.signal_book(),
             "momentum": float((prices[-1] - prices[-5]) / prices[-5]),
@@ -79,6 +81,9 @@ class BTCStrategy15Min:
         context = context or {}
         if context.get("spot", {}).get("available"):
             metadata["spot_price"] = context["spot"]["value"]
+            metadata["spot_timestamp"] = context["spot"].get("source_timestamp") or context[
+                "spot"
+            ].get("received_at")
         if context.get("sentiment", {}).get("available"):
             metadata.update(context["sentiment"]["value"])
         if context.get("options", {}).get("available"):
@@ -88,8 +93,9 @@ class BTCStrategy15Min:
             signal = processor.process(book.mid, prices, metadata)
             if signal:
                 signals.append(signal)
-        fused = self.fusion.fuse_signals(signals, min_signals=1, min_score=40)
-        if fused is None:
+        fused = self.fusion.fuse_signals(signals, min_signals=1, min_score=50)
+        expected = SignalDirection.BULLISH if outcome == "up" else SignalDirection.BEARISH
+        if fused is None or fused.score <= 50 or fused.direction != expected:
             return None
         logger.info(
             "Decision: {} with {} signals (consensus {:.0f}, confidence {:.0%})",
@@ -99,3 +105,6 @@ class BTCStrategy15Min:
             fused.confidence,
         )
         return outcome
+
+
+BASELINE_POLICY_VERSION = "btc-15m-fusion-v2"

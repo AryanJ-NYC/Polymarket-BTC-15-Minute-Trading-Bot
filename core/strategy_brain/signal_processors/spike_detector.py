@@ -1,17 +1,8 @@
-"""
-Spike Detection Signal Processor
-Detects sudden price movements in Polymarket UP probability and generates signals.
+"""Heuristic signals from sampled contract prices.
 
-FIX: Original threshold was 15% deviation, designed for dollar prices.
-     Polymarket prices are probabilities (0.0-1.0), so:
-       - "Normal" range at market open: 0.40-0.60
-       - A 15% deviation from MA of 0.50 = price must reach 0.575 or 0.425
-       - This rarely fires, making the detector useless at market open
-
-     New approach:
-       - Spike threshold: 5% deviation (not 15%) — meaningful for probabilities
-       - Also detect VELOCITY (fast moves in the last 3 ticks)
-       - Mean reversion logic is still correct: spike up → BEARISH, spike down → BULLISH
+The existing policy fades deviations from a 20-sample moving average and follows
+three-sample price changes. These are count-based horizons, not fixed durations;
+continuation and reversion are hypotheses, not established trading edges.
 """
 
 from datetime import datetime
@@ -36,12 +27,11 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
     Two detection modes:
     1. MA DEVIATION: Price deviates >5% from 20-period MA → mean reversion
     2. VELOCITY SPIKE: Price moves >3% in last 3 ticks → momentum continuation
-       (short bursts often continue briefly before reverting)
 
     Direction logic:
     - Deviation spike UP → expect reversion → BEARISH
     - Deviation spike DOWN → expect reversion → BULLISH
-    - Velocity spike UP → momentum continuation → BULLISH (for first ~30s)
+    - Velocity spike UP → momentum continuation → BULLISH
     - Velocity spike DOWN → momentum continuation → BEARISH
     """
 

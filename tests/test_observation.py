@@ -369,6 +369,7 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
         "exchange_closed",
     ]
     summary = json.loads((output / "summary.json").read_text())
+    assert summary["strategy"] == {"policy_version": "btc-15m-fusion-v2", "model": None}
     assert summary["context"]["requests"] == 3
     assert summary["read_only"]["account_calls"] == 0
     assert summary["read_only"]["order_calls"] == 0
@@ -377,7 +378,9 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
         rows = observer._read_rows(output / "stream.jsonl")
         assert [row["context"] for row in rows] == selected
         assert summary["context"]["decision_snapshots"] == len(selected)
-    assert "Supporting context" in (output / "report.md").read_text()
+    report = (output / "report.md").read_text()
+    assert "Supporting context" in report
+    assert "Decision policy: btc-15m-fusion-v2; model=None (default fusion)." in report
 
 
 def _context_snapshot():
