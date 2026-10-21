@@ -200,11 +200,11 @@ class TradeJournal:
             before = resolution.get("beforePosition", {})
             if before.get("cost") is not None and data["entry_cost"] is not None:
                 if amount(before["cost"]) != number(data["entry_cost"]):
-                    issues.append("Resolution cost differs from recorded entry cost")
+                    issues.append(RESOLUTION_COST_ISSUE)
             fees = [o["fee"] for o in data["orders"] if o["action"] == "BUY"]
             if before.get("fees") is not None and all(fee is not None for fee in fees):
                 if amount(before["fees"]) != sum((number(fee) for fee in fees), Decimal("0")):
-                    issues.append("Resolution fees differ from collected order fees")
+                    issues.append(RESOLUTION_FEE_ISSUE)
         elif resolution and has_exit_fill:
             before = resolution.get("beforePosition", {})
             if before.get("cost") is not None or before.get("fees") is not None:
@@ -233,10 +233,10 @@ class TradeJournal:
         """Funded remaining entry cost plus pending BUY reservations."""
         exposure = Decimal("0")
         for row in self.records():
-            if row.get("accounting_issues") or row["entry_cost"] is None:
+            entry_cost = _risk_entry_cost(row)
+            if entry_cost is None:
                 raise RuntimeError("Actual costs are unknown or disputed; reconcile before trading")
             quantity = number(row["quantity"])
-            entry_cost = number(row["entry_cost"])
             if quantity:
                 bought = sum(
                     (
@@ -265,7 +265,7 @@ class TradeJournal:
         rows = self.records()
         if any(row["pending"] for row in rows):
             raise RuntimeError("An order is unresolved; reconcile it before any further trading")
-        if any(row.get("accounting_issues") or row["entry_cost"] is None for row in rows):
+        if any(_risk_entry_cost(row) is None for row in rows):
             raise RuntimeError("Actual costs are unknown or disputed; reconcile before trading")
         if sum(row["state"] == "open" for row in rows) >= 5:
             return Decimal("0"), "5 open-position limit"
@@ -332,14 +332,57 @@ def _pack_plan(plan: Plan) -> dict:
 
 def _daily_room(rows: list[dict], bankroll: Decimal) -> Decimal:
     today = datetime.now(timezone.utc).date().isoformat()
-    losses = sum(
-        min(Decimal("0"), number(row["pnl"]))
-        for row in rows
-        if row.get("closed_at", "").startswith(today) and row["pnl"] is not None
-    )
+    losses = Decimal("0")
+    for row in rows:
+        if not row.get("closed_at", "").startswith(today):
+            continue
+        pnl = row["pnl"]
+        if (pnl is None or row.get("accounting_issues")) and row["state"] == "closed":
+            entry_cost = _risk_entry_cost(row)
+            if entry_cost is not None and row["proceeds"] is not None:
+                pnl = number(row["proceeds"]) - entry_cost
+        if pnl is not None:
+            losses += min(Decimal("0"), number(pnl))
     # Preserve the existing conservative daily guard, even after partial exits.
     at_risk = sum(number(row["entry_cost"]) for row in rows if row["state"] == "open")
     return bankroll * DAILY_LOSS_FRACTION + losses - at_risk
+
+
+def _risk_entry_cost(row: dict) -> Decimal | None:
+    """Keep small, settled fee disputes visible without permanently blocking entries."""
+    if row["entry_cost"] is None:
+        return None
+    entry_cost = number(row["entry_cost"])
+    issues = set(row.get("accounting_issues", []))
+    if not issues:
+        return entry_cost
+    if (
+        issues - {RESOLUTION_COST_ISSUE, RESOLUTION_FEE_ISSUE}
+        or row["state"] != "closed"
+        or number(row["quantity"]) != 0
+        or row["pending"]
+        or row["proceeds"] is None
+    ):
+        return None
+    resolution = (row.get("settlement") or {}).get("resolution") or {}
+    before = resolution.get("beforePosition", {})
+    fees = [order["fee"] for order in row["orders"] if order["action"] == "BUY"]
+    if (
+        before.get("cost") is None
+        or before.get("fees") is None
+        or not fees
+        or any(fee is None for fee in fees)
+    ):
+        return None
+    provider_cost = amount(before["cost"])
+    fee_difference = amount(before["fees"]) - sum((number(fee) for fee in fees), Decimal("0"))
+    if (
+        abs(fee_difference) > SETTLEMENT_FEE_TOLERANCE
+        or provider_cost - entry_cost != fee_difference
+    ):
+        return None
+    # Budget the higher claim, but never turn it into an asserted exact P&L.
+    return max(entry_cost, provider_cost)
 
 
 def _money(value: Decimal | None) -> str | None:
@@ -350,3 +393,8 @@ def _net(proceeds: Decimal | None, entry_cost: str | None) -> str | None:
     if proceeds is None or entry_cost is None:
         return None
     return str(proceeds - number(entry_cost))
+
+
+SETTLEMENT_FEE_TOLERANCE = Decimal("0.01")
+RESOLUTION_COST_ISSUE = "Resolution cost differs from recorded entry cost"
+RESOLUTION_FEE_ISSUE = "Resolution fees differ from collected order fees"

@@ -77,3 +77,37 @@ Full checks were rerun after review fixes and again after rebasing onto PR #11.
 No deployed/Preview, production-journal write or real-trade claim is made.
 Provider outreach is prepared and unsent unless separately authorized by the
 user. The unresolved fee amount remains tracked by issue #13.
+
+## Follow-up: accepted sub-cent fee difference
+
+- Delta base: `218f6f6b692c1b584c32a216c5fa2d1c0e6e2280`, existing PR #15 head.
+- User explicitly accepts $0.007 for this side project and requests a narrower
+  entry guard. Scope: journal admission/exposure/daily-loss calculations,
+  captured-response regression, policy boundary/restart tests, README and notes.
+- Success: accepted equal fee/cost differences up to $0.01 on a fully closed
+  known-cost trade allow another entry without clearing evidence or exact-P&L
+  uncertainty; the higher-cost loss still consumes daily capacity. Unknown,
+  larger, unrelated, pending or open-position issues remain blocking.
+- Main owns all commands. Independent code-health/code-pruning, design-integrity
+  and spec lanes review only this follow-up delta; file inspection is allowed,
+  but no edits, verification reruns, credentials or external/provider actions.
+- Design scenario: an existing disputed row after restart and the one-cent
+  boundary must work without persistent acceptance flags, migration or a new
+  production parameter. Keep this one policy inside the existing journal.
+- No provider contact or production mutation is authorized by this follow-up.
+  The historical evidence remains unchanged; provider interpretation is still
+  unresolved. Fallow/React Doctor/Impeccable remain inapplicable to Python CLI.
+
+Follow-up results: **220 tests passed** (including 21 captured-evidence cases
+and 9 new policy boundary/restart/guard cases). Ruff lint/format, compileall,
+pip check, local Markdown links and git whitespace checks passed. Every saved
+issue JSON evidence file matches the previous PR head byte for byte.
+
+Code-health/code-pruning, design-integrity and spec lanes ran concurrently with
+main-owned verification and returned no findings. No additional abstractions,
+persistent flags or production parameters were introduced. The shared private
+risk-cost calculation localizes acceptance and conservative loss handling;
+SQLite reopen tests exercise the real journal interface. No deletions or
+deferrals were justified. External-provider, frontend and deployment lanes were
+not needed for this local journal policy change. No production row was edited,
+service controlled, financial order sent, or provider message sent.

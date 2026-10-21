@@ -261,3 +261,9 @@ official settlement. It preserves missing amounts and disagreements, deduplicate
 fills, and prints JSON with source fields/timestamps. It does not correct a
 journal or establish a cash debit from conflicting records. See the
 [issue #13 findings and remaining provider evidence](docs/verification-issue-13.md).
+
+A fully settled trade's fee dispute does not block new entries when the
+resolution fee and total cost differ from collected-order accounting by the
+same amount, up to $0.01. The report keeps the dispute and unknown exact P&L;
+the daily loss budget uses the higher entry cost. Missing amounts, unsettled
+orders, other accounting issues, and larger differences still require review.

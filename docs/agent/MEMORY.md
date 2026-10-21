@@ -106,3 +106,10 @@
   code-health/design/spec reviews completed; intent identity and synthetic Down
   principal findings fixed. Historical cash confirmation still requires the
   provider; request text is prepared, with no outreach or journal write implied.
+- User follow-up supersedes the blanket dispute stop: this is a side project,
+  and the $0.007 fee discrepancy is accepted. Closed zero-quantity trades with
+  known amounts and only equal fee/cost differences up to $0.01 may pass entry
+  guards. Keep exact P&L disputed and original source fields; budget the higher
+  entry cost against daily losses. Unknown amounts/orders, partial/open positions,
+  unrelated issues and larger/inconsistent deltas still stop. Derive this at read
+  time so already-recorded rows need no repair/migration. No email is authorized.

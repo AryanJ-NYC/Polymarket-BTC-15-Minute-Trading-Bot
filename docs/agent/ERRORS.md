@@ -60,3 +60,8 @@
   data. After-resolution null fees do not mean zero. Decimal strings can retain
   different trailing-zero precision; compare Decimal values when verifying
   arithmetic rather than changing production serialization to satisfy a test.
+- Small-fee policy follow-up: allowing a closed disputed row through entry
+  guards while leaving pnl=null would omit its loss from the daily budget.
+  Derive the budget loss from known proceeds and the higher entry-cost claim,
+  preserving the report's null exact P&L. Boundary/restart/UTC-day tests cover
+  this; accepting a discrepancy must not silently restore daily loss capacity.

@@ -10,8 +10,9 @@ P&L remain disputed.** Public definitions do not establish why these disagree
 or which amount was actually posted to cash. No precedence rule was invented.
 
 The implemented [read-only reconciliation command](../reconcile_order.py)
-collects this evidence reproducibly. The trading runner's conservative
-accounting/admission behavior is preserved. No production journal correction,
+collects this evidence reproducibly. The user subsequently accepted this small
+discrepancy; the admission policy is narrowed as described below. No production
+journal correction,
 service operation, account mutation, or new trade was performed.
 
 ## Exact target and source evidence
@@ -123,6 +124,25 @@ been sent**:
 > fields' units/rounding and whether realized includes fees, and identify
 > which amount was posted to cash and any corrected record.
 
+## Accepted small fee discrepancy
+
+The user explicitly accepted the $0.007 discrepancy for this side project and
+asked to stop blocking new trades over it. A settled trade may now pass entry
+guards when its only accounting issues are the resolution fee/cost differences,
+all relevant amounts are known, and both differences equal the same amount
+within $0.01. The position must be closed with zero remaining quantity and no
+pending order. This policy also recognizes already-recorded disputed rows after
+restart, without clearing their evidence or rewriting their accounting.
+
+Exact `pnl` stays null and the saved actual-results reports remain disputed.
+For the daily loss budget, the policy uses proceeds minus the **higher** of the
+order-derived and resolution entry costs: this loss counts as $0.9855, rather
+than disappearing from the budget because its exact P&L is unavailable.
+Missing fees/costs, larger or inconsistent differences, other accounting issues,
+pending submissions and open positions do not qualify for this exception.
+No provider contact, production correction, restart or trading activation is
+part of this policy change.
+
 ## Code and actual-results handling
 
 Run without starting or resuming a trading process:
@@ -159,12 +179,14 @@ recovery copy, guarded change, and independent readback under separate authority
 
 The captured-response workflow tests exercise the actual source shape through
 the SDK HTTP MockTransport, clock, recovery, journal and report interfaces;
-they verify retained dispute/admission blocking and no double-counted costs.
+they verify retained disputes, the accepted small-fee exception, continued
+blocking for missing/larger discrepancies, and no double-counted costs.
 Additional cases cover missing versus zero collected fees, Down prices,
 duplicate snapshots, incomplete quantity/notional, busted history, currency,
 identity and pagination errors. All HTTP requests in these tests must be GETs.
 The command was also executed against the actual target using the real SDK.
 
 Final automated verification and independent review results are recorded in
-[the review packet](agent/ISSUE-13-REVIEW.md). No frontend/deployment QA or
-live-money execution is applicable to this read-only CLI change.
+[the review packet](agent/ISSUE-13-REVIEW.md). No frontend changed. The admission
+policy was verified locally; no deployment or new live-money execution was
+performed for this change.

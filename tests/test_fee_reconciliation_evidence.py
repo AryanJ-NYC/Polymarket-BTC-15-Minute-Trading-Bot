@@ -71,8 +71,14 @@ def test_captured_fee_disagreement_survives_recovery_and_report(
         assert resolution["afterPosition"]["fees"] is None
         assert Decimal(row["settlement_proceeds"]) == 0
         assert row["pnl"] is None
-        with pytest.raises(RuntimeError, match="unknown or disputed"):
+        if collected_fee == "0.0200":
             journal.risk_check(Decimal("1"), Decimal("100"))
+            assert journal.exposure() == 0
+            # Keep the disputed loss in the daily budget at the higher cost.
+            assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("0.0145")
+        else:
+            with pytest.raises(RuntimeError, match="unknown or disputed"):
+                journal.risk_check(Decimal("1"), Decimal("100"))
         report = subprocess.run(
             [
                 sys.executable,
