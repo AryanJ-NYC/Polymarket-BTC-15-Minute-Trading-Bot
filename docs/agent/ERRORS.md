@@ -65,3 +65,9 @@
   Derive the budget loss from known proceeds and the higher entry-cost claim,
   preserving the report's null exact P&L. Boundary/restart/UTC-day tests cover
   this; accepting a discrepancy must not silently restore daily loss capacity.
+- PR #15 diagnostics: exact avgPx × quantity equality falsely disputed a valid
+  multi-fill principal ($2.1399 from rounded average versus $2.14 from fills).
+  Derive completed principal from executions; keep order-implied values separate.
+  Cache-bust order retries and every history page so fresh settlement cannot be
+  paired with a cached pre-adjustment record. Negative commissions need role
+  validation: taker negatives are invalid, but maker rebates are documented.

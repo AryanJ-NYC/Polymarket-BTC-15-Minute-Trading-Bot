@@ -169,9 +169,12 @@ def test_reconciliation_keeps_market_filter_through_paginated_history(venue, cap
     evidence, responses, _ = captured_provider
     resolution, trade = responses["/v1/portfolio/activities"]["activities"]
     cursors = []
+    freshness = []
 
     def handle(request):
         assert request.method == "GET"
+        freshness.append(request.url.params.get("_ts"))
+        assert freshness[-1]
         if request.url.path != "/v1/portfolio/activities":
             return httpx.Response(200, json=responses[request.url.path])
         assert request.url.params["marketSlug"] == evidence["market_slug"]
@@ -190,6 +193,7 @@ def test_reconciliation_keeps_market_filter_through_paginated_history(venue, cap
     venue.sdk._http = httpx.Client(transport=httpx.MockTransport(handle))
     result = reconcile_order(venue.client, evidence["order_id"])
     assert cursors == [None, "next"]
+    assert len(set(freshness)) == len(freshness)
     assert len(result["sources"]["matching_trades"]) == len(result["sources"]["resolutions"]) == 1
     assert result["execution_collected_fee_usd"] == "0.0200"
 
@@ -227,6 +231,85 @@ def test_reconciliation_uses_outcome_cost_for_down_entries(venue, captured_provi
     assert result["authoritative_cash_debit_usd"] is None
 
 
+def test_reconciliation_uses_execution_principal_for_rounded_multi_fill_average(
+    venue, captured_provider
+):
+    evidence, responses, _ = captured_provider
+    order = responses[f"/v1/order/{evidence['order_id']}"]["order"]
+    order.update(quantity=3, cumQuantity=3, avgPx={"value": "0.7133", "currency": "USD"})
+    order["price"]["value"] = "0.75"
+    order["commissionNotionalTotalCollected"]["value"] = "0.03"
+    activities = responses["/v1/portfolio/activities"]["activities"]
+    resolution, original_trade = activities
+    first, second = copy.deepcopy(original_trade), copy.deepcopy(original_trade)
+    for activity, trade_id, quantity, price, fee, cost in (
+        (first, "fill-1", "2", "0.70", "0.02", "1.42"),
+        (second, "fill-2", "1", "0.74", "0.01", "0.75"),
+    ):
+        trade = activity["trade"]
+        trade.update(id=trade_id, qtyDecimal=quantity)
+        trade["price"]["value"] = price
+        trade["cost"]["value"] = cost
+        execution = trade["aggressorExecution"]
+        execution.update(id=f"exec-{trade_id}", tradeId=trade_id, lastShares=quantity)
+        execution["order"] = copy.deepcopy(order)
+        execution["lastPx"]["value"] = price
+        execution["commissionNotionalCollected"]["value"] = fee
+    before = resolution["positionResolution"]["beforePosition"]
+    before["netPositionDecimal"] = "3"
+    before["cost"]["value"] = "2.17"
+    before["fees"]["value"] = "0.03"
+    before["baseCost"]["value"] = "2.14"
+    activities[:] = [resolution, first, second]
+    result = reconcile_order(venue.client, evidence["order_id"])
+    assert result["status"] == "corroborated_provider_records"
+    assert Decimal(result["order_notional_usd"]) == Decimal("2.1399")
+    assert Decimal(result["order_implied_entry_cost_usd"]) == Decimal("2.1699")
+    assert Decimal(result["execution_notional_usd"]) == Decimal("2.14")
+    assert Decimal(result["execution_implied_entry_cost_usd"]) == Decimal("2.17")
+    assert result["authoritative_cash_debit_usd"] is None
+
+
+@pytest.mark.parametrize("negative_source", ["order", "execution", "both"])
+def test_reconciliation_rejects_negative_collected_taker_fees(
+    venue, captured_provider, negative_source
+):
+    evidence, responses, _ = captured_provider
+    order = responses[f"/v1/order/{evidence['order_id']}"]["order"]
+    activities = responses["/v1/portfolio/activities"]["activities"]
+    trade = activities[1]["trade"]
+    if negative_source in {"order", "both"}:
+        order["commissionNotionalTotalCollected"]["value"] = "-0.02"
+    if negative_source in {"execution", "both"}:
+        trade["aggressorExecution"]["commissionNotionalCollected"]["value"] = "-0.02"
+    trade["aggressorExecution"]["order"] = copy.deepcopy(order)
+    before = activities[0]["positionResolution"]["beforePosition"]
+    before["fees"]["value"] = "-0.02"
+    before["cost"]["value"] = trade["cost"]["value"] = "0.9385"
+    with pytest.raises(ValueError, match="negative.*taker"):
+        reconcile_order(venue.client, evidence["order_id"])
+
+
+def test_reconciliation_preserves_documented_negative_maker_rebates(venue, captured_provider):
+    evidence, responses, _ = captured_provider
+    order = responses[f"/v1/order/{evidence['order_id']}"]["order"]
+    order["commissionNotionalTotalCollected"]["value"] = "-0.01"
+    order["tif"] = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+    activities = responses["/v1/portfolio/activities"]["activities"]
+    trade = activities[1]["trade"]
+    execution = trade.pop("aggressorExecution")
+    execution["order"] = copy.deepcopy(order)
+    trade["passiveExecution"] = execution
+    execution["aggressor"] = trade["isAggressor"] = False
+    execution["commissionNotionalCollected"]["value"] = "-0.01"
+    before = activities[0]["positionResolution"]["beforePosition"]
+    before["fees"]["value"] = "-0.01"
+    before["cost"]["value"] = trade["cost"]["value"] = "0.9485"
+    result = reconcile_order(venue.client, evidence["order_id"])
+    assert result["status"] == "corroborated_provider_records"
+    assert Decimal(result["execution_collected_fee_usd"]) == Decimal("-0.01")
+
+
 @pytest.mark.parametrize(
     "fault",
     ["quantity", "notional", "busted", "currency", "market", "cursor", "intent", "baseCost"],
@@ -261,7 +344,7 @@ def test_reconciliation_rejects_or_flags_unreconciled_source_shapes(
         result = reconcile_order(venue.client, evidence["order_id"])
         expected = {
             "quantity": "fill quantity",
-            "notional": "notional",
+            "notional": "cost",
             "busted": "busted",
             "baseCost": "baseCost",
         }[fault]

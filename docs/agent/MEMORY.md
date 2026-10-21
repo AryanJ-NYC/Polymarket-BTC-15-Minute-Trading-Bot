@@ -113,3 +113,10 @@
   entry cost against daily losses. Unknown amounts/orders, partial/open positions,
   unrelated issues and larger/inconsistent deltas still stop. Derive this at read
   time so already-recorded rows need no repair/migration. No email is authorized.
+- PR #15 review follow-up: completed execution principal is authoritative for
+  the diagnostic's arithmetic, while rounded-avgPx order claims remain separate.
+  Reject negative taker commissions without rejecting documented maker rebates.
+  Known-order reads retain bounded recovery and now use the existing fresh GET;
+  activity pagination gets a new _ts on every page. Small-fee admission policy
+  is unchanged. Completed issue PRs should use a closing keyword, verify the
+  closingIssuesReferences, and let merge close the issue rather than only Refs.

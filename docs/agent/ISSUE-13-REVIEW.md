@@ -111,3 +111,33 @@ SQLite reopen tests exercise the real journal interface. No deletions or
 deferrals were justified. External-provider, frontend and deployment lanes were
 not needed for this local journal policy change. No production row was edited,
 service controlled, financial order sent, or provider message sent.
+
+## GitHub review receipt
+
+Head received: `c423d69768e35baa2f6bf73f4d7026e42a731d7f`; same-repo writable
+branch verified against a clean isolated checkout and authenticated gh account.
+The receive-pr-review helper fetched all conversation/review/thread connections.
+
+| Thread / comment | Disposition | Verification |
+| --- | --- | --- |
+| `PRRT_kwDOVSlGns6u9VSn` / `4342102192` | Fix rounded multi-fill comparison by deriving principal/cost from completed fills; preserve rounded order claims separately. | Rounded $0.7133 average regression: order implies $2.1399 principal, fills correctly produce $2.14 and $2.17 cost without a false dispute. |
+| `PRRT_kwDOVSlGns6u9VSq` / `4342102197` | Reject negative taker execution fees and negative all-taker order totals; preserve confirmed maker rebates. | Three negative taker cases and a documented maker rebate case through HTTP. |
+| `PRRT_kwDOVSlGns6u9VSs` / `4342102199` | Use fresh GET in existing bounded order-retry path and a unique _ts for every activity page. | Paginated GET assertions for unique tokens and retained cursor/market; existing order retry tests. |
+
+All three failures were reproduced before the fix: five focused cases failed,
+while the legitimate maker-rebate case passed. Focused post-fix checks passed
+88 tests over captured evidence and exchange protocol/recovery. The one-cent
+admission policy and all historical JSON evidence are unchanged. No new
+runtime parameter, dependency, schema, service or production mutation is added.
+
+The PR body now uses `Closes #13`; GitHub closingIssuesReferences includes #13.
+The issue should close on merge, not before integration. The global preference
+to close completed issues appropriately was saved at the user's explicit request.
+
+Final code verification: **225 tests passed**, including 88 focused protocol/
+captured-evidence checks. Ruff lint/format, compileall, pip check, whitespace and
+local links passed. All historical issue JSON evidence and the accepted small-fee
+policy match the received PR head. The final synthetic maker case also uses a
+consistent GTC order snapshot. Inline dispositions and resolution are recorded
+on the three PR review threads after verified publication; GitHub is the source
+of truth for their current state. No merge or production action is included.

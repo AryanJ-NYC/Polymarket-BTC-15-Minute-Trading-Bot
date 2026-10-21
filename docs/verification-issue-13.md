@@ -154,6 +154,12 @@ python reconcile_order.py --order-id D83GRPYG10JK --env-file /path/to/.env.us
 The command binds each execution to the known order/trade/market, validates
 prices and complete fill quantities, deduplicates execution IDs, totals each
 trade cost once, and compares order, execution, trade, and resolution claims.
+Completed principal and cost come from the individual fills, because rounded
+order `avgPx` can produce a different implied notional for a multi-fill order.
+The report retains the order-implied claims separately. Negative taker fees
+are rejected; confirmed maker rebates retain their documented sign. Every
+order read/retry and activity page uses a unique cache-busting `_ts` query,
+preserving market filters and pagination; settlement was already fetched fresh.
 Missing amounts remain null; explicit zero remains zero. Incomplete pagination,
 wrong identities/currency, conflicting duplicates, busted history, unrelated
 market trades, missing settlement, and ambiguous ownership cannot yield an

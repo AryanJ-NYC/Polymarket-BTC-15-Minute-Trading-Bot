@@ -167,7 +167,7 @@ class PolymarketClient:
         """Read a known ID with bounded recovery; never replay order creation."""
         for attempt in range(3):
             try:
-                order = self.client.orders.retrieve(order_id)["order"]
+                order = self._fresh_get(f"/v1/order/{order_id}")["order"]
                 break
             except (APIConnectionError, APIStatusError) as exc:
                 status = getattr(exc, "status_code", None)

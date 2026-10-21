@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from time import time_ns
 
 from execution.polymarket_client import TERMINAL_STATES, PolymarketClient, amount, number
 
@@ -68,7 +69,15 @@ def reconcile_order(exchange: PolymarketClient, order_id: str) -> dict:
     complete = bool(fills) and filled_quantity == quantity
     if not complete:
         issues.append("Matching execution history does not cover the order fill quantity")
+    if (
+        collected_fee is not None
+        and collected_fee < ZERO
+        and complete
+        and all(execution.get("aggressor") is True for _, execution in fills)
+    ):
+        raise ValueError("Unexpected negative collected taker order fee")
     execution_notional = ZERO
+    execution_fees = []
     for _, execution in fills:
         fill_quantity = number(execution["lastShares"])
         fill_yes_price = amount(execution["lastPx"])
@@ -80,17 +89,15 @@ def reconcile_order(exchange: PolymarketClient, order_id: str) -> dict:
             fill_yes_price if order["intent"] == "ORDER_INTENT_BUY_LONG" else 1 - fill_yes_price
         )
         execution_notional += fill_quantity * fill_price
-    if complete and execution_notional != notional:
-        issues.append("Execution notional differs from cumulative order notional")
-    execution_fee = (
-        _total(
-            [
-                _optional_amount(execution.get("commissionNotionalCollected"))
-                for _, execution in fills
-            ]
-        )
-        if complete
-        else None
+        fee = _optional_amount(execution.get("commissionNotionalCollected"))
+        if fee is not None and fee < ZERO and execution.get("aggressor") is not False:
+            raise ValueError("Unexpected negative collected taker fee or unknown execution role")
+        execution_fees.append(fee)
+    execution_fee = _total(execution_fees) if complete else None
+    # avgPx may be rounded. Complete fills provide the principal for comparison;
+    # retain avgPx-derived order claims separately without requiring exact equality.
+    execution_cost = (
+        execution_notional + execution_fee if complete and execution_fee is not None else None
     )
     # A trade cost and the order total describe the same debit; never add them.
     unique_trades = {trade["id"]: trade for trade, _ in fills}
@@ -105,8 +112,8 @@ def reconcile_order(exchange: PolymarketClient, order_id: str) -> dict:
         issues.append("Collected order/execution fee or trade cost is unavailable")
     if collected_fee is not None and execution_fee is not None and collected_fee != execution_fee:
         issues.append("Collected execution fees differ from collected order fees")
-    if cost is not None and trade_cost is not None and cost != trade_cost:
-        issues.append("Trade cost differs from order-implied entry cost")
+    if execution_cost is not None and trade_cost is not None and execution_cost != trade_cost:
+        issues.append("Trade cost differs from execution-implied entry cost")
     resolution = resolutions[0] if len(resolutions) == 1 else None
     if resolution is None:
         issues.append("Expected one matching position resolution")
@@ -116,9 +123,9 @@ def reconcile_order(exchange: PolymarketClient, order_id: str) -> dict:
         if number(before["netPositionDecimal"]) != expected or number(after["netPositionDecimal"]):
             issues.append("Resolution quantities do not bind this complete entry")
         base_cost = _optional_amount(before.get("baseCost"))
-        if base_cost is not None and base_cost != notional:
-            issues.append("Resolution baseCost differs from order notional")
-        for field, expected_value in (("fees", collected_fee), ("cost", cost)):
+        if complete and base_cost is not None and base_cost != execution_notional:
+            issues.append("Resolution baseCost differs from execution notional")
+        for field, expected_value in (("fees", collected_fee), ("cost", execution_cost)):
             actual = _optional_amount(before.get(field))
             if actual is None:
                 issues.append(f"Resolution {field} is unavailable")
@@ -137,6 +144,8 @@ def reconcile_order(exchange: PolymarketClient, order_id: str) -> dict:
         "order_collected_fee_usd": _money(collected_fee),
         "order_implied_entry_cost_usd": _money(cost),
         "execution_collected_fee_usd": _money(execution_fee),
+        "execution_notional_usd": _money(execution_notional) if complete else None,
+        "execution_implied_entry_cost_usd": _money(execution_cost),
         "trade_cost_usd": _money(trade_cost),
         "official_yes_settlement": _money(settlement),
         "authoritative_cash_debit_usd": None,
@@ -172,7 +181,7 @@ def _activities(exchange: PolymarketClient, slug: str) -> tuple[list[dict], list
     cursor = None
     seen_cursors = set()
     for _ in range(100):
-        query = {"marketSlug": slug, "limit": 100}
+        query = {"marketSlug": slug, "limit": 100, "_ts": str(time_ns())}
         if cursor:
             query["cursor"] = cursor
         page = exchange.client.portfolio.activities(query)
