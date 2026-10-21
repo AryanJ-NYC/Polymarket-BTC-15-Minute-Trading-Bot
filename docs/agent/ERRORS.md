@@ -1,5 +1,19 @@
 # Agent errors and recovery
 
+- PR #11 review: skipping after sizing the first account snapshot prevented the
+  later refresh when equity was unavailable, buying power was zero, or the first
+  budget was below minimum. Three transport/clock regressions reproduced the
+  missed entry in the last eligible second. Make the definitive sizing decision
+  after the second guarded account read and recheck the entry window afterward.
+
+- Bankroll mapping: `assetNotional` is unspecified aggregate notional, and
+  `cashValue` has conflicting PnL/value descriptions. Adding fiat to positive NO
+  position value double-counts short collateral. Use signed YES quantities with
+  fresh marks; $5.70 fiat plus -1 YES at .70 must equal $5, not $6. Account values
+  may be missing or nonfinite; unavailable valuation must not invent zero-priced
+  holdings or prevent otherwise valid exits. Provider sources are linked in the
+  API guide. Tests cover both long and short cash flows.
+
 - The original `requirements.txt` was UTF-16 and pinned the international
   Nautilus stack. The US migration replaces it with a small UTF-8 dependency file.
 - Account balances contain numeric `buyingPower`, unlike order prices, which
@@ -43,3 +57,8 @@
 - Git fetch in the original checkout was denied when writing .git/FETCH_HEAD;
   the narrowly elevated git fetch succeeded. Use an isolated managed worktree
   based on current origin/main to preserve concurrent audit/research changes.
+- Issue #5 regression: an already-closed legacy settlement returned before
+  checking provider resolution fees/cost, preserving false precision. A failing
+  workflow regression reproduced this; compare evidence before the closed-state
+  return and clear exact P&L on discrepancy. Preserve the original order and
+  provider resolution fields for later reconciliation.
