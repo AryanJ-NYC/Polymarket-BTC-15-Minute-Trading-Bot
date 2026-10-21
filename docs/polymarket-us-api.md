@@ -181,9 +181,13 @@ captures and issue-specific run reports remain local or in the issue/PR.
 ## Rate limits and unavailable data
 
 REST limits are shared across endpoints. Honor 429 `Retry-After`, using at least
-a 30-second pause in the runner; the SDK readback path has its own bounded retry
-policy. Treat transient connection, timeout, 404 and 5xx responses as unavailable
-data without inventing prices, liquidity, fees or outcomes.
+a 30-second pause. Account, order, discovery, and outcome-history limits pause
+further REST work across the runner while socket receipt continues. Owned-contract
+metadata and fallback-book limits have per-contract cooldowns so reconciliation
+and other positions can continue. Known-order readback uses bounded retries for
+transient reads; a 429 returns immediately to the runner's cooldown. Treat
+transient connection, timeout, 404 and 5xx responses as unavailable data without
+inventing prices, liquidity, fees or outcomes.
 
 Optional historical outcome lookup runs only after the known current contract's
 entry cutoff, while flat, at most once per 30-second pass. Rotate past missing

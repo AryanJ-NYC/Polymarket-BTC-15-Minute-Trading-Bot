@@ -57,14 +57,29 @@ The trading loop rechecks the latest eligible quote and entry deadline after slo
 context/account work and again around submission. Spending caps, preview
 validation, duplicate reservations, and actual-fill accounting still apply. A
 shutdown signal finishes the current serialized trading tick, then closes the
-receiver, SDK, and journal. Stream closure wakes the receiver and joins its thread;
-a receiver that cannot stop raises an explicit error.
+receiver, journal, and REST client. Stream closure wakes the receiver and joins
+its thread; a receiver that cannot stop raises an explicit error.
 
 Health diagnostics include connection status, subscribed contracts, generation,
 provider/receipt quote age, last-message age, reconnect count, malformed/rejected
 snapshots, and bounded pause reasons. A connection can be healthy while a specific
 contract is waiting for its first eligible snapshot. Inspect both connection
 health and quote availability.
+
+An `OPEN` market can still have a one-sided book with no bids or no offers.
+Such a snapshot fails the same two-sided validation in both stream and REST paths.
+A connected socket with `invalid_snapshot`, an empty executable cache, and a
+rising `malformed` counter can therefore reflect unavailable liquidity rather than
+a broken connection or malformed JSON. Inspect the expected contract, provider
+timestamp, state, and depth on both sides before diagnosing a transport failure.
+The counter includes quote-validation failures, not just invalid message syntax.
+
+Entries wait for an eligible streamed snapshot. Position fallback cannot bypass
+validation; an unavailable quote also skips price-based exits while reconciliation
+and settlement continue under their REST cooldowns. Valid data for the same
+contract or the next rollover restores quote availability automatically. Pending
+orders and account mismatches follow the separate
+[state and recovery rules](../README.md#state-and-recovery).
 
 ## Read-only comparison run
 
