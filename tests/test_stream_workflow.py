@@ -80,6 +80,7 @@ def test_known_order_recovers_during_quote_rate_limit_without_duplicate_submissi
     buy = venue.client.buy_plan(market, book, "up", Decimal("1"))
     journal.reserve_entry(buy, market.end)
     journal.finish_order(market.slug, Decimal("1"), Decimal("0.65"), Decimal("0.01"))
+    venue.positions = {market.slug: {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}}
     stream_feed.disconnect()
     venue.book_limited = True
     trader = bot.TradingBot(venue.client, journal, books, live=True, one_trade=True)
@@ -99,6 +100,7 @@ def test_known_order_recovers_during_quote_rate_limit_without_duplicate_submissi
     assert journal.get(market.slug) == pending
     assert len(venue.book_request_ids) == 1
     venue.on_request = None
+    venue.positions = {market.slug: {"netPositionDecimal": "0.5", "qtyAvailableDecimal": "0.5"}}
     trader.tick()
     recovered = journal.get(market.slug)
     assert recovered["pending"] is None

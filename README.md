@@ -198,10 +198,13 @@ for health fields, outage recovery, sampling, and reproducible measurements.
 
 Live startup checks exchange quantities against the journal and rejects unknown
 positions/open orders. Live settlement also requires paginated provider resolution
-activity with a matching pre-resolution quantity; missing evidence, mismatches,
-and busted trades in that history stop trading. Keep this bot's account activity
-exclusive, including while it is stopped with positions open. Quantity checks
-cannot attribute manual sell-and-rebuy trades that restore the same net holding.
+activity with a matching pre-resolution quantity. Missing evidence for retained
+holdings keeps the journal result pending and pauses new entries while later
+ticks retry; other owned positions can still exit. Resolution activity uses fresh
+queries on every page. Quantity mismatches, ambiguous activity and busted trades
+remain reconciliation stops. Keep this bot's account activity exclusive,
+including while it is stopped with positions open. Quantity checks cannot
+attribute manual sell-and-rebuy trades that restore the same net holding.
 Detected discrepancies require reconciliation; local state is never replaced by
 an assumed settlement just because a provider position disappears.
 
