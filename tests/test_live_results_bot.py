@@ -31,6 +31,10 @@ def test_entry_persists_policy_and_observation_before_submission(venue, journal,
     def checked_submit(plan):
         assert journal.opportunities()[-1]["decision"] == "entry_reserved"
         assert journal.get(plan.slug)["settings"]["stop_loss"] == "-0.30"
+        settings = journal.get(plan.slug)["settings"]
+        assert settings["entry_bankroll_fraction"] == "0.02"
+        assert settings["max_exposure_fraction"] == "0.10"
+        assert settings["daily_loss_fraction"] == "0.10"
         return submit(plan)
 
     monkeypatch.setattr(venue.client, "submit", checked_submit)
@@ -73,7 +77,7 @@ def test_risk_rejection_is_captured_without_new_reservation(venue, journal, monk
     trader = TradingBot(venue.client, journal)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
 
-    def reject(_):
+    def reject(cost, bankroll):
         raise ValueError("Daily loss budget")
 
     monkeypatch.setattr(journal, "risk_check", reject)
@@ -188,15 +192,15 @@ def test_recovered_buy_over_budget_records_actual_fill_then_stops(venue, journal
     row = journal.records()[0]
     assert row["order_id"] == "bot-order-1"
     assert row["pending"] is not None
-    venue.order["commissionNotionalTotalCollected"] = {"value": "0.70", "currency": "USD"}
+    venue.order["commissionNotionalTotalCollected"] = {"value": "1.70", "currency": "USD"}
     monkeypatch.setattr(venue.client, "cancel", cancel)
     with pytest.raises(RuntimeError, match="exceeded its reserved budget"):
         trader.tick()
     recorded = journal.get(row["slug"])
     assert recorded["pending"] is None
     assert Decimal(recorded["quantity"]) == Decimal("0.5")
-    assert Decimal(recorded["entry_cost"]) == Decimal("1.0200")
-    assert Decimal(recorded["orders"][0]["fee"]) == Decimal("0.70")
+    assert Decimal(recorded["entry_cost"]) == Decimal("2.0200")
+    assert Decimal(recorded["orders"][0]["fee"]) == Decimal("1.70")
     assert sum(method == "POST" and path == "/v1/orders" for method, path, _ in venue.calls) == 1
 
 

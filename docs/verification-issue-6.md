@@ -116,3 +116,14 @@ collection is deferred while holding a position or in entry time; its retry curs
 resets on process restart. Entry EV estimates settlement payoff, while existing
 stop-loss/take-profit exits can change realized returns. The actual effect needs
 model-tagged live results, which are not available here.
+
+## Main integration
+
+Merged main `b65d2501b50acafdec01a5d259f69317d26247ad` (bankroll sizing).
+The current limits are 2% entry target, 10% funded exposure and 10% daily loss
+budget, with the five-position guard. Both baseline and model entries use the
+later guarded account read. The earlier $1 EV arithmetic fixtures remain valid
+at their explicitly configured $50 bankroll. Added model transport regressions
+verify refreshed bankroll and buying-power limits. Combined suite:250 passed;
+Ruff lint/format, compileall, pip check and whitespace pass. Earlier live snapshots
+and QA counts above are historical evidence, not new deployed verification.

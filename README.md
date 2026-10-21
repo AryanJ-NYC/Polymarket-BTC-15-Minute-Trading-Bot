@@ -90,11 +90,13 @@ management. An interrupted/unknown submission stops trading for reconciliation.
 - Uses YES-denominated prices for both Up and Down US intents. Down entry cost
   is `1 - YES bid`; Up entry cost is `YES ask`. Prices must match the market tick.
 - Uses limit IOC orders at visible best prices, with fractional quantities
-  rounded down to the market increment and visible depth. **At most $1 per new
-  trade, including a conservative fee reserve.** Never increases spend to meet
-  minimum quantity. Maximum five open positions and $10 total entry exposure.
-- Reserves a UTC daily $5 loss budget against recorded losses plus the full cost
-  of still-open positions and the next order. This is the bot's own ledger, not
+  rounded down to the market increment and visible depth. **Targets at most 2%
+  of current account bankroll per entry, including a conservative fee reserve,
+  with 10% aggregate funded exposure.** Never increases spend to meet minimum
+  quantity. Maximum five open positions.
+- Reserves a UTC daily loss budget of **10% of current bankroll** against recorded
+  losses plus the full cost of still-open positions and the next order. This is
+  the bot's own ledger, not
   a claim about account-wide daily P&L or strategy profitability.
 - Checks for 30% stop loss and 20% take profit using executable exit prices and
   estimated fees. Exits can fill partially. Liquidity, stale books, outages, and
@@ -103,6 +105,55 @@ management. An interrupted/unknown submission stops trading for reconciliation.
   visible top-of-book liquidity fills at the quoted price and estimates fees.
   P&L stays pending until an executable exit or actual exchange settlement.
   It does not invent random wins or mark unresolved settlement as a loss.
+
+### Bankroll sizing
+
+The shared Decimal fractions in `execution/risk.py` are `0.02` (2% per entry),
+`0.10` (10% aggregate exposure), and `0.10` (10% daily loss budget).
+All amounts below are USD:
+
+```text
+bankroll = credited currentBalance + sum(signed YES quantity * fresh YES midpoint)
+exposure = sum(entry cost including fees * remaining quantity / filled entry quantity)
+           + still-unaccounted BUY reservations
+daily loss budget remaining = 0.10 * bankroll - realized losses today (UTC)
+                              - original full entry cost of open trades
+entry budget = max(0, min(0.02 * bankroll, buyingPower,
+                          0.10 * bankroll - exposure, daily loss budget remaining))
+```
+
+This values the entire authenticated account, with short YES quantities negative.
+For example, $95 fiat plus 10 YES shares marked at $0.50 gives $100 bankroll;
+$5.70 fiat with one short YES marked at $0.70 gives $5, without counting locked
+collateral twice. The valuation policy uses fresh validated midquotes; it may
+differ from the provider website's valuation. It adds no `pendingCredit`,
+`unsettledFunds`, reservation, margin, or `assetNotional` amounts to cash.
+[Provider field mapping and evidence](docs/polymarket-us-api.md#bankroll-valuation).
+
+Every entry reads the account again; live mode makes its final sizing decision
+from a second snapshot after strategy evaluation, before reservation. Gains/losses
+and credited deposits or
+withdrawals change the next target. Missing/nonfinite cash, an unpriceable holding,
+or nonzero holdings awaiting settlement make bankroll unavailable and skip entry.
+Zero equity or exhausted exposure room also skips entry. Existing position exits
+continue under their usual rules; a percentage breach does not force liquidation.
+
+$100 bankroll targets $2 with a $10 daily loss budget; $500 targets $10 with a
+$50 daily loss budget, before tighter limits. The five-open-position guard and
+remaining exposure/daily capacity can limit entries further. The daily percentage
+uses the same current account snapshot as entry and exposure sizing, rather than
+a balance frozen at the start of the day. Realized losses are counted by UTC
+calendar day; realized gains do not offset them. The daily guard conservatively
+keeps each open trade's original full entry cost reserved even after a partial
+exit; aggregate exposure releases cost
+proportionally. Falling quotes do not release funded cost. Unresolved orders
+continue to block new entries until reconciled.
+
+The planner floors quantity to the market increment and visible depth, reserving
+fees inside the budget. The log records bankroll, percentage target, affordable
+budget, exposure, buying power, and the binding limit. Paper mode uses the same
+account-based sizing with its separate simulated journal; simulated P&L does not
+change actual account equity.
 
 ## State and recovery
 
@@ -240,8 +291,9 @@ For the refreshed book and Decimal-sized executable quantity Q, entries compare
 both `Q*(q - YES ask) - F` for Up and `Q*(YES bid - q) - F` for Down. F is the
 existing conservative rounded fee bound, counted once. `--extra-cost-usd` may
 subtract one additional nonnegative modeled dollar cost per entry. Only a
-strictly positive result may enter. Existing depth, $1 fee-inclusive entry,
-$5 daily-loss and exposure checks still apply. Slow account reads and order
+strictly positive result may enter. Both policies use the current bankroll
+limits: 2% entry target, 10% funded exposure and 10% daily loss budget, with
+existing depth and five-position checks. Slow account reads and order
 preview cannot extend the minute-14 cutoff.
 
 Decision settings retain the full model JSON, its SHA-256 tag, q, candidate

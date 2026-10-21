@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from execution.polymarket_client import Book, Market, Plan, amount, number, parse_time
+from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
 
 
 class TradeJournal:
@@ -281,28 +282,76 @@ class TradeJournal:
             closed_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    def risk_check(self, additional_cost: Decimal) -> None:
+    def exposure(self) -> Decimal:
+        """Funded remaining entry cost plus pending BUY reservations."""
+        exposure = Decimal("0")
+        for row in self.records():
+            if row.get("accounting_issues") or row["entry_cost"] is None:
+                raise RuntimeError("Actual costs are unknown or disputed; reconcile before trading")
+            quantity = number(row["quantity"])
+            entry_cost = number(row["entry_cost"])
+            if quantity:
+                bought = sum(
+                    (
+                        number(order["quantity"])
+                        for order in row["orders"]
+                        if order["action"] == "BUY"
+                    ),
+                    Decimal("0"),
+                )
+                if not 0 < quantity <= bought or entry_cost < 0:
+                    raise ValueError("Journal quantity is inconsistent with recorded BUY fills")
+                exposure += entry_cost * quantity / bought
+            if row["pending"] and row["pending"]["action"] == "BUY":
+                exposure += pending_plan(row).budget
+        return exposure
+
+    def entry_budget(self, bankroll: Decimal, buying_power: Decimal) -> tuple[Decimal, str]:
+        """Return affordable entry cost and the guard that limits it."""
+        if (
+            not bankroll.is_finite()
+            or not buying_power.is_finite()
+            or bankroll < 0
+            or buying_power < 0
+        ):
+            raise ValueError("Bankroll and buying power must be finite and nonnegative")
         rows = self.records()
         if any(row["pending"] for row in rows):
             raise RuntimeError("An order is unresolved; reconcile it before any further trading")
         if any(row.get("accounting_issues") or row["entry_cost"] is None for row in rows):
             raise RuntimeError("Actual costs are unknown or disputed; reconcile before trading")
-        opened = [row for row in rows if row["state"] == "open"]
-        if (
-            len(opened) >= 5
-            or sum(number(row["entry_cost"]) for row in opened) + additional_cost > 10
-        ):
-            raise ValueError("Open-position or total-exposure limit reached")
-        today = datetime.now(timezone.utc).date().isoformat()
-        losses = sum(
-            min(Decimal("0"), number(row["pnl"]))
-            for row in rows
-            if row.get("closed_at", "").startswith(today) and row["pnl"] is not None
+        if sum(row["state"] == "open" for row in rows) >= 5:
+            return Decimal("0"), "5 open-position limit"
+        budget, reason = min(
+            (
+                bankroll * ENTRY_BANKROLL_FRACTION,
+                f"{ENTRY_BANKROLL_FRACTION.normalize():%} entry target",
+            ),
+            (buying_power, "buying power"),
+            (
+                bankroll * MAX_EXPOSURE_FRACTION - self.exposure(),
+                f"{MAX_EXPOSURE_FRACTION.normalize():%} exposure room",
+            ),
+            (
+                _daily_room(rows, bankroll),
+                f"daily {DAILY_LOSS_FRACTION.normalize():%} loss budget",
+            ),
+            key=lambda candidate: candidate[0],
         )
-        # Reserve the full remaining cost of open trades against today's loss budget.
-        at_risk = sum(number(row["entry_cost"]) for row in opened)
-        if -losses + at_risk + additional_cost > 5:
-            raise ValueError("Daily $5 loss budget is exhausted or already at risk")
+        return max(Decimal("0"), budget), reason
+
+    def risk_check(self, additional_cost: Decimal, bankroll: Decimal) -> None:
+        """Recheck a planned cost against bankroll and journal risk guards."""
+        if (
+            not additional_cost.is_finite()
+            or not bankroll.is_finite()
+            or additional_cost <= 0
+            or bankroll <= 0
+        ):
+            raise ValueError("Planned cost and bankroll must be finite and positive")
+        budget, reason = self.entry_budget(bankroll, additional_cost)
+        if additional_cost > budget:
+            raise ValueError(f"{reason} is exhausted or already at risk")
 
 
 def pending_plan(row: dict) -> Plan:
@@ -332,6 +381,18 @@ def _pack_plan(plan: Plan) -> dict:
         "request": plan.request,
         "expires_at": plan.expires_at.isoformat(),
     }
+
+
+def _daily_room(rows: list[dict], bankroll: Decimal) -> Decimal:
+    today = datetime.now(timezone.utc).date().isoformat()
+    losses = sum(
+        min(Decimal("0"), number(row["pnl"]))
+        for row in rows
+        if row.get("closed_at", "").startswith(today) and row["pnl"] is not None
+    )
+    # Preserve the existing conservative daily guard, even after partial exits.
+    at_risk = sum(number(row["entry_cost"]) for row in rows if row["state"] == "open")
+    return bankroll * DAILY_LOSS_FRACTION + losses - at_risk
 
 
 def _money(value: Decimal | None) -> str | None:

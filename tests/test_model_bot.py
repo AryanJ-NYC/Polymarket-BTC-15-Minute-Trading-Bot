@@ -14,6 +14,12 @@ from execution.trade_journal import TradeJournal
 from probability_model import load_model
 
 
+@pytest.fixture(autouse=True)
+def fixed_bankroll(venue):
+    # The arithmetic fixtures use a $1 budget: 2% of a $50 cash bankroll.
+    venue.balance.update(currentBalance=50.0, buyingPower=50.0)
+
+
 def test_skipped_contract_gets_official_outcome_without_trade(venue, tmp_path, clock, monkeypatch):
     journal = TradeJournal(tmp_path / "observations.sqlite")
     try:
@@ -319,6 +325,30 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
         assert requests[:11] == [f"history-{i:02}" for i in range(11)]
         assert journal.pending_contracts(after_slug="history-09") == []
         assert len(requests) <= 12
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("buying_power,expected_quantity", [(500.0, "14.98"), (0.4, "0.59")])
+def test_model_uses_refreshed_bankroll_and_buying_power(
+    venue, tmp_path, clock, buying_power, expected_quantity
+):
+    journal = TradeJournal(tmp_path / "bankroll-model.sqlite")
+    try:
+        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.8))
+        warm_up(trader, venue, clock)
+        venue.balance_snapshots = [
+            {**venue.balance, "currentBalance": 0.0, "buyingPower": 0.0},
+            {**venue.balance, "currentBalance": 500.0, "buyingPower": buying_power},
+        ]
+        trader.tick()
+        row = journal.records()[0]
+        candidate = row["settings"]["prediction"]["candidates"]["up"]
+        assert Decimal(candidate["quantity"]) == Decimal(expected_quantity)
+        assert row["settings"]["entry_bankroll_fraction"] == "0.02"
+        assert row["settings"]["max_exposure_fraction"] == "0.10"
+        assert row["settings"]["daily_loss_fraction"] == "0.10"
+        assert "budget_usd" not in row["settings"]
     finally:
         journal.close()
 

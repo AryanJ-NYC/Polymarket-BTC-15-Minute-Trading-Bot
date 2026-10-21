@@ -201,6 +201,41 @@ response is not an Order with a top-level `state`. Follow the envelopes above.
 
 ## Balances, positions, activity, settlement, fees
 
+### Bankroll valuation
+
+Issue #8 derives a bot mark-to-market USD equity value from `currentBalance`
+(credited fiat excluding securities) plus signed `netPositionDecimal` times a
+fresh validated YES book midpoint for every nonzero position. The existing
+authenticated balance/position reads bypass intermediary caches with `_ts`;
+position pages must complete. Book marks share the execution book's currency,
+finite-price, timestamp, state, slug and two-sided/crossed-book checks, without
+limiting valuation to the current BTC measurement window.
+
+This is an explicit valuation policy, inferred from the provider's documented
+cash flows, rather than a claim that the REST API supplies total equity. The
+[collateral examples](https://docs.polymarket.us/market-structure/collateral-and-margin#portfolio-value-calculation)
+show short proceeds already included in fiat and $1 collateral per short. Thus
+$5.70 fiat minus one YES liability marked at $0.70 is $5 equity; adding a positive
+NO value directly to fiat would double-count collateral. Long holdings add
+their marked YES value. Quote changes affect bankroll, while journal exposure
+remains funded cost attributable to the remaining quantities, including fees.
+
+The [official schema](https://docs.polymarket.us/api-reference/oapi-schemas/portfolio-schema.json)
+does not define `assetNotional` as signed marked equity. `cashValue` has conflicting
+PnL/value descriptions. Neither field is used. `buyingPower` is a separate
+spendability cap. Reservations, open orders, margin and available collateral are
+not added back to fiat or counted as extra assets. Pending credits and unsettled
+funds are not added; already credited instant advances remain current cash.
+[Deposit credit versus clearance](https://docs.polymarket.us/learn/deposits/deposit-methods/overview).
+
+Missing/nonfinite cash, negative derived equity, unpriceable positions or nonzero
+expired positions awaiting settlement produce unavailable bankroll, blocking new
+entries while leaving account ownership/exit checks usable. This avoids assuming
+that settlement has already credited cash. Zero equity is valid but funds no
+entry. Balance, paginated holdings and book marks are sequential reads, not an
+atomic provider snapshot; the runner re-reads and resizes before live reservation.
+No new provider write or live trading activation is needed for this change.
+
 - `account.balances()` returns `{balances: [...]}`. Select currency USD and use
   provider `buyingPower` for currently available trading capital rather than
   `currentBalance`. Other fields include `assetNotional`, `assetAvailable`,
