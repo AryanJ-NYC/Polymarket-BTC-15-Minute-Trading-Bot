@@ -1,6 +1,6 @@
 # Bankroll sizing verification — issue #8
 
-Target: `aj/bankroll-sizing`, PR base `main`, pinned review base
+Target: `aj/bankroll-sizing`, PR base `main`, initial pinned review base
 `022cdc4c33ec5aa71294b2ecdd42f3fcf8a420d8`.
 Scope: account valuation, entry planning, funded exposure, operator documentation.
 The user follow-up supersedes issue #8's fixed $5 daily limit with 10% of
@@ -16,7 +16,7 @@ coverage. SQLite journals are temporary pytest fixtures and are closed after use
 | --- | --- | --- |
 | Account bankroll | Passed | `test_equity_marks_signed_positions_without_counting_collateral_twice`: $95 cash plus $5 long value = $100; $5.70 cash minus $.70 short liability = $5. Mark gains/losses, reserved cash, pending deposits, missing/nonfinite/zero equity, all position pages and later credited gain/loss/deposit/withdrawal snapshots are covered. |
 | Entry/exposure workflow | Passed | `test_live_runner_sizes_from_account_with_daily_limit`: $100 targets $2; $500 targets $10 with a $50 daily budget. Daily-loss tests cover shrinking/replenished bankroll, UTC rollover, boundary losses, original-cost reserves and request-level daily capacity. `test_lower_second_account_snapshot_resizes_or_skips` checks the later snapshot. `test_live_request_fits_remaining_exposure_after_partial_exits` inspects actual fake-SDK create payloads below/at/above the cap and after a partial exit. Journal tests cover pending reservations, restart, cost/fee attribution, daily losses and five positions. Up/Down planner tests cover fee, increment, tick, depth and minimums. |
-| Checks, settings and logs | Passed | Full suite **141 passed**. Ruff lint/format, compileall, pip consistency and whitespace checks passed. Percentage labels derive from the same Decimal fractions as enforcement; README/API/deployment docs describe the same USD formula and tighter daily/count limits. |
+| Checks, settings and logs | Passed | Combined suite after merging main **190 passed**. Ruff lint/format, compileall, pip consistency and whitespace checks passed. Percentage labels derive from the same Decimal fractions as enforcement; README/API/deployment docs describe the same USD formula and tighter daily/count limits. |
 
 Representative exact Decimal traces from fixtures:
 
@@ -44,7 +44,7 @@ Commands, using the existing project virtualenv from the isolated worktree:
 python -m pytest -q
 ruff check .
 ruff format --check .
-python -m compileall -q bot.py execution core tests deploy
+python -m compileall -q bot.py execution core results_report.py tests deploy
 python -m pip check
 git diff --check
 ```
@@ -72,6 +72,26 @@ parameter or new risk platform was introduced.
 The daily-10% follow-up was independently re-reviewed in all three lanes against
 `1e44a709cf942649e9c163ba896732f1c7aba60e`. All three reported no findings;
 the same-bankroll helper argument keeps enforcement within the journal.
+
+## Main integration and received review
+
+Merged `main` at `279e1f7f4bc72e124a71570f7270ae51c6facfe9`. Resolution preserves
+upstream actual-result/opportunity recording, stored policy, known-order recovery,
+nullable fee handling and reconciliation guards. Stored policy now records the
+configured fractions instead of the upstream fixed $1/$10/$5 values. Upstream
+fixtures use the required bankroll argument and a fee that exceeds the new $2
+reservation when testing recovery budget breaches.
+
+Received review thread `4341941179` correctly identified that an unusable first
+account snapshot could suppress the later refresh. Three regression cases first
+failed (zero buying power, missing equity, below-minimum initial budget), then
+passed after sizing moved after the second guarded account read. Each case runs
+one tick in the last eligible entry second and confirms the fresh read and SDK
+submission. An entry-window check after the refresh preserves the cutoff.
+
+The combined 190-test suite covers both features; all three independent review
+lanes rechecked the merge and account-refresh fix without findings. No live run
+was added.
 
 ## Limits and cleanup
 

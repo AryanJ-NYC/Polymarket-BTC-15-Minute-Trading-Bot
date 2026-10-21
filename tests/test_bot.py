@@ -90,6 +90,25 @@ def test_lower_second_account_snapshot_resizes_or_skips(
         assert Decimal("0.38") < quantity * Decimal("0.65") + fee <= Decimal(maximum)
 
 
+@pytest.mark.parametrize("cash,buying_power", [("100", "0"), (None, "100"), ("0.01", "100")])
+def test_live_entry_refreshes_initially_unusable_account(
+    venue, journal, monkeypatch, clock, cash, buying_power
+):
+    clock.current += timedelta(seconds=49)  # Last eligible second of the entry window.
+    venue.timestamp = clock.current.isoformat()
+    venue.balance_snapshots = [
+        {**venue.balance, "currentBalance": cash, "buyingPower": buying_power},
+        dict(venue.balance),
+    ]
+    trader = TradingBot(venue.client, journal, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    assert journal.get(venue.market["slug"])["state"] == "open"
+    assert sum(path == "/v1/account/balances" for _, path, _ in venue.calls) == 2
+    request = next(body for method, path, body in venue.calls if path == "/v1/orders")
+    assert request["quantity"] == 2.99
+
+
 @pytest.mark.parametrize(
     "cash,budget", [("125", "2.50"), ("75", "1.50"), ("150", "3"), ("50", "1")]
 )

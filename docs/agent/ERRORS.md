@@ -1,5 +1,11 @@
 # Agent errors and recovery
 
+- PR #11 review: skipping after sizing the first account snapshot prevented the
+  later refresh when equity was unavailable, buying power was zero, or the first
+  budget was below minimum. Three transport/clock regressions reproduced the
+  missed entry in the last eligible second. Make the definitive sizing decision
+  after the second guarded account read and recheck the entry window afterward.
+
 - Bankroll mapping: `assetNotional` is unspecified aggregate notional, and
   `cashValue` has conflicting PnL/value descriptions. Adding fiat to positive NO
   position value double-counts short collateral. Use signed YES quantities with
@@ -42,3 +48,8 @@
   ID plus pending reservation. Read-only account counts were zero afterward;
   counts alone cannot establish the order outcome. Do not delete the journal or
   restart blindly. This incident remains unresolved; updater gates preserve it.
+- Issue #5 regression: an already-closed legacy settlement returned before
+  checking provider resolution fees/cost, preserving false precision. A failing
+  workflow regression reproduced this; compare evidence before the closed-state
+  return and clear exact P&L on discrepancy. Preserve the original order and
+  provider resolution fields for later reconciliation.
