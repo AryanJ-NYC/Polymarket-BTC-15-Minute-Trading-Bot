@@ -2,24 +2,16 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal, InvalidOperation
-from email.utils import parsedate_to_datetime
 from pathlib import Path
-from time import monotonic, time_ns
+from time import monotonic, sleep, time_ns
 
 from dotenv import dotenv_values
-from polymarket_us import (
-    APIConnectionError,
-    APIError,
-    APIStatusError,
-    APITimeoutError,
-    NotFoundError,
-    PolymarketUS,
-)
+from loguru import logger
+from polymarket_us import APIConnectionError, APIError, APITimeoutError, NotFoundError, PolymarketUS
 
 
 class PolymarketClient:
@@ -173,7 +165,7 @@ class PolymarketClient:
         except OrderPreflightError:
             raise
         except Exception as exc:
-            raise OrderPreflightError(f"Order preflight failed ({type(exc).__name__})") from exc
+            raise OrderNotSubmitted(exc) from None
         result = self.client.orders.create(plan.request)
         order_id = result["id"]
         if not isinstance(order_id, str) or not order_id:
@@ -181,18 +173,19 @@ class PolymarketClient:
         return order_id
 
     def order(self, order_id: str) -> dict:
-        """Read a known ID with bounded recovery; never replay order creation."""
+        # Only repeat reads of an already-known ID. Never enable SDK-wide retries:
+        # a lost create response cannot safely be replayed.
         for attempt in range(3):
             try:
                 order = self.client.orders.retrieve(order_id)["order"]
                 break
-            except (APIConnectionError, APIStatusError) as exc:
-                status = getattr(exc, "status_code", None)
-                if attempt == 2 or (
-                    status is not None and status not in {404, 429} and not 500 <= status < 600
-                ):
+            except (APIError, APIConnectionError, APITimeoutError) as exc:
+                if not retryable_api_error(exc, missing=True) or attempt == 2:
                     raise
-                time.sleep(_order_read_delay(exc, attempt))
+                if getattr(exc, "status_code", None) == 429:
+                    raise  # The runner honors Retry-After without further requests.
+                logger.warning("Retrying order {} readback: {}", order_id, api_error_summary(exc))
+                sleep(2**attempt)
         if order["id"] != order_id:
             raise ValueError("Order readback ID mismatch")
         return order
@@ -206,7 +199,7 @@ class PolymarketClient:
             self.client.orders.cancel(order_id, {"marketSlug": slug})
             order = self.order(order_id)
         if order["state"] not in TERMINAL_STATES:
-            raise ValueError("Cancellation is not confirmed; trading must stop")
+            raise OrderPending(f"Order {order_id} cancellation is not yet confirmed")
         return order
 
     def settlement(self, slug: str) -> Decimal | None:
@@ -360,6 +353,21 @@ def validate_book(market: Market, book: Book) -> None:
     _validate_quote_age(book)
 
 
+def retryable_api_error(exc: Exception, *, missing: bool = False) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    status = getattr(exc, "status_code", 0) or 0
+    return status in {408, 409, 429} or status >= 500 or (missing and status == 404)
+
+
+def api_error_summary(exc: Exception) -> str:
+    """Log only request method/path and status, never bodies, headers, or keys."""
+    response = getattr(exc, "response", None)
+    request = response.request if response is not None else getattr(exc, "request", None)
+    operation = f"{request.method} {request.url.path}" if request is not None else "API request"
+    return f"{operation}: {type(exc).__name__} (HTTP status {getattr(exc, 'status_code', 'unavailable')})"
+
+
 def position_quantity(position: dict) -> Decimal:
     return number(position["netPositionDecimal"])
 
@@ -426,24 +434,6 @@ def _credential(config: dict, *names: str) -> str:
     if len(values) != 1:
         raise ValueError(f"Set one consistent credential using {' or '.join(names)}")
     return values.pop()
-
-
-def _order_read_delay(error: Exception, attempt: int) -> float:
-    delay = float(2**attempt)
-    if isinstance(error, APIStatusError):
-        header = error.response.headers.get("Retry-After", "")
-        try:
-            retry_after = float(header)
-        except ValueError:
-            try:
-                retry_after = (
-                    parsedate_to_datetime(header) - datetime.now(timezone.utc)
-                ).total_seconds()
-            except (ValueError, TypeError, OverflowError):
-                return delay
-        if retry_after >= 0:
-            delay = max(delay, retry_after)
-    return min(delay, 30.0)
 
 
 def _levels(rows: list[dict], *, reverse: bool) -> tuple:
@@ -573,6 +563,18 @@ class Account:
 
 class OrderPreflightError(ValueError):
     """The order create endpoint was never called; reservation can be released."""
+
+
+class OrderNotSubmitted(OrderPreflightError):
+    """A preflight dependency failed; preserve its cause for bounded recovery."""
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        super().__init__(f"Order preflight failed: {api_error_summary(cause)}")
+
+
+class OrderPending(RuntimeError):
+    """A known order still needs terminal readback before recording its fill."""
 
 
 ZERO = Decimal("0")

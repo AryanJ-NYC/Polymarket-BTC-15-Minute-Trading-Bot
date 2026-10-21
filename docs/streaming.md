@@ -48,6 +48,10 @@ and can use bounded validated authenticated REST books during an outage. A missi
 or stale fallback book skips the exit decision; it never fabricates a close or
 settlement. Rate limits honor the provider's retry delay with a minimum 30-second
 wait. Healthy operation does not routinely request REST books.
+Owned-contract metadata and fallback-book cooldowns apply per contract, so they
+do not prevent reconciliation or another position's management. Account, order,
+discovery, and outcome-history rate limits pause further REST operations across
+the trading loop while socket receipt continues independently.
 
 The trading loop rechecks the latest eligible quote and entry deadline after slow
 context/account work and again around submission. Spending caps, preview
@@ -92,18 +96,20 @@ it adds no production testing interface. Natural outages and induced transport
 closure are distinguished in the report. If injection cannot close a connection,
 the report records it as unavailable or failed instead of fabricating recovery.
 
-The stream lane runs the unchanged strategy read-only, recording each outcome,
-feature-sample count, calculation duration, and receipt-to-decision latency. Its
+The stream lane runs the default `btc-15m-fusion-v1` policy with `model=None`
+read-only, recording each outcome, feature-sample count, calculation duration,
+and receipt-to-decision latency. It does not measure the optional probability
+model's inference or EV selection, account-based sizing, or order submission. Its
 optional context requests are known GET-only calls and use separate clients; the
 exchange request totals exclude those calls. The REST baseline lane only samples
 quotes. The observer invokes no account, order, or journal operations. Shutdown
 first prevents any further HTTP requests, including additional discovery pages,
 then waits for the in-flight baseline read and its sample write to finish before
 closing the SDK or generating final artifacts. Each network call retains the
-SDK's ten-second timeout. Before
-any API read it installs an HTTP transport that rejects every method except GET.
-WebSocket authentication and market-data subscriptions are the only socket
-messages the harness requests. The request trace contains only method, safe path,
+SDK's ten-second timeout. Before any API read it installs an HTTP transport
+that rejects every method except GET. SDK authentication, market-data
+subscriptions, and the induced transport close are the only socket operations
+the harness requests. The request trace contains only method, safe path,
 status, timing, and the baseline/discovery category; it excludes query parameters,
 headers, request bodies, and provider exception bodies.
 
@@ -131,5 +137,5 @@ cadence; each recovery event records the preceding sample gap. Slow optional
 context reads can make that gap longer than three seconds.
 Stream receipt-to-decision latency includes sampling wait, optional context
 reads, and strategy computation. REST receipt-to-decision and provider network
-latency remain explicitly unavailable in this observer. No result establishes profitability or live-order
-execution behavior.
+latency remain explicitly unavailable in this observer. No result establishes
+profitability or live-order execution behavior.

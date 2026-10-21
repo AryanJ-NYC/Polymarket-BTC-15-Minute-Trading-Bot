@@ -433,7 +433,7 @@ def test_restart_subscribes_to_owned_contract_before_accounting_and_pending_exit
     from stream_fakes import wait_for
 
     entry = parse_market(venue.market)
-    monkeypatch.setattr("execution.polymarket_client.time.sleep", lambda _: None)
+    monkeypatch.setattr("execution.polymarket_client.sleep", lambda _: None)
     owned_row = {**venue.market, "slug": "owned-before-restart"}
     venue.markets[owned_row["slug"]] = owned_row
     owned = parse_market(owned_row)

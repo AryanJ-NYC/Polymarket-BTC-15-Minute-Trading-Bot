@@ -86,11 +86,13 @@ def venue(market_row, clock):
             self.activity_pages = None
             self.open_orders = []
             self.order_state = "ORDER_STATE_CANCELED"
+            self.cancel_ack_only = False
             self.fill_quantity = 0.50
             self.fill_price = "0.6400"
             self.order = None
             self.fail_create = False
             self.preview_mismatch = False
+            self.preview_delay = 0
             self.settlement = None
             self.timestamp = clock.current.isoformat()
             self.bid = "0.63"
@@ -99,6 +101,8 @@ def venue(market_row, clock):
             self.book_missing = False
             self.book_limited = False
             self.book_request_ids = []
+            self.failures = {}
+            self.error_body = "Unavailable"
             self.sdk = PolymarketUS(
                 key_id="00000000-0000-0000-0000-000000000001",
                 secret_key=base64.b64encode(bytes(32)).decode(),
@@ -116,6 +120,15 @@ def venue(market_row, clock):
                 if response is not None:
                     return response
             path = request.url.path
+            failures = self.failures.get((request.method, path), [])
+            if failures:
+                failure = failures.pop(0)
+                if failure == "timeout":
+                    raise httpx.ReadTimeout("fake lost read response", request=request)
+                if failure is not None:
+                    return httpx.Response(
+                        failure, headers={"Retry-After": "60"}, json={"error": self.error_body}
+                    )
             if request.url.host == "api.polymarket.us":
                 assert request.headers.get("X-PM-Access-Key")
                 assert request.headers.get("X-PM-Signature")
@@ -140,7 +153,7 @@ def venue(market_row, clock):
                 offset = int(request.url.params.get("offset", 0))
                 body = {"markets": self.pages[offset] if self.pages else [self.market]}
             elif path.startswith("/v1/market/slug/"):
-                body = {"market": self.markets.get(path.rsplit("/", 1)[1], self.market)}
+                body = {"market": self.markets.get(path.rsplit("/", 1)[-1], self.market)}
             elif path.endswith("/book"):
                 self.book_request_ids.append(request.url.params.get("_ts"))
                 if self.book_limited:
@@ -159,6 +172,7 @@ def venue(market_row, clock):
                     }
                 }
             elif path == "/v1/order/preview":
+                clock.current += timedelta(seconds=self.preview_delay)
                 body = {"order": copy.deepcopy(payload["request"])}
                 if self.preview_mismatch:
                     body["order"]["quantity"] = 999
@@ -176,7 +190,8 @@ def venue(market_row, clock):
                 }
                 body = {"id": "bot-order-1", "executions": []}
             elif path == "/v1/order/bot-order-1/cancel":
-                self.order["state"] = "ORDER_STATE_CANCELED"
+                if not self.cancel_ack_only:
+                    self.order["state"] = "ORDER_STATE_CANCELED"
                 body = {}
             elif path == "/v1/order/bot-order-1":
                 body = {"order": self.order}

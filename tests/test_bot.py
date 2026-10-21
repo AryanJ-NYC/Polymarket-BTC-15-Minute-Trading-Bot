@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 import bot
+import execution.polymarket_client as client_module
 from bot import TradingBot
 from execution.polymarket_client import parse_market
 from execution.trade_journal import TradeJournal
@@ -578,3 +579,424 @@ def test_minimum_sized_entry_keeps_its_valid_fee_rounded_reservation(
     assert Decimal(row["entry_cost"]) == Decimal("0.0065")
     assert row["pending"] is None
     assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize("failure", [404, 409, 503, "timeout"])
+def test_live_order_readback_recovers_without_another_submission(
+    venue, journal, monkeypatch, failure, books, stream_feed
+):
+    monkeypatch.setattr(client_module, "sleep", lambda seconds: None)
+    venue.failures[("GET", "/v1/order/bot-order-1")] = [failure]
+    trader = TradingBot(venue.client, journal, books, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    row = journal.records()[0]
+    assert row["pending"] is None
+    assert row["state"] == "open"
+    assert Decimal(row["quantity"]) == Decimal("0.5")
+    assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == 1
+
+
+@pytest.mark.parametrize("failure", [404, 409])
+@pytest.mark.parametrize("after_cancel", [False, True])
+def test_pending_order_recovers_after_restart_without_duplicate_trade(
+    venue, tmp_path, monkeypatch, after_cancel, failure, books, stream_feed
+):
+    monkeypatch.setattr(client_module, "sleep", lambda seconds: None)
+    venue.order_state = "ORDER_STATE_PARTIALLY_FILLED" if after_cancel else "ORDER_STATE_FILLED"
+    venue.failures[("GET", "/v1/order/bot-order-1")] = ([None] if after_cancel else []) + [
+        failure,
+        failure,
+        failure,
+    ]
+    path = tmp_path / "restart.sqlite"
+    first = TradeJournal(path)
+    try:
+        trader = TradingBot(venue.client, first, books, live=True)
+        monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+        trader.tick()
+        assert first.records()[0]["order_id"] == "bot-order-1"
+        assert first.records()[0]["pending"] is not None
+    finally:
+        first.close()
+    resumed = TradeJournal(path)
+    try:
+        venue.positions = {venue.market["slug"]: {"netPositionDecimal": "0.5", "expired": False}}
+        trader = TradingBot(venue.client, resumed, books, live=True)
+        monkeypatch.setattr(trader.strategy, "decide", lambda market, book: None)
+        trader.tick()
+        row = resumed.records()[0]
+        assert row["state"] == "open"
+        assert row["pending"] is None
+        assert Decimal(row["quantity"]) == Decimal("0.5")
+        assert len(row["orders"]) == 1
+        assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == 1
+        assert sum(path.endswith("/cancel") for _, path, _ in venue.calls) == int(after_cancel)
+    finally:
+        resumed.close()
+
+
+@pytest.mark.parametrize("failure", [409, 503])
+@pytest.mark.parametrize("path", ["/v1/account/balances", "/v1/markets"])
+def test_transient_account_or_discovery_outage_keeps_runner_alive(
+    venue, journal, monkeypatch, path, failure, books, stream_feed
+):
+    from stream_fakes import wait_for
+
+    elapsed = [100.0]
+    monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+    trader = TradingBot(venue.client, journal, books, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: None)
+    venue.failures[("GET", path)] = [failure]
+    trader.tick()
+    assert journal.records() == []
+    if path == "/v1/markets":
+        elapsed[0] += 31
+        trader.tick()
+        wait_for(lambda: len(stream_feed.socket.subscriptions) == 2)
+        stream_feed.publish()
+    trader.tick()
+    assert len(trader.strategy.ticks) == 1
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize("failure", [409, 503])
+def test_settlement_read_outage_preserves_position_until_confirmed(
+    venue, journal, clock, monkeypatch, failure, books, stream_feed
+):
+    trader = TradingBot(venue.client, journal, books)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    clock.current += timedelta(minutes=3)
+    venue.settlement = 0
+    venue.failures[("GET", f"/v1/markets/{venue.market['slug']}/settlement")] = [failure]
+    venue.client.discover_market = lambda: None
+    trader.tick()
+    assert journal.records()[0]["state"] == "open"
+    assert journal.records()[0]["pnl"] is None
+    trader.tick()
+    assert journal.records()[0]["state"] == "closed"
+
+
+def test_pending_order_does_not_block_management_of_other_owned_position(
+    venue, journal, monkeypatch, books, stream_feed
+):
+    monkeypatch.setattr(client_module, "sleep", lambda seconds: None)
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+    pending = venue.client.buy_plan(market, book, "up", Decimal("1"))
+    journal.reserve_entry(pending, market.end)
+    journal.update(market.slug, order_id="pending-order")
+    venue.failures[("GET", "/v1/order/pending-order")] = [404, 404, 404]
+    other = replace(market, slug="other-btc-contract")
+    venue.markets[other.slug] = {**venue.market, "slug": other.slug}
+    existing = venue.client.buy_plan(other, replace(book, slug=other.slug), "up", Decimal("1"))
+    journal.reserve_entry(existing, other.end)
+    journal.finish_order(other.slug, Decimal("1"), Decimal("0.95"), Decimal("0.01"))
+    venue.positions = {
+        market.slug: {"netPositionDecimal": "0.5", "qtyAvailableDecimal": "0.5"},
+        other.slug: {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"},
+    }
+    venue.fill_price = "0.63"
+    trader = TradingBot(venue.client, journal, books, live=True)
+    trader.tick()
+    assert journal.get(market.slug)["pending"] is not None
+    assert Decimal(journal.get(other.slug)["quantity"]) == Decimal("0.5")
+    creates = [body for method, path, body in venue.calls if path == "/v1/orders"]
+    assert len(creates) == 1
+    assert creates[0]["marketSlug"] == other.slug
+    assert creates[0]["intent"] == "ORDER_INTENT_SELL_LONG"
+
+
+@pytest.mark.parametrize("failure", [409, 503])
+def test_one_position_read_outage_does_not_skip_other_position_exit(
+    venue, journal, failure, books, stream_feed
+):
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+    for slug, cost in [(market.slug, "0.65"), ("other-btc-contract", "0.95")]:
+        other = replace(market, slug=slug)
+        venue.markets[slug] = {**venue.market, "slug": slug}
+        plan = venue.client.buy_plan(other, replace(book, slug=slug), "up", Decimal("1"))
+        journal.reserve_entry(plan, other.end)
+        journal.finish_order(slug, Decimal("1"), Decimal(cost), Decimal("0.01"))
+        venue.positions[slug] = {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}
+    venue.fill_price = "0.63"
+    books.set_markets([])
+    venue.failures[("GET", f"/v1/markets/{market.slug}/book")] = [failure]
+    trader = TradingBot(venue.client, journal, books, live=True)
+    trader.tick()
+    assert Decimal(journal.get("other-btc-contract")["quantity"]) == Decimal("0.5")
+    assert Decimal(journal.get(market.slug)["quantity"]) == Decimal("1")
+
+
+@pytest.mark.parametrize("failure", ["mismatch", 409, 503, 429])
+def test_failed_preview_releases_reservation_without_creating_order(
+    venue, journal, monkeypatch, failure, books, stream_feed
+):
+    if failure == "mismatch":
+        venue.preview_mismatch = True
+    else:
+        venue.failures[("POST", "/v1/order/preview")] = [failure]
+    trader = TradingBot(venue.client, journal, books, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    row = journal.records()[0]
+    assert row["state"] == "unfilled"
+    assert row["pending"] is None
+    assert row["order_id"] is None
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+    restarted = TradingBot(venue.client, journal, books, live=True)
+    restarted.tick()
+    assert len(journal.records()) == 1
+
+
+@pytest.mark.parametrize(
+    "reason", ["unknown_submission", "create_conflict", "manual_position", "authentication"]
+)
+def test_cli_safety_stop_does_not_request_automatic_restart(
+    venue, tmp_path, monkeypatch, reason, books, stream_feed
+):
+    monkeypatch.setattr(bot.PolymarketClient, "connect", lambda path: venue.client)
+    monkeypatch.setattr(bot, "ROOT", tmp_path)
+    monkeypatch.setattr(venue.client, "market_stream", lambda: books)
+    monkeypatch.setattr(bot.BTCStrategy15Min, "decide", lambda *args: "up")
+    monkeypatch.setattr("sys.argv", ["bot.py", "--live", "--once"])
+    if reason == "unknown_submission":
+        venue.fail_create = True
+    elif reason == "create_conflict":
+        venue.failures[("POST", "/v1/orders")] = [409]
+    elif reason == "manual_position":
+        venue.positions = {"manual": {"netPositionDecimal": "1"}}
+    else:
+        venue.failures[("GET", "/v1/account/balances")] = [401]
+    assert bot.main() == 2
+    assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == int(
+        reason in {"unknown_submission", "create_conflict"}
+    )
+
+
+def test_pending_order_rate_limit_stops_requests_until_retry_after(
+    venue, journal, monkeypatch, books, stream_feed
+):
+    monkeypatch.setattr(bot, "monotonic", lambda: 100.0)
+    trader = TradingBot(venue.client, journal, books, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    venue.failures[("GET", "/v1/order/bot-order-1")] = [429]
+    trader.tick()
+    count = len(venue.calls)
+    assert journal.records()[0]["order_id"] == "bot-order-1"
+    assert trader.next_data_attempt == 160.0
+    trader.tick()
+    assert len(venue.calls) == count
+    venue.positions = {venue.market["slug"]: {"netPositionDecimal": "0.5"}}
+    monkeypatch.setattr(bot, "monotonic", lambda: 161.0)
+    trader.tick()
+    assert journal.records()[0]["pending"] is None
+    assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == 1
+
+
+def test_pending_readback_logs_operation_without_provider_body(
+    venue, tmp_path, monkeypatch, capsys, books, stream_feed
+):
+    monkeypatch.setattr(bot.PolymarketClient, "connect", lambda path: venue.client)
+    monkeypatch.setattr(bot, "ROOT", tmp_path)
+    monkeypatch.setattr(venue.client, "market_stream", lambda: books)
+    monkeypatch.setattr(bot.BTCStrategy15Min, "decide", lambda *args: "up")
+    monkeypatch.setattr("sys.argv", ["bot.py", "--live", "--once"])
+    venue.error_body = "sensitive-provider-content"
+    venue.failures[("GET", "/v1/order/bot-order-1")] = [403]
+    assert bot.main() == 2
+    output = capsys.readouterr().err
+    assert "GET /v1/order/bot-order-1" in output
+    assert "HTTP status 403" in output
+    assert "sensitive-provider-content" not in output
+
+
+def test_cancel_acknowledgment_waits_for_terminal_readback_without_stopping(
+    venue, journal, monkeypatch, books, stream_feed
+):
+    trader = TradingBot(venue.client, journal, books, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    venue.order_state = "ORDER_STATE_PARTIALLY_FILLED"
+    venue.cancel_ack_only = True
+    trader.tick()
+    assert journal.records()[0]["pending"] is not None
+    venue.order["state"] = "ORDER_STATE_CANCELED"
+    venue.positions = {venue.market["slug"]: {"netPositionDecimal": "0.5"}}
+    trader.tick()
+    assert journal.records()[0]["pending"] is None
+    assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == 1
+
+
+def test_recovered_filled_order_can_settle_after_readback_outage(
+    venue, journal, clock, monkeypatch, books, stream_feed
+):
+    monkeypatch.setattr(client_module, "sleep", lambda seconds: None)
+    trader = TradingBot(venue.client, journal, books, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    venue.order_state = "ORDER_STATE_FILLED"
+    venue.failures[("GET", "/v1/order/bot-order-1")] = [404, 404, 404]
+    trader.tick()
+    clock.current += timedelta(minutes=3)
+    venue.settlement = 0
+    venue.activities = [
+        {
+            "type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+            "positionResolution": {
+                "marketSlug": venue.market["slug"],
+                "beforePosition": {"netPositionDecimal": "0.5"},
+                "afterPosition": {"netPositionDecimal": "0"},
+            },
+        }
+    ]
+    trader = TradingBot(venue.client, journal, books, live=True)
+    trader.tick()
+    row = journal.records()[0]
+    assert row["state"] == "closed"
+    assert row["pending"] is None
+    assert Decimal(row["pnl"]) == Decimal("-0.33")
+    assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == 1
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_pending_partial_exit_can_expire_while_other_position_is_managed(
+    venue, journal, clock, monkeypatch, expired, books, stream_feed
+):
+    monkeypatch.setattr(client_module, "sleep", lambda seconds: None)
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+    entry = venue.client.buy_plan(market, book, "up", Decimal("1"))
+    journal.reserve_entry(entry, market.end)
+    journal.finish_order(market.slug, Decimal("1"), Decimal("0.65"), Decimal("0.01"))
+    exit_plan = venue.client.sell_plan(market, book, "up", Decimal("0.5"))
+    journal.reserve_exit(exit_plan)
+    journal.update(market.slug, order_id="pending-exit")
+    venue.failures[("GET", "/v1/order/pending-exit")] = [404, 404, 404]
+    if expired:
+        clock.current += timedelta(minutes=3)
+    other = replace(
+        market,
+        slug="other-btc-contract",
+        start=clock.current,
+        end=clock.current + timedelta(minutes=15),
+    )
+    venue.markets[market.slug] = venue.market
+    venue.market = {
+        **venue.market,
+        "slug": other.slug,
+        "assetPriceTerms": {
+            **venue.market["assetPriceTerms"],
+            "windowStart": other.start.isoformat(),
+            "windowEnd": other.end.isoformat(),
+        },
+    }
+    venue.timestamp = clock.current.isoformat()
+    other_book = venue.client.book(other)
+    plan = venue.client.buy_plan(other, other_book, "up", Decimal("1"))
+    journal.reserve_entry(plan, other.end)
+    journal.finish_order(other.slug, Decimal("1"), Decimal("0.95"), Decimal("0.01"))
+    # The old contract disappears after settlement. Before expiry, losing the
+    # unoffered half of this position is an ownership discrepancy, not recovery.
+    venue.positions = {other.slug: {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}}
+    venue.fill_price = "0.63"
+    trader = TradingBot(venue.client, journal, books, live=True)
+    if not expired:
+        with pytest.raises(RuntimeError, match="pending position"):
+            trader.tick()
+        assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+        return
+    trader.tick()
+    assert journal.get(market.slug)["pending"] is not None
+    assert Decimal(journal.get(market.slug)["quantity"]) == 1
+    assert Decimal(journal.get(other.slug)["quantity"]) == Decimal("0.5")
+    assert all(
+        body["intent"] == "ORDER_INTENT_SELL_LONG"
+        for _, path, body in venue.calls
+        if path == "/v1/orders"
+    )
+
+
+@pytest.mark.parametrize("stage", ["discovery", "initial_account", "final_account", "exit_account"])
+def test_shared_rest_rate_limit_stops_further_requests_in_current_tick_and_cooldown(
+    venue, journal, books, monkeypatch, stage
+):
+    elapsed = [100.0]
+    monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+    if stage == "exit_account":
+        market = parse_market(venue.market)
+        plan = venue.client.buy_plan(market, books.book(market), "up", Decimal("1"))
+        journal.reserve_entry(plan, market.end)
+        journal.finish_order(market.slug, Decimal("1"), Decimal("0.95"), Decimal("0.01"))
+        venue.positions = {market.slug: {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}}
+    balances = [0]
+    failed = [False]
+
+    def rate_limit(request):
+        path = request.url.path
+        if path == "/v1/account/balances":
+            balances[0] += 1
+        target = (
+            path == "/v1/markets"
+            if stage == "discovery"
+            else (
+                path == "/v1/account/balances"
+                and balances[0] == (2 if stage == "final_account" else 1)
+            )
+        )
+        if target and not failed[0]:
+            failed[0] = True
+            return httpx.Response(429, headers={"Retry-After": "60"}, json={"error": "limited"})
+        return None
+
+    venue.on_request = rate_limit
+    trader = TradingBot(venue.client, journal, books, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda *_: "up")
+    trader.tick()
+    assert failed[0]
+    assert trader.next_data_attempt == 160.0
+    assert venue.calls[-1][1] == ("/v1/markets" if stage == "discovery" else "/v1/account/balances")
+    count = len(venue.calls)
+    trader.tick()
+    elapsed[0] = 159.9
+    trader.tick()
+    assert len(venue.calls) == count
+    assert not any(path.endswith("/book") for _, path, _ in venue.calls)
+    assert not any(method == "POST" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize("stage", ["preview", "readback"])
+def test_exit_rate_limit_prevents_same_tick_rest_reads_for_other_owned_positions(
+    venue, journal, books, monkeypatch, stage
+):
+    monkeypatch.setattr(bot, "monotonic", lambda: 100.0)
+    market = parse_market(venue.market)
+    for slug in (market.slug, "other-owned-after-rate-limit"):
+        owned_row = {**venue.market, "slug": slug}
+        venue.markets[slug] = owned_row
+        owned = parse_market(owned_row)
+        plan = venue.client.buy_plan(
+            owned, replace(books.book(market), slug=slug), "up", Decimal("1")
+        )
+        journal.reserve_entry(plan, owned.end)
+        journal.finish_order(slug, Decimal("1"), Decimal("0.95"), Decimal("0.01"))
+        venue.positions[slug] = {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}
+    other = journal.get("other-owned-after-rate-limit")
+    target = "/v1/order/preview" if stage == "preview" else "/v1/order/bot-order-1"
+    venue.on_request = lambda request: (
+        httpx.Response(429, headers={"Retry-After": "60"}, json={"error": "limited"})
+        if request.url.path == target
+        else None
+    )
+    trader = TradingBot(venue.client, journal, books, live=True)
+    trader.tick()
+    assert trader.next_data_attempt == 160.0
+    assert venue.calls[-1][1] == target
+    assert journal.get("other-owned-after-rate-limit") == other
+    assert not any(path.endswith("/book") for _, path, _ in venue.calls)
+    creates = [body for _, path, body in venue.calls if path == "/v1/orders"]
+    assert len(creates) == (stage == "readback")
+    assert all(body["marketSlug"] == market.slug for body in creates)
+    count = len(venue.calls)
+    trader.tick()
+    assert len(venue.calls) == count

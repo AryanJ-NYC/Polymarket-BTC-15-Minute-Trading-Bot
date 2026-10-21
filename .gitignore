@@ -60,6 +60,9 @@ wheels/
 htmlcov/
 .tox/
 
+# Ruff
+.ruff_cache/
+
 # MyPy
 .mypy_cache/
 .dmypy.json
@@ -95,6 +98,10 @@ nautilus_trader.db
 *.db
 *.sqlite
 *.sqlite3
+# SQLite sidecars also contain journal data.
+*.db-*
+*.sqlite-*
+*.sqlite3-*
 
 # =============================================================================
 # REDIS
@@ -139,5 +146,10 @@ $RECYCLE.BIN/
 node_modules/
 .cache/
 
-# Session review packets stay local; PRs and CI retain review evidence.
-/docs/agent/*REVIEW.md
+# Local task artifacts. Commit maintained guides and reproducible test fixtures;
+# keep issue/PR reports, agent sessions and captured provider data out of source.
+/docs/agent/
+/docs/audits/
+/docs/evidence/
+/docs/research/
+/docs/verification*.md

@@ -13,7 +13,9 @@ ExecStart=/opt/polymarket-us/current/.venv/bin/python /opt/polymarket-us/current
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
-Restart=no
+Restart=on-failure
+RestartSec=10s
+RestartPreventExitStatus=2
 KillSignal=SIGINT
 TimeoutStopSec=180
 NoNewPrivileges=true

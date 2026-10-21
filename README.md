@@ -68,7 +68,8 @@ python bot.py --live
 A successful account check or paper run does not establish real-order execution.
 Keep live trading off until you are ready to monitor actual fills. Stopping the
 process leaves filled positions in the account; restart the same mode to resume
-management. An interrupted/unknown submission stops trading for reconciliation.
+management. An unknown submission stops trading for reconciliation (exit status 2).
+Temporary read failures retain known order IDs and recover automatically.
 
 ## Strategy and limits
 
@@ -117,7 +118,8 @@ management. An interrupted/unknown submission stops trading for reconciliation.
   estimated fees. Exits can fill partially. Liquidity, stale books, outages, and
   stopping the process can delay exits; these are not exchange-hosted stops.
 - Paper mode sends no order previews, submissions, or cancellations. It assumes
-  visible top-of-book liquidity fills at the quoted price and estimates fees.
+  visible top-of-book liquidity fills at the quoted price and estimates fees;
+  it does not model exchange queue position.
   P&L stays pending until an executable exit or actual exchange settlement.
   It does not invent random wins or mark unresolved settlement as a loss.
 
@@ -197,8 +199,23 @@ cannot attribute manual sell-and-rebuy trades that restore the same net holding.
 Detected discrepancies require reconciliation; local state is never replaced by
 an assumed settlement just because a provider position disappears.
 
-A known pending order ID is read and reconciled on restart. If a process dies or
-loses the response before saving an ID, it cannot know whether the order reached
+A known pending order ID is read and reconciled during the next tick and on
+restart. Each lookup allows three read attempts with one- and two-second delays
+for 404, 408, 409, timeouts, and server errors. Continued failures preserve the pending
+record, block new entries, and retry on later ticks. Other owned positions can
+still be managed; unknown account orders or out-of-range quantities stop trading.
+Account, order, discovery, and outcome-history 429 responses stop further REST
+requests until Retry-After (at least 30 seconds); stream receipt continues.
+Owned-contract metadata/book fallback limits apply to that contract, allowing
+reconciliation and other owned positions to continue.
+Cancellation acknowledgments also require terminal readback before accounting.
+Preflight/preview failures proven to precede create release their reservation as
+unfilled; failures after create begins keep the reservation for reconciliation.
+BUY plans expire at minute 14 even when preview or account requests take time.
+Logs include the failed HTTP method/path and status without response bodies.
+
+If a process dies or loses the response before saving an ID, it cannot know
+whether the order reached
 the exchange. It stops instead of submitting again. Inspect the matching order
 in Polymarket US and the saved request in the SQLite journal before resolving
 that record. Preserve a copy of the journal and provider order/fill evidence;
@@ -223,7 +240,8 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ruff check .
 ruff format --check .
-python -m compileall -q bot.py execution core tests
+python -m compileall -q bot.py probability_model.py results_report.py execution core tests
+python -m pip check
 ```
 
 Tests replace HTTP transport at the official SDK seam; they do not need your
@@ -234,9 +252,16 @@ loss budgets, and read-only defaults.
 Source map: [bot.py](bot.py) owns the loop; [the exchange client](execution/polymarket_client.py)
 owns US API details; [the journal](execution/trade_journal.py) owns durable order
 and position state; [the strategy](core/strategy_brain/strategies/btc_15min_strategy.py)
-owns signals and entry timing. See [API evidence](docs/polymarket-us-api.md) and
-[verification](docs/verification.md) for provider details and tested limits.
-Agent notes: [decisions](docs/agent/MEMORY.md), [errors](docs/agent/ERRORS.md).
+owns signals and entry timing; [the probability model](probability_model.py) owns
+fitting, feature transforms and artifact identity. See the
+[API contract](docs/polymarket-us-api.md) for provider semantics and limitations.
+
+Keep committed documentation focused on maintained setup, behavior, interfaces
+and operations. Issue plans, review notes, QA run reports, deployment snapshots
+and captured provider data belong in GitHub issues/PRs or ignored local folders
+under `docs/agent/`, `docs/audits/`, `docs/evidence/` and `docs/research/`.
+Local agent memory/error notes remain local; reproducible fixtures belong in
+`tests/`, not captured production evidence.
 
 ## Actual experiment results
 
@@ -265,10 +290,66 @@ policy fields. Keep live and paper journals separate when comparing results.
 
 Existing `--one-trade` and `--duration SECONDS` controls still bound a run. A known
 order ID is retained through transient read failures; up to three reads retry
-that ID, with at most two 30-second waits. The duration is checked between ticks,
+that ID, with one- and two-second waits. Rate limits defer further reads to the
+runner's Retry-After gate. The duration is checked between ticks,
 so in-flight requests/readback can outlast it. An unresolved create is never
 retried. Restart with the same journal; do not delete state or start a second
 runner. A bounded run may finish with pending results that need later readback.
 
-[Issue #5 evidence and remaining live QA](docs/verification-issue-5.md) separates
-fake-transport regression coverage from read-only actual execution evidence.
+## Probability model experiment
+
+Fit a regularized logistic model from the existing journal's observed midpoint,
+spread and seconds remaining, labeled by the official YES settlement outcome.
+The runner now also looks up settlement for skipped contracts; missing and
+nonbinary outcomes are excluded from fitting. This uses the same journal and
+runner. No paper stage is required.
+
+Fitting needs Python 3.11+ and one optional fitting dependency. Inference uses
+only the existing runtime dependencies; keep the larger scientific packages
+outside the small deployment when fitting elsewhere:
+
+```bash
+python -m pip install -r requirements-model.txt
+python probability_model.py fit --journal logs/us-live.sqlite --output logs/model.json
+```
+
+The last 20% of contracts (at least five) form the evaluation set; all observations
+for a contract stay together. Fitting requires at least 20 earlier training
+contracts with both official outcomes represented. Contracts that overlap the
+first evaluation contract are excluded from training. Each contract has equal
+weight. These are practical minimum sample counts, not a profitability or
+statistical promotion gate. An insufficient sample leaves any existing model
+file untouched; baseline collection can continue without `--model`.
+
+The saved JSON holds the feature transform, coefficients, fitting settings,
+chronological split boundaries and prediction metrics. The CLI reports sample
+sizes, Brier score and log loss for the model and midpoint comparator. Evaluation
+contracts are not used to refit this artifact. Compare those prediction metrics
+with actual financial results separately; neither proves profitability.
+
+Select that exact model for entries using `--model logs/model.json` with the
+existing `--duration` or `--one-trade` controls. The model policy keeps the normal
+20 distinct snapshots and minute 13–14 entry window, but uses its fitted Up
+probability instead of heuristic fusion or the baseline midpoint thresholds.
+An unreadable or invalid requested model stops startup before connecting to the
+exchange. There is no automatic fallback from model mode to baseline entries.
+
+For the refreshed book and Decimal-sized executable quantity Q, entries compare
+both `Q*(q - YES ask) - F` for Up and `Q*(YES bid - q) - F` for Down. F is the
+existing conservative rounded fee bound, counted once. `--extra-cost-usd` may
+subtract one additional nonnegative modeled dollar cost per entry. Only a
+strictly positive result may enter. Both policies use the current bankroll
+limits: 2% entry target, 10% funded exposure and 10% daily loss budget, with
+existing depth and five-position checks. Slow account reads and order
+preview cannot extend the minute-14 cutoff.
+
+Decision settings retain the full model JSON, its SHA-256 tag, q, candidate
+quantities, prices, fee bounds and EV. `results_report.py` adds `by_policy` metrics
+for each model tag and baseline policy, using actual fills, fees and P&L; it does
+not treat prediction scores as trading returns. Existing exit settings remain
+in effect, so entry EV is a settlement-payoff estimate, not a promise about the
+realized result of earlier exits.
+
+Track each experiment's sample counts, checks, deployed revision, prediction
+metrics and actual execution results in its GitHub issue or PR. Automated fixture
+coverage, deployed behavior and live execution are separate evidence.
