@@ -930,7 +930,8 @@ class TradingBot:
         )
         value = self.exchange.settlement(row["slug"])
         if value is None:
-            return row["state"] == "closed" and net_filled_quantity == 0
+            # Paper holdings remain charged against journal risk limits while waiting.
+            return not self.live or (row["state"] == "closed" and net_filled_quantity == 0)
         resolution = None
         if self.live and (row["state"] == "open" or net_filled_quantity > 0):
             if row["state"] == "open":

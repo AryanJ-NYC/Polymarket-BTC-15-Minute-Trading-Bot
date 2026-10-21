@@ -148,7 +148,7 @@ actual fill fees and provider cost fields. Disagreements leave P&L unresolved an
 block new entries, except for the settled fee tolerance below. Busted trades
 and ambiguous activity need reconciliation.
 
-Missing settlement or matching resolution activity for retained holdings is
+Missing settlement or matching resolution activity for retained live holdings is
 retryable: retain the original quantity and unknown P&L, pause new entries, and
 check again on later ticks. An ended holding disappearing from account positions
 does not prove a payout. It may await resolution while other owned holdings
@@ -159,6 +159,9 @@ stop.
 
 Fully sold trades retain their fill-derived result while optional official
 outcome metadata is retried; that missing label does not pause new entries.
+Paper holdings awaiting an official outcome stay open and count toward exposure,
+daily loss capacity and the five-position limit; the missing outcome alone does
+not pause otherwise admissible paper entries.
 
 After partial sales, retain actual net sale proceeds and pay settlement only for
 the remaining shares. Resolution cost and entry fees are compared with the

@@ -10,10 +10,13 @@ from bot import TradingBot
 from execution.polymarket_client import parse_market
 
 
+@pytest.mark.parametrize("public_outcome", [True, False])
 def test_missing_resolution_pauses_new_entries_with_current_book(
-    venue, journal, books, monkeypatch, awaiting_settlement
+    venue, journal, books, monkeypatch, awaiting_settlement, public_outcome
 ):
     expired = awaiting_settlement
+    if not public_outcome:
+        venue.on_request = None
     trader = TradingBot(venue.client, journal, books, live=True)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
 
@@ -22,6 +25,33 @@ def test_missing_resolution_pauses_new_entries_with_current_book(
     assert journal.get(expired.slug)["state"] == "open"
     assert journal.get(expired.slug)["pnl"] is None
     assert journal.opportunities()[-1]["decision"] == "position_monitoring_unavailable"
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+def test_delayed_paper_outcome_keeps_exposure_without_blocking_later_entry(
+    venue, journal, books, monkeypatch, awaiting_settlement
+):
+    expired = awaiting_settlement
+    settlement_response = venue.on_request
+    venue.on_request = None  # The official outcome is still 404/unavailable.
+    trader = TradingBot(venue.client, journal, books)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+
+    trader.tick()
+
+    assert journal.get(expired.slug)["state"] == "open"
+    assert journal.get(expired.slug)["quantity"] == "1"
+    assert journal.get(expired.slug)["pnl"] is None
+    current = journal.get(venue.market["slug"])
+    assert current is not None
+    assert current["state"] == "open"
+    assert journal.exposure() == Decimal("0.38") + Decimal(current["entry_cost"])
+
+    venue.on_request = settlement_response
+    trader.tick()
+
+    assert journal.get(expired.slug)["state"] == "closed"
+    assert Decimal(journal.get(expired.slug)["pnl"]) == Decimal("0.62")
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
