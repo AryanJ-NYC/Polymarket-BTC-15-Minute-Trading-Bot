@@ -65,3 +65,8 @@
   ticks/restarts resume pending IDs, block entries and manage other owned rows.
   Unknown submissions/ownership/auth failures use exit 2, excluded from systemd
   restarts. BUY deadline includes minute 14. No database migration is required.
+
+- Live on-failure policy was exercised by another old-runner HTTP404 at
+  20:28:01 UTC; systemd resumed LIVE mode at 20:28:11 UTC. At 20:33:42 UTC the
+  service was active/running on main 022cdc4 with NRestarts=1. PR recovery code
+  remains separate from this verified supervisor behavior until merge.

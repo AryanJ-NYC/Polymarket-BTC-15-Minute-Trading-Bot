@@ -67,7 +67,9 @@ Final commands (project environment executable, worktree cwd):
 - `git diff --check`: passed.
 - On the bound Droplet, `systemd-analyze verify` passed; effective unit readback
   shows on-failure, 10 seconds and RestartPreventExitStatus=2. Live status was
-  active/running and current main 022cdc4; no failure restarts observed.
+  active/running and current main 022cdc4. At 20:33:42 UTC NRestarts=1; logs
+  show another old-runner HTTP404 exit at 20:28:01 UTC followed by automatic
+  LIVE resumption at 20:28:11 UTC, proving the installed 10-second restart.
 
 No configured typecheck or build command exists; compilation is syntax checking,
 not a claim of static type safety. Fallow, React Doctor, Impeccable and browser

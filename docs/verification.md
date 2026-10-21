@@ -166,3 +166,8 @@ collected commission in the incident. This patch retains terminal order-based
 accounting and does not claim an independently reconciled account-wide loss.
 Account-scoped journal ownership, broader strategy/paper correctness and economic
 validation remain outside this incident-recovery change.
+
+The installed restart policy was subsequently exercised by an actual old-runner
+HTTP404 exit at 20:28:01 UTC. Systemd resumed LIVE mode at 20:28:11 UTC; readback
+at 20:33:42 UTC showed active/running with NRestarts=1 on main 022cdc4. This
+verifies supervisor recovery separately from the application's in-process fix.
