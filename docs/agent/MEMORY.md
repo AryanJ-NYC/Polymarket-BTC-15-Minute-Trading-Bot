@@ -80,6 +80,7 @@
   entry, after urgent management, one GET per 30 seconds with rotating pagination.
 - Issue #6 local verification:174 tests plus lint/format/compileall/pip pass and
   independent review closure. Live run remains blocked: read-only deployed
-  022cdc4 journal has zero opportunity observations. No real-data artifact or
+  initial 022cdc4 and later auto-updated 279e1f7 journal snapshots have zero
+  opportunity observations (21:10 UTC). No real-data artifact or
   model financial comparison exists; keep issue open. Do not confuse selectable
   model support or fixture execution with live activation or real fills.

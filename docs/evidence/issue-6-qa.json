@@ -76,13 +76,19 @@
     }
   ],
   "live_source_read_only": {
-    "deployment_revision": "022cdc4c33ec5aa71294b2ecdd42f3fcf8a420d8",
+    "deployment_revision": "279e1f7f4bc72e124a71570f7270ae51c6facfe9",
     "journal_tables": [
-      "trades"
+      "trades",
+      "opportunities"
     ],
     "opportunity_rows": 0,
     "observed_contracts": 0,
     "real_model_fit": "Blocked: no recorded opportunities",
-    "model_tagged_live_run": "Not run: real-money execution unavailable; no real-data model"
-  }
+    "model_tagged_live_run": "Not run: real-money execution unavailable; no real-data model",
+    "initial_deployment_revision": "022cdc4c33ec5aa71294b2ecdd42f3fcf8a420d8",
+    "checked_at": "2026-10-21T21:10:26.207726+00:00",
+    "note": "Existing main updater advanced independently during work; no issue-6 deployment or service mutation was performed."
+  },
+  "published_implementation_revision": "f7341141cbd4218a0f8e10e5b22e72a9f36f5fbc",
+  "postpublication_focused_qa": "64 passed; clean worktree after QA"
 }

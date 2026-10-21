@@ -48,10 +48,14 @@ No real-money model run, provider submission, cancellation or service activation
 was performed. The agent cannot place financial trades or activate a trading
 runner. This remains an AI QA item, not a completed or reassigned Human QA item.
 
-A read-only SSH inspection on October 21 found the existing service active on
-`022cdc4c33ec5aa71294b2ecdd42f3fcf8a420d8`, a separate target from this branch.
-SQLite opened with `mode=ro` contained only `trades`: **zero opportunity rows and
-zero observed contracts**. There is no real observation/outcome sample to fit,
+Initial read-only SSH inspection found the existing service active on
+`022cdc4c33ec5aa71294b2ecdd42f3fcf8a420d8`. The existing main updater advanced
+independently during this work: post-publication QA observed base release
+`279e1f7f4bc72e124a71570f7270ae51c6facfe9`, also active. Neither is this PR's
+implementation revision `f7341141cbd4218a0f8e10e5b22e72a9f36f5fbc`.
+At **21:10:26 UTC on October 21**, SQLite opened with `mode=ro` had `trades` and
+`opportunities`, still **zero opportunity rows and zero observed contracts**.
+There is no real observation/outcome sample to fit,
 so no actual-data artifact, model-tagged live fills, fees/P&L or baseline/model
 financial comparison can be reported. Three legacy trade rows are not a fitting
 sample; their old accounting is not evidence for this new policy. Earlier
@@ -82,6 +86,7 @@ shared fee arithmetic and official-versus-account settlement evidence. No dead
 code or unnecessary abstraction required deletion.
 
 - Full suite: **174 passed**.
+- Post-publication focused QA at implementation `f734114`: **64 passed**, clean worktree.
 - Ruff lint and formatting: **Passed**.
 - Compileall, pip consistency and diff whitespace: **Passed**.
 - CLI help and standalone repeated-fit/read-only fixture checks: **Passed**.
