@@ -90,6 +90,37 @@ def test_unknown_fee_remains_unknown_after_zero_settlement(venue, clock, tmp_pat
     journal.close()
 
 
+def test_report_separates_kelly_from_same_model_and_shows_planned_and_actual(venue, tmp_path):
+    path = tmp_path / "kelly-report.sqlite"
+    journal = TradeJournal(path)
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    legacy = {"model_tag": "same-model"}
+    kelly = {
+        **legacy,
+        "sizing_policy": "quarter-kelly-v1",
+        "prediction": {"candidates": {"up": {"planned_spending": "0.98"}}},
+    }
+    for slug, settings in [("legacy", legacy), ("kelly", kelly)]:
+        journal.reserve_entry(replace(plan, slug=slug), market.end, settings=settings)
+        journal.finish_order(slug, Decimal("0.5"), Decimal("0.32"), Decimal("0.01"))
+    before = journal.records()
+    command = [
+        sys.executable,
+        str(Path(__file__).parents[1] / "results_report.py"),
+        "--journal",
+        str(path),
+    ]
+    result = json.loads(
+        subprocess.run([*command, "--json"], capture_output=True, text=True, check=True).stdout
+    )
+    assert set(result["by_policy"]) == {"same-model", "same-model/quarter-kelly-v1"}
+    report = subprocess.run(command, capture_output=True, text=True, check=True).stdout
+    assert "planned spend: $0.98 | filled cost: $0.33" in report
+    assert journal.records() == before
+    journal.close()
+
+
 def test_resolution_fee_discrepancy_retains_both_sources(venue, tmp_path):
     journal = TradeJournal(tmp_path / "disputed.sqlite")
     market = parse_market(venue.market)

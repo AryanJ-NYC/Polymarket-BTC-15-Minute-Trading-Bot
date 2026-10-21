@@ -32,7 +32,13 @@ from execution.polymarket_client import (
     retryable_api_error,
     validate_book,
 )
-from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
+from execution.risk import (
+    DAILY_LOSS_FRACTION,
+    ENTRY_BANKROLL_FRACTION,
+    KELLY_MULTIPLIER,
+    MAX_EXPOSURE_FRACTION,
+    kelly_fraction,
+)
 from execution.trade_journal import TradeJournal, pending_plan
 from probability_model import ProbabilityModel, load_model
 
@@ -55,7 +61,7 @@ def main() -> int:
     parser.add_argument("--duration", type=float, help="Stop after this many seconds")
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env.us")
     parser.add_argument(
-        "--model", type=Path, help="Use a fitted probability model JSON for entries"
+        "--model", type=Path, help="Use quarter-Kelly model entries held to settlement"
     )
     parser.add_argument(
         "--extra-cost-usd",
@@ -209,7 +215,10 @@ class TradingBot:
         }
         if model is not None:
             self.settings.update(
-                policy_version="btc-15m-logistic-v1",
+                policy_version="btc-15m-logistic-kelly-v1",
+                sizing_policy="quarter-kelly-v1",
+                kelly_multiplier=str(KELLY_MULTIPLIER),
+                exit_policy="settlement",
                 model_tag=model.tag,
                 model=model.artifact,
                 extra_cost_usd=str(extra_cost),
@@ -399,7 +408,9 @@ class TradingBot:
                     self.market.start + timedelta(seconds=self.settings["entry_end_seconds"]),
                 ),
             )
-            self._validate_execution(plan, self.market, book, streamed=True)
+            self._validate_execution(
+                plan, self.market, book, streamed=True, bankroll=account.bankroll
+            )
         except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
             if not _unavailable_book(exc):
                 raise
@@ -447,7 +458,7 @@ class TradingBot:
                 )
             return None, settings
         logger.info(
-            "Entry sizing | bankroll=${} | target=${} | budget=${} | exposure=${} | "
+            "Entry ceiling | bankroll=${} | maximum target=${} | budget=${} | exposure=${} | "
             "buying power=${} | limit={}",
             account.bankroll,
             account.bankroll * ENTRY_BANKROLL_FRACTION,
@@ -470,14 +481,30 @@ class TradingBot:
             if self.model is None:
                 plan = self.exchange.buy_plan(self.market, book, outcome, budget)
             else:
-                plan, prediction = self._model_plan(book, budget)
+                plan, prediction = self._model_plan(book, budget, account.bankroll, reason)
                 settings = {**self.settings, "prediction": prediction}
                 if plan is None:
                     self.journal.record_opportunity(
-                        self.market, book, "nonpositive_edge", settings=settings
+                        self.market,
+                        book,
+                        prediction.get("skip", "model_entry_skipped"),
+                        settings=settings,
                     )
                     return None, settings
                 outcome = plan.outcome
+                sizing = prediction["candidates"][outcome]
+                logger.info(
+                    "Quarter Kelly | bankroll=${} | probability={} | fraction={} | target=${} | "
+                    "budget=${} | planned spending=${} | limit={} | execution limit={}",
+                    account.bankroll,
+                    sizing["probability"],
+                    sizing["entry_fraction"],
+                    sizing["target_usd"],
+                    sizing["affordable_budget"],
+                    sizing["planned_spending"],
+                    sizing["limit"],
+                    sizing["execution_limit"],
+                )
         except ValueError as exc:
             logger.info("Entry skipped: {}", exc)
             if capture:
@@ -495,41 +522,73 @@ class TradingBot:
             return None, settings
         return plan, settings
 
-    def _model_plan(self, book, budget):
+    def _model_plan(self, book, budget, bankroll, limiting_reason):
         seconds_remaining = (self.market.end - datetime.now(timezone.utc)).total_seconds()
-        q = self.model.predict(
-            midpoint=book.mid,
-            spread=book.asks[0][0] - book.bids[0][0],
-            seconds_remaining=seconds_remaining,
-        )
         prediction = {
-            "q_up": str(q),
+            "bankroll": str(bankroll),
             "seconds_remaining": seconds_remaining,
             "quote_timestamp": book.timestamp.isoformat(),
             "candidates": {},
         }
+        try:
+            q = number(
+                self.model.predict(
+                    midpoint=book.mid,
+                    spread=book.asks[0][0] - book.bids[0][0],
+                    seconds_remaining=seconds_remaining,
+                )
+            )
+            if not 0 <= q <= 1:
+                raise ValueError("Settlement probability must be between zero and one")
+        except ValueError:
+            prediction["skip"] = "invalid_probability"
+            return None, prediction
+        prediction["q_up"] = str(q)
         candidates = []
         for outcome in ("up", "down"):
-            try:
-                plan = self.exchange.buy_plan(self.market, book, outcome, budget)
-            except ValueError:
-                prediction["candidates"][outcome] = {"skip": "insufficient_depth_or_invalid_plan"}
-                continue
-            payout_probability = q if outcome == "up" else 1 - q
-            ev = (
-                plan.quantity * payout_probability
-                - plan.notional
-                - plan.fee_bound
-                - self.extra_cost
-            )
-            prediction["candidates"][outcome] = {
-                "quantity": str(plan.quantity),
-                "yes_price": str(plan.yes_price),
-                "fee_bound": str(plan.fee_bound),
-                "ev_usd": str(ev),
+            probability = q if outcome == "up" else 1 - q
+            price = book.asks[0][0] if outcome == "up" else 1 - book.bids[0][0]
+            unit_cost = price + self.market.fee_coefficient / 4
+            fraction = kelly_fraction(probability, unit_cost)
+            target = bankroll * fraction
+            rounding = Decimal("0.01") if self.market.fee_coefficient else Decimal("0")
+            affordable = max(Decimal("0"), min(budget, target) - self.extra_cost - rounding)
+            sizing = {
+                "probability": str(probability),
+                "unit_cost": str(unit_cost),
+                "entry_fraction": str(fraction),
+                "target_usd": str(target),
+                "affordable_budget": str(affordable),
+                "fee_rounding_reserve": str(rounding),
+                "limit": limiting_reason if budget < target else "quarter Kelly target",
             }
+            prediction["candidates"][outcome] = sizing
+            if affordable <= 0:
+                sizing["skip"] = "nonpositive_kelly_budget"
+                continue
+            try:
+                plan = self.exchange.buy_plan(self.market, book, outcome, affordable)
+            except ValueError:
+                sizing["skip"] = "insufficient_depth_or_invalid_plan"
+                continue
+            ev = plan.quantity * probability - plan.notional - plan.fee_bound - self.extra_cost
+            sizing.update(
+                {
+                    "quantity": str(plan.quantity),
+                    "yes_price": str(plan.yes_price),
+                    "fee_bound": str(plan.fee_bound),
+                    "ev_usd": str(ev),
+                    "planned_spending": str(plan.budget),
+                    "execution_limit": "visible depth"
+                    if (book.asks[0][1] if outcome == "up" else book.bids[0][1])
+                    < affordable / unit_cost
+                    else "market increment / fee rounding",
+                }
+            )
             if ev > 0:
                 candidates.append((ev, plan))
+            else:
+                sizing["skip"] = "nonpositive_settlement_ev"
         return max(candidates, key=lambda candidate: candidate[0])[
             1
         ] if candidates else None, prediction
@@ -557,7 +616,10 @@ class TradingBot:
 
     def _execute(self, plan, market, book, *, streamed: bool) -> None:
         def validate():
-            self._validate_execution(plan, market, book, streamed=streamed)
+            bankroll = None
+            if self.model is not None and plan.action == "BUY":
+                bankroll = number(self.journal.get(plan.slug)["settings"]["prediction"]["bankroll"])
+            self._validate_execution(plan, market, book, streamed=streamed, bankroll=bankroll)
 
         try:
             validate()
@@ -704,7 +766,7 @@ class TradingBot:
             markets[self.market.slug] = self.market
         self.books.set_markets(list(markets.values()))
 
-    def _validate_execution(self, plan, market, book, *, streamed: bool) -> None:
+    def _validate_execution(self, plan, market, book, *, streamed: bool, bankroll=None) -> None:
         if datetime.now(timezone.utc) >= plan.expires_at:
             raise ValueError("Order plan has expired")
         latest = self.books.book(market) if streamed else book
@@ -727,12 +789,24 @@ class TradingBot:
                 ):
                     raise ValueError("Entry direction is no longer eligible")
             else:
-                q = self.model.predict(
-                    midpoint=latest.mid,
-                    spread=latest.asks[0][0] - latest.bids[0][0],
-                    seconds_remaining=(market.end - datetime.now(timezone.utc)).total_seconds(),
+                q = number(
+                    self.model.predict(
+                        midpoint=latest.mid,
+                        spread=latest.asks[0][0] - latest.bids[0][0],
+                        seconds_remaining=(market.end - datetime.now(timezone.utc)).total_seconds(),
+                    )
                 )
                 probability = q if plan.outcome == "up" else 1 - q
+                unit_cost = (
+                    latest.asks[0][0] if plan.outcome == "up" else 1 - latest.bids[0][0]
+                ) + market.fee_coefficient / 4
+                fraction = kelly_fraction(probability, unit_cost)
+                rounding = Decimal("0.01") if market.fee_coefficient else Decimal("0")
+                if (
+                    bankroll is None
+                    or plan.budget + self.extra_cost + rounding > bankroll * fraction
+                ):
+                    raise ValueError("Kelly capacity is no longer sufficient")
                 if (
                     plan.quantity * probability - plan.notional - plan.fee_bound - self.extra_cost
                     <= 0
@@ -824,6 +898,8 @@ class TradingBot:
                         self._settle_position(row)
                     continue
                 if row["state"] != "open":
+                    continue
+                if (row.get("settings") or {}).get("exit_policy") == "settlement":
                     continue
                 if row["entry_cost"] is None or row["proceeds"] is None:
                     logger.warning(

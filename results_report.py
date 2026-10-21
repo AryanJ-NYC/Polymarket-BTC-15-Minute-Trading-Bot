@@ -41,9 +41,17 @@ def main() -> int:
             if key != "trades":
                 print(f"{key}: {value if value is not None else 'pending / unknown'}")
         for row in rows:
+            settings = row.get("settings") or {}
+            sizing = settings.get("prediction", {}).get("candidates", {}).get(row["outcome"], {})
+            spending = (
+                f" | planned spend: ${sizing['planned_spending']} | filled cost: "
+                f"{('$' + row['entry_cost']) if row.get('entry_cost') is not None else 'unknown'}"
+                if "planned_spending" in sizing
+                else ""
+            )
             print(
                 f"{row['slug']} | {row['outcome']} | {row['state']} | "
-                f"net P&L: {row['pnl'] if row['pnl'] is not None else 'pending / unknown'}"
+                f"net P&L: {row['pnl'] if row['pnl'] is not None else 'pending / unknown'}{spending}"
             )
     return 0
 
@@ -108,6 +116,8 @@ def _summarize(rows: list[dict]) -> dict:
 
 def _policy(row: dict) -> str:
     settings = row.get("settings") or {}
+    if settings.get("model_tag") and settings.get("sizing_policy"):
+        return f"{settings['model_tag']}/{settings['sizing_policy']}"
     return settings.get("model_tag") or settings.get("policy_version") or "legacy"
 
 

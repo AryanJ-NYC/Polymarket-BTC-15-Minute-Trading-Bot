@@ -114,8 +114,9 @@ Temporary read failures retain known order IDs and recover automatically.
   losses plus the full cost of still-open positions and the next order. This is
   the bot's own ledger, not
   a claim about account-wide daily P&L or strategy profitability.
-- Checks for 30% stop loss and 20% take profit using executable exit prices and
-  estimated fees. Exits can fill partially. Liquidity, stale books, outages, and
+- Baseline and legacy positions check for 30% stop loss and 20% take profit using
+  executable exit prices and estimated fees. Exits can fill partially. Liquidity,
+  stale books, outages, and
   stopping the process can delay exits; these are not exchange-hosted stops.
 - Paper mode sends no order previews, submissions, or cancellations. It assumes
   visible top-of-book liquidity fills at the quoted price and estimates fees;
@@ -339,16 +340,62 @@ both `Q*(q - YES ask) - F` for Up and `Q*(YES bid - q) - F` for Down. F is the
 existing conservative rounded fee bound, counted once. `--extra-cost-usd` may
 subtract one additional nonnegative modeled dollar cost per entry. Only a
 strictly positive result may enter. Both policies use the current bankroll
-limits: 2% entry target, 10% funded exposure and 10% daily loss budget, with
+limits: at most 2% per entry, 10% funded exposure and 10% daily loss budget, with
 existing depth and five-position checks. Slow account reads and order
 preview cannot extend the minute-14 cutoff.
 
 Decision settings retain the full model JSON, its SHA-256 tag, q, candidate
 quantities, prices, fee bounds and EV. `results_report.py` adds `by_policy` metrics
-for each model tag and baseline policy, using actual fills, fees and P&L; it does
-not treat prediction scores as trading returns. Existing exit settings remain
-in effect, so entry EV is a settlement-payoff estimate, not a promise about the
-realized result of earlier exits.
+for each model tag and sizing policy, using actual fills, fees and P&L. Legacy
+fixed-budget results remain separate from quarter-Kelly results for the same
+model. The text report shows planned spending and actual filled entry cost;
+JSON retains the full sizing trace and actual-fill records.
+
+### Quarter-Kelly model sizing
+
+New entries selected with `--model` use quarter Kelly and **hold to official
+settlement**. This matches the model's settlement label and $1/zero payoff;
+they do not send +20%/-30% price exits. Baseline entries keep their normal 2%
+target and price exits. Existing positions retain their saved exit policy
+across restarts, including legacy model trades with price exits.
+
+For the selected side, `q` is `q_up` for Up and `1 - q_up` for Down. Use its
+executable outcome price (YES ask for Up, `1 - YES bid` for Down):
+
+```text
+c = outcome price + market feeCoefficient / 4
+full Kelly = max(0, (q - c) / (1 - c))       # 0 < c < 1
+entry fraction = min(0.02, 0.25 * full Kelly)
+target = current authenticated bankroll * entry fraction
+exchange budget = max(0, min(target, affordable risk budget)
+                         - modeled extra cost - fee rounding allowance)
+```
+
+The conservative linear fee reserve uses its maximum at p=0.5. A further $0.01
+allowance for fee-charging markets covers cent rounding; zero-fee markets need
+no rounding allowance. The planner then applies exact rounded fees, depth and
+increments inside this budget. Final planned settlement EV must remain strictly
+positive after rounded fees and modeled extra cost. Costs at or above $1,
+nonpositive edge, invalid probability, and below-minimum budgets skip entry.
+No minimum order is funded by increasing the budget.
+
+With zero fees and a $0.50 outcome price, q=.50 yields no bet, q=.52 targets
+1% of bankroll, and q=.54 reaches the 2% ceiling. Those targets are $1/$2 at
+$100 bankroll and $2.50/$5 at $250. Fees, modeled extra costs, buying power,
+10% exposure/daily limits, five positions, depth and increments can reduce them.
+Current account refreshes determine bankroll; preflight and post-preview checks
+reject orders whose refreshed probability no longer supports the planned stake.
+
+Saved settings identify `quarter-kelly-v1`, the .25 multiplier and settlement
+exit policy. Each candidate records its probability, conservative unit cost,
+bankroll-derived target, fraction, affordable budget, rounding reserve, limiting
+guard and planned spending. Actual partial fills remain accounted separately.
+
+Quarter Kelly is an experimental risk choice. The formula is a linear-cost
+approximation with a separate rounding reserve, not exact discrete log-utility
+optimization. The fitted probabilities have no guaranteed calibration or
+profitability; heuristic indicator confidence is never substituted for them.
+This policy adds no invented uncertainty interval or claim of optimal sizing.
 
 Track each experiment's sample counts, checks, deployed revision, prediction
 metrics and actual execution results in its GitHub issue or PR. Automated fixture

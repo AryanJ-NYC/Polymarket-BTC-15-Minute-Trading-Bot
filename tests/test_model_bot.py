@@ -66,15 +66,236 @@ def test_model_enters_up_with_fee_bound_and_records_actual_partial_fill(
         assert row["settings"]["model"] == model.artifact
         prediction = row["settings"]["prediction"]
         assert Decimal(prediction["q_up"]) == Decimal("0.8")
-        assert Decimal(prediction["candidates"]["up"]["quantity"]) == Decimal("1.49")
+        assert Decimal(prediction["candidates"]["up"]["quantity"]) == Decimal("1.47")
         assert Decimal(prediction["candidates"]["up"]["fee_bound"]) == Decimal("0.03")
-        assert Decimal(prediction["candidates"]["up"]["ev_usd"]) == Decimal("0.1935")
+        assert Decimal(prediction["candidates"]["up"]["ev_usd"]) == Decimal("0.1905")
         assert Decimal(row["quantity"]) == Decimal("0.5")
         assert Decimal(row["entry_cost"]) == Decimal("0.33")
         assert journal.opportunities()[-1]["decision"] == "entry_reserved"
         assert sum(m == "POST" and p == "/v1/orders" for m, p, _ in venue.calls) == 1
     finally:
         journal.close()
+
+
+@pytest.mark.parametrize(
+    "q,bankroll,quantity,target",
+    [
+        (0.51, 100, "1", "0.50"),
+        (0.52, 100, "2", "1"),
+        (0.54, 100, "4", "2"),
+        (0.8, 100, "4", "2"),
+        (0.52, 250, "5", "2.50"),
+        (0.54, 250, "10", "5"),
+    ],
+)
+@pytest.mark.parametrize("outcome", ["up", "down"])
+def test_model_sizes_from_quarter_kelly_instead_of_fixed_bankroll_target(
+    venue, tmp_path, clock, books, stream_feed, monkeypatch, q, bankroll, quantity, target, outcome
+):
+    venue.balance.update(currentBalance=bankroll, buyingPower=bankroll)
+    venue.market["feeCoefficient"] = 0
+    venue.bid, venue.ask, venue.fill_price = "0.49", "0.50", "0.50"
+    probability = Decimal(str(q))
+    if outcome == "down":
+        venue.bid, venue.ask = "0.50", "0.51"
+        probability = 1 - probability
+    with_journal = TradeJournal(tmp_path / "kelly.sqlite")
+    try:
+        trader = TradingBot(
+            venue.client, with_journal, books, live=True, model=saved_model(tmp_path, q)
+        )
+        # Control the forecast seam for exact arithmetic examples. Sigmoid's
+        # floating-point rounding can put a prediction just below an increment.
+        monkeypatch.setattr(type(trader.model), "predict", lambda *args, **kwargs: probability)
+        warm_up(trader, venue, clock, stream_feed)
+        trader.tick()
+        request = next(
+            body for method, path, body in venue.calls if method == "POST" and path == "/v1/orders"
+        )
+        assert Decimal(str(request["quantity"])) == Decimal(quantity)
+        row = with_journal.records()[0]
+        assert row["outcome"] == outcome
+        sizing = row["settings"]["prediction"]["candidates"][outcome]
+        assert Decimal(sizing["target_usd"]) == pytest.approx(Decimal(target))
+        assert Decimal(sizing["planned_spending"]) <= Decimal(sizing["target_usd"])
+        assert row["settings"]["sizing_policy"] == "quarter-kelly-v1"
+        assert row["settings"]["exit_policy"] == "settlement"
+    finally:
+        with_journal.close()
+
+
+@pytest.mark.parametrize("q", [Decimal("0"), Decimal("1")])
+def test_certain_model_probability_still_obeys_two_percent_cap(
+    venue, journal, tmp_path, clock, monkeypatch, books, stream_feed, q
+):
+    trader = TradingBot(venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8))
+    monkeypatch.setattr(type(trader.model), "predict", lambda *args, **kwargs: q)
+    warm_up(trader, venue, clock, stream_feed)
+    trader.tick()
+    row = journal.records()[0]
+    sizing = row["settings"]["prediction"]["candidates"][row["outcome"]]
+    assert Decimal(sizing["entry_fraction"]) == Decimal("0.02")
+    assert Decimal(sizing["planned_spending"]) <= Decimal("0.99")
+
+
+@pytest.mark.parametrize("q,coefficient,ask", [(0.50001, 0, "0.50"), (0.8, 1, "0.99")])
+def test_tiny_kelly_target_or_unit_cost_over_one_skips(
+    venue, journal, tmp_path, clock, books, stream_feed, q, coefficient, ask
+):
+    venue.market["feeCoefficient"] = coefficient
+    venue.bid, venue.ask = "0.49", ask
+    trader = TradingBot(venue.client, journal, books, live=True, model=saved_model(tmp_path, q))
+    warm_up(trader, venue, clock, stream_feed)
+    trader.tick()
+    assert journal.records() == []
+    assert journal.opportunities()[-1]["decision"] == "model_entry_skipped"
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize(
+    "q,outcome,quantity,spending", [(0.8, "up", "1.33", "0.8845"), (0.2, "down", "2.29", "0.8873")]
+)
+def test_kelly_spending_reserves_extra_cost_and_fee_rounding(
+    venue, journal, tmp_path, clock, books, stream_feed, q, outcome, quantity, spending
+):
+    trader = TradingBot(
+        venue.client,
+        journal,
+        books,
+        live=True,
+        model=saved_model(tmp_path, q),
+        extra_cost=Decimal("0.10"),
+    )
+    warm_up(trader, venue, clock, stream_feed)
+    trader.tick()
+    row = journal.records()[0]
+    sizing = row["settings"]["prediction"]["candidates"][outcome]
+    assert Decimal(sizing["quantity"]) == Decimal(quantity)
+    assert Decimal(sizing["planned_spending"]) == Decimal(spending)
+    assert Decimal(sizing["affordable_budget"]) == Decimal("0.89")
+    assert Decimal(spending) + Decimal("0.10") + Decimal("0.01") <= Decimal("1")
+
+
+def test_kelly_mode_keeps_legacy_model_price_exit(venue, journal, tmp_path, books):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    journal.reserve_entry(plan, market.end, settings={"model_tag": "legacy-model"})
+    journal.finish_order(market.slug, Decimal("1"), Decimal("0.50"), Decimal("0"))
+    trader = TradingBot(venue.client, journal, books, model=saved_model(tmp_path, 0.8))
+    trader.tick()
+    assert journal.get(market.slug)["state"] == "closed"
+    assert [order["action"] for order in journal.get(market.slug)["orders"]] == ["BUY", "SELL"]
+
+
+def test_kelly_pending_partial_fill_recovers_after_restart_without_second_create(
+    venue, journal, tmp_path, clock, monkeypatch, books, stream_feed
+):
+    monkeypatch.setattr("execution.polymarket_client.sleep", lambda _: None)
+    model = saved_model(tmp_path, 0.8)
+    trader = TradingBot(venue.client, journal, books, live=True, model=model)
+    warm_up(trader, venue, clock, stream_feed)
+    venue.failures[("GET", "/v1/order/bot-order-1")] = [404, 404, 404]
+    trader.tick()
+    slug = trader.market.slug
+    assert journal.get(slug)["pending"] is not None
+    venue.positions = {
+        slug: {"netPositionDecimal": "0.5", "qtyAvailableDecimal": "0.5", "expired": False}
+    }
+    restarted = TradingBot(venue.client, journal, books, live=True, model=model)
+    restarted.tick()
+    row = journal.get(slug)
+    assert row["pending"] is None
+    assert row["state"] == "open"
+    assert Decimal(row["quantity"]) == Decimal("0.5")
+    assert Decimal(row["entry_cost"]) == Decimal("0.33")
+    assert row["settings"]["exit_policy"] == "settlement"
+    assert sum(method == "POST" and path == "/v1/orders" for method, path, _ in venue.calls) == 1
+
+
+def test_kelly_budget_respects_remaining_daily_loss_room(
+    venue, journal, tmp_path, clock, books, stream_feed
+):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
+    journal.reserve_entry(replace(plan, slug="earlier-loss"), market.end)
+    journal.finish_order("earlier-loss", Decimal("10"), Decimal("4.80"), Decimal("0"))
+    journal.settle("earlier-loss", Decimal("0"))
+    trader = TradingBot(venue.client, journal, books, model=saved_model(tmp_path, 0.8))
+    warm_up(trader, venue, clock, stream_feed)
+    trader.tick()
+    row = journal.get(market.slug)
+    sizing = row["settings"]["prediction"]["candidates"]["up"]
+    assert sizing["limit"] == "daily 10% loss budget"
+    assert Decimal(sizing["affordable_budget"]) == Decimal("0.19")
+    assert Decimal(row["entry_cost"]) <= Decimal("0.19")
+
+
+@pytest.mark.parametrize(
+    "settlement,bid,ask,pnl", [(1, "0.95", "0.96", "0.4945"), (0, "0.20", "0.22", "-0.9755")]
+)
+def test_kelly_position_keeps_settlement_exit_after_baseline_restart(
+    venue, journal, tmp_path, clock, books, stream_feed, settlement, bid, ask, pnl
+):
+    trader = TradingBot(venue.client, journal, books, model=saved_model(tmp_path, 0.8))
+    warm_up(trader, venue, clock, stream_feed)
+    trader.tick()
+    market = trader.market
+    assert journal.get(market.slug)["state"] == "open"
+    clock.current += timedelta(seconds=3)
+    venue.bid, venue.ask = bid, ask
+    publish_book(stream_feed, venue, clock)
+    restarted = TradingBot(venue.client, journal, books, one_trade=True)
+    restarted.tick()
+    assert journal.get(market.slug)["state"] == "open"
+    assert len(journal.get(market.slug)["orders"]) == 1
+    clock.current = market.end + timedelta(seconds=1)
+    venue.settlement = settlement
+    restarted.tick()
+    row = journal.get(market.slug)
+    assert row["state"] == "closed"
+    assert Decimal(row["pnl"]) == Decimal(pnl)
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize(
+    "q", [None, Decimal("NaN"), Decimal("Infinity"), Decimal("-0.1"), Decimal("1.1")]
+)
+def test_invalid_model_probability_skips_without_fallback(
+    venue, journal, tmp_path, clock, monkeypatch, books, stream_feed, q
+):
+    trader = TradingBot(venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8))
+    monkeypatch.setattr(type(trader.model), "predict", lambda *args, **kwargs: q)
+    warm_up(trader, venue, clock, stream_feed)
+    trader.tick()
+    assert journal.opportunities()[-1]["decision"] == "invalid_probability"
+    assert journal.records() == []
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+def test_prediction_drop_after_preview_blocks_positive_ev_but_oversized_order(
+    venue, journal, tmp_path, clock, monkeypatch, books, stream_feed
+):
+    venue.balance.update(currentBalance=100, buyingPower=100)
+    venue.market["feeCoefficient"] = 0
+    venue.bid, venue.ask = "0.49", "0.50"
+    q = [Decimal("0.52")]
+    trader = TradingBot(venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.52))
+    monkeypatch.setattr(type(trader.model), "predict", lambda *args, **kwargs: q[0])
+    warm_up(trader, venue, clock, stream_feed)
+
+    def after_preview(request):
+        if request.url.path == "/v1/order/preview":
+            q[0] = Decimal("0.51")
+
+    venue.on_request = after_preview
+    trader.tick()
+    row = journal.records()[0]
+    assert row["state"] == "unfilled"
+    assert row["pending"] is None
+    assert not any(method == "POST" and path == "/v1/orders" for method, path, _ in venue.calls)
+    trader.tick()
+    assert len(journal.records()) == 1
+    assert sum(path == "/v1/order/preview" for _, path, _ in venue.calls) == 1
 
 
 def test_preview_crossing_cutoff_skips_without_unknown_submission(
@@ -110,9 +331,9 @@ def test_preview_crossing_cutoff_skips_without_unknown_submission(
 @pytest.mark.parametrize(
     "q,extra_cost,coefficient,bid,ask,expected_ev",
     [
-        (0.5, "0", 0.0, "0.49", "0.50", "0"),
-        (0.5, "0", 0.0695, "0.49", "0.51", "-0.0489"),
-        (0.8, "0.1935", 0.0695, "0.63", "0.65", "0"),
+        (0.5, "0", 0.0, "0.49", "0.50", None),
+        (0.5, "0", 0.0695, "0.49", "0.51", None),
+        (0.8, "0.1935", 0.0695, "0.63", "0.65", "-0.0350"),
     ],
 )
 def test_nonpositive_ev_never_submits(
@@ -133,10 +354,13 @@ def test_nonpositive_ev_never_submits(
         warm_up(trader, venue, clock, stream_feed)
         trader.tick()
         observation = journal.opportunities()[-1]
-        assert observation["decision"] == "nonpositive_edge"
-        assert Decimal(
-            observation["settings"]["prediction"]["candidates"]["up"]["ev_usd"]
-        ) == Decimal(expected_ev)
+        assert observation["decision"] == "model_entry_skipped"
+        candidate = observation["settings"]["prediction"]["candidates"]["up"]
+        if expected_ev is None:
+            assert candidate["skip"] == "nonpositive_kelly_budget"
+        else:
+            assert Decimal(candidate["ev_usd"]) == Decimal(expected_ev)
+            assert candidate["skip"] == "nonpositive_settlement_ev"
         assert journal.records() == []
         assert all(m == "GET" for m, _, _ in venue.calls)
     finally:
@@ -156,9 +380,9 @@ def test_model_can_select_down_against_baseline_direction(
         row = journal.records()[0]
         assert row["outcome"] == "down"
         candidate = row["settings"]["prediction"]["candidates"]["down"]
-        assert Decimal(candidate["quantity"]) == Decimal("2.58")
+        assert Decimal(candidate["quantity"]) == Decimal("2.55")
         assert Decimal(candidate["fee_bound"]) == Decimal("0.04")
-        assert Decimal(candidate["ev_usd"]) == Decimal("1.0694")
+        assert Decimal(candidate["ev_usd"]) == Decimal("1.0565")
         order = next(
             body for method, path, body in venue.calls if method == "POST" and path == "/v1/orders"
         )
@@ -189,7 +413,7 @@ def test_refreshed_book_removes_apparent_edge(venue, tmp_path, clock, books, str
         venue.on_request = changed_quote
         trader.tick()
         observation = journal.opportunities()[-1]
-        assert observation["decision"] == "nonpositive_edge"
+        assert observation["decision"] == "model_entry_skipped"
         assert observation["book"]["ask"] == "0.81"
         assert journal.records() == []
         assert all(m == "GET" for m, _, _ in venue.calls)
@@ -257,7 +481,7 @@ def test_insufficient_executable_depth_skips_both_candidates(
         warm_up(trader, venue, clock, stream_feed)
         publish_book(stream_feed, venue, clock, quantity="0.001")
         trader.tick()
-        assert journal.opportunities()[-1]["decision"] == "nonpositive_edge"
+        assert journal.opportunities()[-1]["decision"] == "model_entry_skipped"
         assert journal.records() == []
         assert all(m == "GET" for m, _, _ in venue.calls)
     finally:
@@ -353,7 +577,7 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
         journal.close()
 
 
-@pytest.mark.parametrize("buying_power,expected_quantity", [(500.0, "14.98"), (0.4, "0.59")])
+@pytest.mark.parametrize("buying_power,expected_quantity", [(500.0, "14.96"), (0.4, "0.58")])
 def test_model_uses_refreshed_bankroll_and_buying_power(
     venue, tmp_path, clock, buying_power, expected_quantity, books, stream_feed
 ):
