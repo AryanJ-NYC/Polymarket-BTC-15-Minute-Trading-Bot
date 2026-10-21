@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import time_ns
 
 from dotenv import dotenv_values
-from polymarket_us import NotFoundError, PolymarketUS
+from polymarket_us import APIConnectionError, APIStatusError, NotFoundError, PolymarketUS
 
 
 class PolymarketClient:
@@ -170,7 +172,18 @@ class PolymarketClient:
         return order_id
 
     def order(self, order_id: str) -> dict:
-        order = self.client.orders.retrieve(order_id)["order"]
+        """Read a known ID with bounded recovery; never replay order creation."""
+        for attempt in range(3):
+            try:
+                order = self.client.orders.retrieve(order_id)["order"]
+                break
+            except (APIConnectionError, APIStatusError) as exc:
+                status = getattr(exc, "status_code", None)
+                if attempt == 2 or (
+                    status is not None and status not in {404, 429} and not 500 <= status < 600
+                ):
+                    raise
+                time.sleep(_order_read_delay(exc, attempt))
         if order["id"] != order_id:
             raise ValueError("Order readback ID mismatch")
         return order
@@ -199,8 +212,8 @@ class PolymarketClient:
             raise ValueError("Invalid settlement value")
         return value
 
-    def confirm_resolution(self, slug: str, expected_quantity: Decimal) -> bool:
-        """Require account activity proving ownership immediately before payout."""
+    def resolution(self, slug: str, expected_quantity: Decimal) -> dict | None:
+        """Return matching provider evidence without interpreting its fee/cost fields."""
         cursor = None
         resolutions = []
         for _ in range(100):
@@ -231,7 +244,7 @@ class PolymarketClient:
         else:
             raise ValueError("Settlement activity pagination limit reached")
         if not resolutions:
-            return False
+            return None
         if len(resolutions) != 1:
             raise RuntimeError("Ambiguous account resolution history; reconcile the live journal")
         before, after = resolutions[0]["beforePosition"], resolutions[0]["afterPosition"]
@@ -239,9 +252,13 @@ class PolymarketClient:
             raise RuntimeError(
                 "Resolved quantity differs from bot ownership; reconcile the live journal"
             )
-        if not after.get("expired") and position_quantity(after) != 0:
+        if position_quantity(after) != 0:
             raise RuntimeError("Account resolution did not close the bot position")
-        return True
+        return resolutions[0]
+
+    def confirm_resolution(self, slug: str, expected_quantity: Decimal) -> bool:
+        """Require account activity proving ownership immediately before payout."""
+        return self.resolution(slug, expected_quantity) is not None
 
     def _fresh_get(self, path: str) -> dict:
         return self.client.get(path, query={"_ts": str(time_ns())}, authenticated=True)
@@ -283,10 +300,12 @@ def position_quantity(position: dict) -> Decimal:
     return number(position["netPositionDecimal"])
 
 
-def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal]:
-    """Return actual quantity, outcome-price notional, and exchange-collected fee."""
+def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal | None]:
+    """Return terminal fills and actual collected fee, retaining unknown fees."""
     if order["marketSlug"] != plan.slug or order["intent"] != plan.request["intent"]:
         raise ValueError("Filled order contract or intent mismatch")
+    if order["state"] not in TERMINAL_STATES:
+        raise ValueError("Order is not terminal; fill accounting is not final")
     quantity = number(order["cumQuantity"])
     if not ZERO <= quantity <= plan.quantity:
         raise ValueError("Invalid cumulative fill quantity")
@@ -299,8 +318,9 @@ def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal]:
     limit = plan.yes_price if plan.outcome == "up" else ONE - plan.yes_price
     if (plan.action == "BUY" and price > limit) or (plan.action == "SELL" and price < limit):
         raise ValueError("Fill violated the limit price")
-    fee = amount(order["commissionNotionalTotalCollected"])
-    if fee < ZERO:
+    collected = order.get("commissionNotionalTotalCollected")
+    fee = amount(collected) if collected is not None else None
+    if fee is not None and fee < ZERO:
         raise ValueError("Unexpected negative taker fee")
     return quantity, quantity * price, fee
 
@@ -339,6 +359,24 @@ def _credential(config: dict, *names: str) -> str:
     if len(values) != 1:
         raise ValueError(f"Set one consistent credential using {' or '.join(names)}")
     return values.pop()
+
+
+def _order_read_delay(error: Exception, attempt: int) -> float:
+    delay = float(2**attempt)
+    if isinstance(error, APIStatusError):
+        header = error.response.headers.get("Retry-After", "")
+        try:
+            retry_after = float(header)
+        except ValueError:
+            try:
+                retry_after = (
+                    parsedate_to_datetime(header) - datetime.now(timezone.utc)
+                ).total_seconds()
+            except (ValueError, TypeError, OverflowError):
+                return delay
+        if retry_after >= 0:
+            delay = max(delay, retry_after)
+    return min(delay, 30.0)
 
 
 def _levels(rows: list[dict], *, reverse: bool) -> tuple:

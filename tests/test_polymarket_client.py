@@ -1,8 +1,12 @@
+import time
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
+from email.utils import format_datetime
 
+import httpx
 import pytest
+from polymarket_us import APIStatusError
 
 from execution.polymarket_client import PolymarketClient, order_fill, parse_market
 
@@ -123,12 +127,117 @@ def test_cancel_rejects_wrong_contract_before_write(venue):
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
+@pytest.mark.parametrize("failure", [404, 429, 500, 503, "connection", "timeout"])
+def test_known_order_recovers_from_transient_reads_without_submission(venue, monkeypatch, failure):
+    requests = []
+    delays = []
+    order = {"id": "known-order", "state": "ORDER_STATE_FILLED"}
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        if len(requests) < 3:
+            if failure == "connection":
+                raise httpx.ConnectError("Temporary failure", request=request)
+            if failure == "timeout":
+                raise httpx.ReadTimeout("Temporary failure", request=request)
+            return httpx.Response(
+                failure, headers={"Retry-After": "2"}, json={"error": "Unavailable"}
+            )
+        return httpx.Response(200, json={"order": order})
+
+    venue.sdk._http.close()
+    venue.sdk._http = httpx.Client(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(time, "sleep", delays.append)
+    assert venue.client.order("known-order") == order
+    assert requests == [("GET", "/v1/order/known-order")] * 3
+    assert len(delays) == 2 and all(0 < delay <= 30 for delay in delays)
+
+
+@pytest.mark.parametrize(
+    "header,expected", [("3600", [30, 30]), ("bad", [1, 2]), ("date", [10, 10])]
+)
+def test_order_read_exhaustion_honors_bounded_retry_after(
+    venue, monkeypatch, clock, header, expected
+):
+    requests = []
+    delays = []
+    if header == "date":
+        header = format_datetime(clock.current + timedelta(seconds=10), usegmt=True)
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        return httpx.Response(429, headers={"Retry-After": header}, json={"error": "Unavailable"})
+
+    venue.sdk._http.close()
+    venue.sdk._http = httpx.Client(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(time, "sleep", delays.append)
+    with pytest.raises(APIStatusError):
+        venue.client.order("known-order")
+    assert requests == [("GET", "/v1/order/known-order")] * 3
+    assert delays == expected
+
+
+def test_order_authentication_failure_does_not_retry(venue, monkeypatch):
+    requests = []
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        return httpx.Response(401, json={"error": "Unauthorized"})
+
+    venue.sdk._http.close()
+    venue.sdk._http = httpx.Client(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(time, "sleep", lambda seconds: pytest.fail("Unexpected retry"))
+    with pytest.raises(APIStatusError):
+        venue.client.order("known-order")
+    assert requests == [("GET", "/v1/order/known-order")]
+
+
 def test_down_fill_notional_uses_complement(venue):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "down", Decimal("1"))
     venue.fill_price = "0.64"  # Higher YES is an improved NO entry price.
     order_id = venue.client.submit(plan)
     assert order_fill(venue.client.order(order_id), plan)[1] == Decimal("0.18")
+
+
+@pytest.mark.parametrize(
+    "fee,expected",
+    [("missing", None), (None, None), ({"value": "0", "currency": "USD"}, Decimal("0"))],
+)
+def test_fill_preserves_unknown_fees_and_explicit_zero(venue, fee, expected):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    order_id = venue.client.submit(plan)
+    if fee == "missing":
+        venue.order.pop("commissionNotionalTotalCollected")
+    else:
+        venue.order["commissionNotionalTotalCollected"] = fee
+    assert order_fill(venue.client.order(order_id), plan) == (
+        Decimal("0.5"),
+        Decimal("0.3200"),
+        expected,
+    )
+
+
+@pytest.mark.parametrize("quantity", [0, 0.5])
+def test_fill_requires_terminal_order_before_accounting(venue, quantity):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    venue.order_state = "ORDER_STATE_NEW"
+    venue.fill_quantity = quantity
+    order_id = venue.client.submit(plan)
+    with pytest.raises(ValueError, match="terminal"):
+        order_fill(venue.client.order(order_id), plan)
+
+
+def test_terminal_zero_fill_does_not_require_price_or_fee(venue):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    venue.fill_quantity = 0
+    order_id = venue.client.submit(plan)
+    venue.order.pop("commissionNotionalTotalCollected")
+    venue.order.pop("avgPx")
+    assert order_fill(venue.client.order(order_id), plan) == (0, 0, 0)
 
 
 def test_unresolved_settlement_is_not_zero(venue):
@@ -172,3 +281,49 @@ def test_resolution_activity_is_paginated_and_busted_trades_halt(venue):
     with pytest.raises(RuntimeError, match="busted"):
         venue.client.confirm_resolution(venue.market["slug"], Decimal("1"))
     assert sum(path == "/v1/portfolio/activities" for _, path, _ in venue.calls) == 2
+
+
+def test_resolution_preserves_provider_evidence_including_distinct_fee_fields(venue):
+    resolution = {
+        "marketSlug": venue.market["slug"],
+        "tradeId": "provider-resolution-id",
+        "side": "POSITION_SIDE_LONG",
+        "updateTime": "2026-10-21T20:00:16Z",
+        "beforePosition": {
+            "netPositionDecimal": "1.35",
+            "fees": {"value": "0.0270", "currency": "USD"},
+            "cost": {"value": "0.9855", "currency": "USD"},
+        },
+        "afterPosition": {"netPositionDecimal": "0", "expired": True},
+    }
+    venue.activity_pages = {
+        "first": {"activities": [], "eof": False, "nextCursor": "next"},
+        "next": {
+            "activities": [
+                {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION", "positionResolution": resolution}
+            ],
+            "eof": True,
+        },
+    }
+    assert venue.client.resolution(venue.market["slug"], Decimal("1.35")) == resolution
+    assert venue.client.confirm_resolution(venue.market["slug"], Decimal("1.35")) is True
+
+
+def test_unconfirmed_resolution_returns_no_evidence(venue):
+    assert venue.client.resolution(venue.market["slug"], Decimal("1.35")) is None
+    assert venue.client.confirm_resolution(venue.market["slug"], Decimal("1.35")) is False
+
+
+def test_expired_nonzero_resolution_does_not_prove_position_closure(venue):
+    venue.activities = [
+        {
+            "type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+            "positionResolution": {
+                "marketSlug": venue.market["slug"],
+                "beforePosition": {"netPositionDecimal": "1.35"},
+                "afterPosition": {"netPositionDecimal": "1.35", "expired": True},
+            },
+        }
+    ]
+    with pytest.raises(RuntimeError, match="did not close"):
+        venue.client.resolution(venue.market["slug"], Decimal("1.35"))

@@ -54,3 +54,16 @@
   pending order with an order ID; account reads reported no orders/nonzero
   positions. Preserve evidence and reconcile history before resuming; automation
   must not clear this record or restart the failed trading service.
+- Issue #5 implementation: record late-window opportunities in an additive table
+  in the existing journal, retain actual fills/fees, persist experiment settings,
+  and report known versus pending/disputed results through a read-only CLI.
+  Missing collected fees remain null; explicit zero remains zero. Fee/cost
+  disagreement at resolution invalidates exact P&L and blocks further admissions.
+  Recovery retries only known-order GETs, never create; the pending ID survives
+  exhausted readback and restart. No new recorder service or execution simulator.
+- Final issue #5 review fixed zero-fill SELL discrepancy suppression, legacy
+  partial-settlement evidence binding, and recovered-fill budget breach checks.
+  Full local suite: 116 passed; lint/format/compileall/pip checks pass. Actual
+  historical GET evidence confirms one 1.35-share filled loss and one expired
+  unfilled order, with a $0.0070 fee/cost discrepancy. Production journal/service
+  untouched. New live-money QA is blocked; preserve that gate and leave #5 open.
