@@ -10,7 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from execution.polymarket_client import Plan, number, parse_time
-from execution.risk import ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
+from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
 
 
 class TradeJournal:
@@ -178,7 +178,10 @@ class TradeJournal:
                 bankroll * MAX_EXPOSURE_FRACTION - self.exposure(),
                 f"{MAX_EXPOSURE_FRACTION.normalize():%} exposure room",
             ),
-            (_daily_room(rows), "daily $5 loss budget"),
+            (
+                _daily_room(rows, bankroll),
+                f"daily {DAILY_LOSS_FRACTION.normalize():%} loss budget",
+            ),
             key=lambda candidate: candidate[0],
         )
         return max(Decimal("0"), budget), reason
@@ -226,7 +229,7 @@ def _pack_plan(plan: Plan) -> dict:
     }
 
 
-def _daily_room(rows: list[dict]) -> Decimal:
+def _daily_room(rows: list[dict], bankroll: Decimal) -> Decimal:
     today = datetime.now(timezone.utc).date().isoformat()
     losses = sum(
         min(Decimal("0"), number(row["pnl"]))
@@ -235,4 +238,4 @@ def _daily_room(rows: list[dict]) -> Decimal:
     )
     # Preserve the existing conservative daily guard, even after partial exits.
     at_risk = sum(number(row["entry_cost"]) for row in rows if row["state"] == "open")
-    return Decimal("5") + losses - at_risk
+    return bankroll * DAILY_LOSS_FRACTION + losses - at_risk

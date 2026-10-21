@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -18,7 +19,7 @@ def journal(tmp_path):
     ("bankroll", "buying_power", "expected", "reason"),
     [
         ("100", "100", "2", "2% entry target"),
-        ("500", "500", "5", "daily $5 loss budget"),
+        ("500", "500", "10", "2% entry target"),
         ("100", "1.25", "1.25", "buying power"),
         ("0", "10", "0", "2% entry target"),
         ("100", "0", "0", "buying power"),
@@ -93,13 +94,13 @@ def test_daily_guard_keeps_full_original_cost_reserved_after_partial_exit(venue,
     journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("5")))
     journal.finish_order(market.slug, Decimal("5"), Decimal("1"), Decimal("0"))
     assert journal.exposure() == Decimal("2.25")
-    assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
+    assert journal.entry_budget(Decimal("50"), Decimal("50")) == (
         Decimal("0.50"),
-        "daily $5 loss budget",
+        "daily 10% loss budget",
     )
-    journal.risk_check(Decimal("0.50"), Decimal("100"))
+    journal.risk_check(Decimal("0.50"), Decimal("50"))
     with pytest.raises(ValueError, match="loss budget"):
-        journal.risk_check(Decimal("0.51"), Decimal("100"))
+        journal.risk_check(Decimal("0.51"), Decimal("50"))
 
 
 def test_realized_daily_losses_still_limit_entries_without_netting_gains(venue, journal):
@@ -111,12 +112,36 @@ def test_realized_daily_losses_still_limit_entries_without_netting_gains(venue, 
     _record_buy(journal, profitable, Decimal("1"))
     journal.settle(profitable.slug, Decimal("1"))
     assert journal.exposure() == Decimal("0")
-    assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
+    assert journal.entry_budget(Decimal("50"), Decimal("50")) == (
         Decimal("0.25"),
-        "daily $5 loss budget",
+        "daily 10% loss budget",
     )
     with pytest.raises(ValueError, match="loss budget"):
-        journal.risk_check(Decimal("0.26"), Decimal("100"))
+        journal.risk_check(Decimal("0.26"), Decimal("50"))
+
+
+@pytest.mark.parametrize("loss,room", [("9.75", "0.25"), ("10", "0"), ("10.25", "0")])
+def test_daily_percentage_budget_at_and_above_loss_limit(venue, journal, loss, room):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("20"))
+    _record_buy(journal, plan, Decimal(loss))
+    journal.settle(market.slug, Decimal("0"))
+    assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
+        Decimal(room),
+        "daily 10% loss budget",
+    )
+
+
+def test_daily_percentage_uses_current_bankroll_and_resets_losses_at_utc_day(venue, journal, clock):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("20"))
+    _record_buy(journal, plan, Decimal("9.75"))
+    journal.settle(market.slug, Decimal("0"))
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.25")
+    assert journal.entry_budget(Decimal("200"), Decimal("200"))[0] == Decimal("4")
+    assert journal.entry_budget(Decimal("50"), Decimal("50"))[0] == 0
+    clock.current += timedelta(days=1)
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
 
 
 def test_five_open_positions_remain_an_independent_entry_guard(venue, journal):

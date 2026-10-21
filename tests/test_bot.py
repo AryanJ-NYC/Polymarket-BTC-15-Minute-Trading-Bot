@@ -42,7 +42,7 @@ def test_live_partial_fill_is_actual_quantity_not_requested(venue, journal, monk
     assert row["orders"][0]["id"] == "bot-order-1"
 
 
-@pytest.mark.parametrize("equity,maximum", [("100", "2"), ("500", "5"), ("25", "0.50")])
+@pytest.mark.parametrize("equity,maximum", [("100", "2"), ("500", "10"), ("25", "0.50")])
 @pytest.mark.parametrize("outcome", ["up", "down"])
 def test_live_runner_sizes_from_account_with_daily_limit(
     venue, journal, monkeypatch, equity, maximum, outcome
@@ -148,7 +148,7 @@ def test_low_equity_does_not_force_liquidation_or_block_normal_exit(
         ("1.90", "0", "0.14"),
         ("2.00", "0", None),
         ("2.10", "0", None),
-        ("2.10", "0.25", "0.11"),
+        ("2.10", "0.25", None),
     ],
 )
 def test_live_request_fits_remaining_exposure_after_partial_exits(
@@ -192,6 +192,33 @@ def test_live_request_fits_remaining_exposure_after_partial_exits(
         assert quantity == Decimal(expected_quantity)
         fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
         assert quantity * Decimal("0.65") + fee <= Decimal("2") - exposure
+
+
+@pytest.mark.parametrize("loss,enters", [("9.75", True), ("10", False), ("10.25", False)])
+def test_live_entry_obeys_daily_percentage_after_realized_losses(
+    venue, journal, monkeypatch, loss, enters
+):
+    market = parse_market(venue.market)
+    plan = replace(
+        venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("20")),
+        slug="previous-contract",
+    )
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(plan.slug, Decimal("20"), Decimal(loss), Decimal("0"))
+    journal.settle(plan.slug, Decimal("0"))
+    venue.fill_quantity = 0.1
+    trader = TradingBot(venue.client, journal, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    requests = [body for method, path, body in venue.calls if path == "/v1/orders"]
+    if enters:
+        assert len(requests) == 1
+        quantity = Decimal(str(requests[0]["quantity"]))
+        fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
+        assert Decimal("0.23") < quantity * Decimal("0.65") + fee <= Decimal("0.25")
+    else:
+        assert requests == []
+        assert journal.get(market.slug) is None
 
 
 def test_ambiguous_submission_survives_restart_without_retry(venue, journal, monkeypatch):
@@ -293,7 +320,7 @@ def test_daily_loss_budget_counts_open_cost_and_new_order(venue, journal, clock)
     journal.reserve_entry(plan, market.end)
     journal.finish_order(market.slug, Decimal("1"), Decimal("0.95"), Decimal("0.01"))
     journal.update(
-        market.slug, state="closed", quantity="0", pnl="-4.50", closed_at=clock.current.isoformat()
+        market.slug, state="closed", quantity="0", pnl="-9.50", closed_at=clock.current.isoformat()
     )
     with pytest.raises(ValueError, match="loss budget"):
         journal.risk_check(plan.budget, Decimal("100"))

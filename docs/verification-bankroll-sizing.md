@@ -3,6 +3,8 @@
 Target: `aj/bankroll-sizing`, PR base `main`, pinned review base
 `022cdc4c33ec5aa71294b2ecdd42f3fcf8a420d8`.
 Scope: account valuation, entry planning, funded exposure, operator documentation.
+The user follow-up supersedes issue #8's fixed $5 daily limit with 10% of
+the same current bankroll snapshot; UTC accounting and original-cost reserves remain.
 No real account credentials, orders, deployments or service changes were used.
 
 ## Evidence
@@ -13,24 +15,27 @@ coverage. SQLite journals are temporary pytest fixtures and are closed after use
 | Group | Result | Evidence |
 | --- | --- | --- |
 | Account bankroll | Passed | `test_equity_marks_signed_positions_without_counting_collateral_twice`: $95 cash plus $5 long value = $100; $5.70 cash minus $.70 short liability = $5. Mark gains/losses, reserved cash, pending deposits, missing/nonfinite/zero equity, all position pages and later credited gain/loss/deposit/withdrawal snapshots are covered. |
-| Entry/exposure workflow | Passed | `test_live_runner_sizes_from_account_with_daily_limit`: $100 targets $2; $500 targets $10 before the existing $5 daily guard. `test_lower_second_account_snapshot_resizes_or_skips` checks the later snapshot. `test_live_request_fits_remaining_exposure_after_partial_exits` inspects actual fake-SDK create payloads below/at/above the cap and after a partial exit. Journal tests cover pending reservations, restart, cost/fee attribution, daily losses and five positions. Up/Down planner tests cover fee, increment, tick, depth and minimums. |
-| Checks, settings and logs | Passed | Full suite **134 passed**. Ruff lint/format, compileall, pip consistency and whitespace checks passed. Percentage labels derive from the same Decimal fractions as enforcement; README/API/deployment docs describe the same USD formula and tighter daily/count limits. |
+| Entry/exposure workflow | Passed | `test_live_runner_sizes_from_account_with_daily_limit`: $100 targets $2; $500 targets $10 with a $50 daily budget. Daily-loss tests cover shrinking/replenished bankroll, UTC rollover, boundary losses, original-cost reserves and request-level daily capacity. `test_lower_second_account_snapshot_resizes_or_skips` checks the later snapshot. `test_live_request_fits_remaining_exposure_after_partial_exits` inspects actual fake-SDK create payloads below/at/above the cap and after a partial exit. Journal tests cover pending reservations, restart, cost/fee attribution, daily losses and five positions. Up/Down planner tests cover fee, increment, tick, depth and minimums. |
+| Checks, settings and logs | Passed | Full suite **141 passed**. Ruff lint/format, compileall, pip consistency and whitespace checks passed. Percentage labels derive from the same Decimal fractions as enforcement; README/API/deployment docs describe the same USD formula and tighter daily/count limits. |
 
 Representative exact Decimal traces from fixtures:
 
 ```text
 bankroll=100; target=2.00; budget=2.00; exposure=0; limit=2% entry target
-bankroll=500; target=10.00; budget=5; exposure=0; limit=daily $5 loss budget
+bankroll=500; target=10.00; budget=10.00; exposure=0; limit=2% entry target
 bankroll=20; target=.40; exposure=1.90; room=.10; Up quantity=.14; reserve=.091
 bankroll=20; exposure=2.00 or 2.10; budget=0; no entry
 entry cost=2.10; entry qty=3; partial exit=.25; exposure=1.925;
-room=.075; Up quantity=.11; reserve=.0715
+exposure room=.075; daily room=-.10; budget=0; no entry
+bankroll=100; today realized losses=9.75; daily room=.25; Up reserve=.244
 ```
 
 Red/green evidence: new planner tests first failed on the fixed $1 rejection
 (and NaN handling), then passed after budget validation changed. Runner tests
 first failed on the fixed $1 request and insufficient-power skip, then passed
-with percentage sizing and second-snapshot rebuilding. Journal tests initially
+with percentage sizing and second-snapshot rebuilding. Daily percentage tests
+first failed on the old $5 cap (nine failures), then passed with a shared 10%
+fraction. Journal tests initially
 failed on absent sizing methods and unreleased partial-exit cost, then passed.
 
 Commands, using the existing project virtualenv from the isolated worktree:
@@ -63,6 +68,10 @@ and partial exits: journal ownership keeps policy/accounting local, and existing
 BUY fills avoid a schema migration. A runner-only cap calculation would leak
 ledger knowledge and duplicate validation. No new dependency, test-only runtime
 parameter or new risk platform was introduced.
+
+The daily-10% follow-up was independently re-reviewed in all three lanes against
+`1e44a709cf942649e9c163ba896732f1c7aba60e`. All three reported no findings;
+the same-bankroll helper argument keeps enforcement within the journal.
 
 ## Limits and cleanup
 

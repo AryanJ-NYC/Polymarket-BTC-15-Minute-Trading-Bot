@@ -94,8 +94,9 @@ management. An interrupted/unknown submission stops trading for reconciliation.
   of current account bankroll per entry, including a conservative fee reserve,
   with 10% aggregate funded exposure.** Never increases spend to meet minimum
   quantity. Maximum five open positions.
-- Reserves a UTC daily $5 loss budget against recorded losses plus the full cost
-  of still-open positions and the next order. This is the bot's own ledger, not
+- Reserves a UTC daily loss budget of **10% of current bankroll** against recorded
+  losses plus the full cost of still-open positions and the next order. This is
+  the bot's own ledger, not
   a claim about account-wide daily P&L or strategy profitability.
 - Checks for 30% stop loss and 20% take profit using executable exit prices and
   estimated fees. Exits can fill partially. Liquidity, stale books, outages, and
@@ -107,13 +108,16 @@ management. An interrupted/unknown submission stops trading for reconciliation.
 
 ### Bankroll sizing
 
-The shared Decimal fractions in `execution/risk.py` are `0.02` (2% per entry)
-and `0.10` (10% aggregate exposure). All amounts below are USD:
+The shared Decimal fractions in `execution/risk.py` are `0.02` (2% per entry),
+`0.10` (10% aggregate exposure), and `0.10` (10% daily loss budget).
+All amounts below are USD:
 
 ```text
 bankroll = credited currentBalance + sum(signed YES quantity * fresh YES midpoint)
 exposure = sum(entry cost including fees * remaining quantity / filled entry quantity)
            + still-unaccounted BUY reservations
+daily loss budget remaining = 0.10 * bankroll - realized losses today (UTC)
+                              - original full entry cost of open trades
 entry budget = max(0, min(0.02 * bankroll, buyingPower,
                           0.10 * bankroll - exposure, daily loss budget remaining))
 ```
@@ -133,10 +137,14 @@ or nonzero holdings awaiting settlement make bankroll unavailable and skip entry
 Zero equity or exhausted exposure room also skips entry. Existing position exits
 continue under their usual rules; a percentage breach does not force liquidation.
 
-$100 bankroll targets $2, and $500 targets $10 **before tighter limits**. The
-unchanged $5 daily loss budget and five-open-position guard can limit entries
-further. The daily guard conservatively keeps each open trade's original full
-entry cost reserved even after a partial exit; aggregate exposure releases cost
+$100 bankroll targets $2 with a $10 daily loss budget; $500 targets $10 with a
+$50 daily loss budget, before tighter limits. The five-open-position guard and
+remaining exposure/daily capacity can limit entries further. The daily percentage
+uses the same current account snapshot as entry and exposure sizing, rather than
+a balance frozen at the start of the day. Realized losses are counted by UTC
+calendar day; realized gains do not offset them. The daily guard conservatively
+keeps each open trade's original full entry cost reserved even after a partial
+exit; aggregate exposure releases cost
 proportionally. Falling quotes do not release funded cost. Unresolved orders
 continue to block new entries until reconciled.
 

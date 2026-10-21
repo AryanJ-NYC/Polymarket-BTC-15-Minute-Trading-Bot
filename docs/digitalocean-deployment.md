@@ -47,9 +47,9 @@ ssh -i ~/.ssh/polymarket_us_digitalocean \
 The following commands are for the user to run on the Droplet. Starting this
 service enables **real-money orders**, subject to the bot's existing limits:
 at most 2% of current account bankroll including the fee reserve per entry,
-five open positions, 10% aggregate funded exposure, and its own $5 daily loss
-budget. The daily/count guards may impose tighter limits. The budget is not an
-account-wide guarantee. The service is not running merely because the Droplet
+five open positions, 10% aggregate funded exposure, and its own daily loss budget
+of 10% of current bankroll. The daily/count guards may impose tighter limits.
+The budget is not an account-wide guarantee. The service is not running merely because the Droplet
 is active in DigitalOcean.
 
 ```bash

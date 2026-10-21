@@ -8,8 +8,12 @@
   Unavailable valuation blocks entries while existing exits retain account reads.
   Live plans are rebuilt from the later account snapshot before reservation.
   Exposure releases entry cost and fees proportionally on partial exits; pending
-  BUY reservations count once. Existing $5 daily loss and five-position guards
-  remain; daily loss conservatively reserves original cost until full close.
+  BUY reservations count once. User follow-up replaces the original issue's $5
+  daily budget with 10% of the same current bankroll snapshot, configured as
+  `DAILY_LOSS_FRACTION`. UTC realized losses are not offset by gains, and daily
+  capacity conservatively reserves original cost until full close. A partial exit
+  can therefore release exposure while daily capacity still blocks entries.
+  The five-position guard remains. Percentage labels derive from configuration.
   No journal migration, deployment, service restart or real order is part of #8.
 
 - 2026-10-21: The user explicitly chose a complete US-only migration. One runner
