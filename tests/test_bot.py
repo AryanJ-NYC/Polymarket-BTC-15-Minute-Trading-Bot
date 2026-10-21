@@ -379,8 +379,14 @@ def test_live_settlement_requires_matching_provider_resolution(venue, journal, c
     clock.current += timedelta(minutes=3)
     venue.settlement = 0
     trader = TradingBot(venue.client, journal, books, live=True)
-    with pytest.raises(RuntimeError, match="unconfirmed"):
-        trader.tick()
+    trader.tick()
+    assert journal.get(market.slug)["state"] == "open"
+    assert journal.get(market.slug)["quantity"] == "1"
+    assert journal.get(market.slug)["pnl"] is None
+    assert all(method == "GET" for method, _, _ in venue.calls)
+    trader = TradingBot(venue.client, journal, books, live=True, one_trade=True)
+    trader.tick()
+    assert not trader.finished
     venue.activities = [
         {
             "type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
@@ -394,6 +400,7 @@ def test_live_settlement_requires_matching_provider_resolution(venue, journal, c
     venue.client.discover_market = lambda: None
     trader.tick()
     assert Decimal(journal.get(market.slug)["pnl"]) == Decimal("0.62")
+    assert trader.finished
 
 
 def test_one_trade_manages_to_completion_without_second_entry(
@@ -834,6 +841,16 @@ def test_one_position_read_outage_does_not_skip_other_position_exit(
         journal.finish_order(slug, Decimal("1"), Decimal(cost), Decimal("0.01"))
         venue.positions[slug] = {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}
     venue.fill_price = "0.63"
+
+    def reflect_exit_fill(request):
+        if request.method == "POST" and request.url.path == "/v1/orders":
+            venue.positions["other-btc-contract"] = {
+                "netPositionDecimal": "0.5",
+                "qtyAvailableDecimal": "0.5",
+            }
+        return None
+
+    venue.on_request = reflect_exit_fill
     books.set_markets([])
     venue.failures[("GET", f"/v1/markets/{market.slug}/book")] = [failure]
     trader = TradingBot(venue.client, journal, books, live=True)

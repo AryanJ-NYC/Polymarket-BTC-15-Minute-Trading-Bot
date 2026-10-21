@@ -176,3 +176,12 @@ The [README](../README.md#state-and-recovery) describes ownership and recovery;
 the [API contract](polymarket-us-api.md#settlement-and-reconciliation) distinguishes
 official market outcomes from account payout evidence. A deployment or account
 check does not establish actual-fill interoperability or strategy profitability.
+
+The runner retries temporarily missing settlement/resolution evidence without
+exiting, keeping the result pending and new entries paused while it manages
+other owned holdings. Genuine reconciliation/configuration failures still exit
+2 and stay stopped under `RestartPreventExitStatus=2`; ordinary unexpected
+process failures use the configured restart delay. Do not remove that safety
+exception to recover a missing-evidence incident. A service already stopped on
+an older release still needs operator review and explicit resumption with the
+same durable journal after the fixed release is available.

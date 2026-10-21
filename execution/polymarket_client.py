@@ -243,7 +243,7 @@ class PolymarketClient:
             params = {"marketSlug": slug, "limit": 100}
             if cursor:
                 params["cursor"] = cursor
-            page = self.client.portfolio.activities(params)
+            page = self._fresh_get("/v1/portfolio/activities", params)
             for activity in page["activities"]:
                 if activity["type"] == "ACTIVITY_TYPE_TRADE":
                     trade = activity["trade"]

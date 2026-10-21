@@ -549,6 +549,39 @@ def test_unconfirmed_resolution_returns_no_evidence(venue):
     assert venue.client.confirm_resolution(venue.market["slug"], Decimal("1.35")) is False
 
 
+def test_resolution_bypasses_cached_activity_on_every_page(venue):
+    resolution = {
+        "marketSlug": venue.market["slug"],
+        "beforePosition": {"netPositionDecimal": "-1"},
+        "afterPosition": {"netPositionDecimal": "0"},
+    }
+    venue.activity_pages = {
+        "first": {"activities": [], "eof": False, "nextCursor": "next"},
+        "next": {
+            "activities": [
+                {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION", "positionResolution": resolution}
+            ],
+            "eof": True,
+        },
+    }
+    queries = []
+
+    def cached_response(request):
+        if request.url.path == "/v1/portfolio/activities":
+            queries.append(dict(request.url.params))
+            if "_ts" not in request.url.params:
+                return httpx.Response(200, json={"activities": [], "eof": True})
+        return None
+
+    venue.on_request = cached_response
+
+    assert venue.client.resolution(venue.market["slug"], Decimal("-1")) == resolution
+    assert len(queries) == 2
+    assert queries[0]["_ts"] != queries[1]["_ts"]
+    assert queries[1]["cursor"] == "next"
+    assert all(query["marketSlug"] == venue.market["slug"] for query in queries)
+
+
 def test_expired_nonzero_resolution_does_not_prove_position_closure(venue):
     venue.activities = [
         {

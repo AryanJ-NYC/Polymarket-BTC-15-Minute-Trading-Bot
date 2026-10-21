@@ -273,6 +273,15 @@ class TradingBot:
         self._sync_subscriptions()
         if not reconciled or any(row["pending"] for row in self.journal.records()):
             return
+        if self.live and unavailable:
+            try:
+                self._account_guard()
+            except (APIError, APIConnectionError, APITimeoutError) as exc:
+                if not _unavailable_book(exc):
+                    raise
+                self._wait_for_data(exc)
+                logger.warning("Entries paused: account read unavailable ({})", type(exc).__name__)
+                return
         if self.one_trade and self.trade_slug is not None:
             return
         if (
@@ -297,7 +306,7 @@ class TradingBot:
                 )
             logger.info("Entries paused: {} | stream {}", exc, self.books.health())
             return
-        if self.live:
+        if self.live and not unavailable:
             try:
                 self._account_guard()
             except (APIError, APIConnectionError, APITimeoutError) as exc:
@@ -390,6 +399,7 @@ class TradingBot:
                     self.journal.record_opportunity(
                         self.market, book, "position_monitoring_unavailable", plan.outcome, settings
                     )
+                logger.info("Entries paused until owned positions can be reconciled and monitored")
                 return
             outcome = plan.outcome
             plan = replace(
@@ -787,6 +797,12 @@ class TradingBot:
             for slug, qty in expected.items()
             if not account.positions.get(slug, {}).get("expired")
         }
+        # An ended holding may disappear before its resolution activity arrives.
+        # Keep its journal row open and entries paused, while other owned exits
+        # still require exact account quantities.
+        for row in rows:
+            if datetime.now(timezone.utc) >= parse_time(row["end"]) and row["slug"] not in actual:
+                expected.pop(row["slug"], None)
         # While one known order awaits readback, other owned positions still
         # need exits. Only that order's bounded fill range may differ; entries
         # stay blocked until every pending order has been reconciled.
@@ -821,7 +837,7 @@ class TradingBot:
             try:
                 if datetime.now(timezone.utc) >= parse_time(row["end"]):
                     if not row.get("settlement"):
-                        self._settle_position(row)
+                        unavailable = not self._settle_position(row) or unavailable
                     continue
                 if row["state"] != "open":
                     continue
@@ -906,22 +922,24 @@ class TradingBot:
 
         return unavailable
 
-    def _settle_position(self, row) -> None:
-        value = self.exchange.settlement(row["slug"])
-        if value is None:
-            return
-        resolution = None
+    def _settle_position(self, row) -> bool:
+        """Return readiness while retaining any unconfirmed owned payout."""
         net_filled_quantity = sum(
             number(order["quantity"]) * (1 if order["action"] == "BUY" else -1)
             for order in row["orders"]
         )
+        value = self.exchange.settlement(row["slug"])
+        if value is None:
+            # Paper holdings remain charged against journal risk limits while waiting.
+            return not self.live or (row["state"] == "closed" and net_filled_quantity == 0)
+        resolution = None
         if self.live and (row["state"] == "open" or net_filled_quantity > 0):
             if row["state"] == "open":
                 position = self.exchange.account(book_source=self._valuation_book).positions.get(
                     row["slug"]
                 )
                 if position and not position.get("expired") and position_quantity(position) != 0:
-                    return
+                    return False
                 quantity = number(row["quantity"])
             else:
                 # Legacy settlement rows still need the holding's actual resolution evidence.
@@ -929,9 +947,11 @@ class TradingBot:
             signed_quantity = quantity * (1 if row["outcome"] == "up" else -1)
             resolution = self.exchange.resolution(row["slug"], signed_quantity)
             if resolution is None:
-                raise RuntimeError("Account settlement is unconfirmed; reconcile before trading")
+                logger.warning("Waiting for matching account settlement evidence: {}", row["slug"])
+                return False
         self.journal.settle(row["slug"], value, resolution=resolution)
         logger.info("{} settled at YES {}", row["slug"], value)
+        return True
 
     def _wait_for_order(self, order_id: str, exc: Exception) -> None:
         logger.warning(
