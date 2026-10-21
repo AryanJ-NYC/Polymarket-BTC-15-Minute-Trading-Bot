@@ -137,8 +137,11 @@ python view_paper_trades.py
 
 ## Development
 
-For the provisioned DigitalOcean server, connection details and manual start/stop
-commands are in [deployment instructions](docs/digitalocean-deployment.md).
+For the provisioned DigitalOcean server, connection details, start/stop commands,
+and automatic main updates are in [deployment instructions](docs/digitalocean-deployment.md).
+GitHub CI validates each push; the Droplet checks every five minutes and deploys
+passing main commits while flat, preserving stopped/failed services. No approval
+or deploy click is required for ordinary updates after setup.
 
 ```bash
 python -m pip install -r requirements-dev.txt
