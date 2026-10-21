@@ -142,10 +142,10 @@ class PolymarketClient:
         """Preview and submit exactly once, returning the exchange-assigned ID.
 
         The caller must durably reserve the attempt before entering this method.
-        Any exception after reservation is unresolved until reconciled, never retried.
+        Expiry before create is explicitly non-submitted; create failures remain unknown.
         """
         if datetime.now(timezone.utc) >= plan.expires_at:
-            raise ValueError("Order plan has expired")
+            raise OrderNotSubmitted("Order plan has expired")
         preview = self.client.orders.preview({"request": plan.request})["order"]
         for field in ("marketSlug", "intent", "type", "tif"):
             if preview.get(field) != plan.request[field]:
@@ -156,7 +156,7 @@ class PolymarketClient:
         ):
             raise ValueError("Order preview changed the requested price or quantity")
         if datetime.now(timezone.utc) >= plan.expires_at:
-            raise ValueError("Order plan expired during preview")
+            raise OrderNotSubmitted("Order plan expired during preview")
         result = self.client.orders.create(plan.request)
         order_id = result["id"]
         if not isinstance(order_id, str) or not order_id:
@@ -524,3 +524,7 @@ TERMINAL_STATES = {
     "ORDER_STATE_REJECTED",
     "ORDER_STATE_EXPIRED",
 }
+
+
+class OrderNotSubmitted(ValueError):
+    """A plan expired before any order-create request was sent."""

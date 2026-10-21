@@ -1,4 +1,4 @@
-"""Replay the issue 13 provider shape without credentials or real HTTP requests."""
+"""Replay the observed fee-dispute shape using synthetic IDs and fake HTTP."""
 
 import copy
 import json
@@ -25,7 +25,7 @@ def test_captured_fee_disagreement_survives_recovery_and_report(
     evidence, responses, calls = captured_provider
     slug, order_id = evidence["market_slug"], evidence["order_id"]
     order = responses[f"/v1/order/{order_id}"]["order"]
-    # The first case replays the capture unchanged; the others check the Retail
+    # The first case replays the observed amounts; the others check the Retail
     # Amount boundary's unavailable-versus-explicit-zero behavior on that shape.
     order["commissionNotionalTotalCollected"] = (
         {"value": collected_fee, "currency": "USD"} if collected_fee is not None else None
@@ -356,10 +356,8 @@ def test_reconciliation_rejects_or_flags_unreconciled_source_shapes(
 
 @pytest.fixture
 def captured_provider(venue):
-    evidence = json.loads(
-        (Path(__file__).parents[1] / "docs/evidence/issue-13-provider-accounting.json").read_text()
-    )
-    responses = {item["path"]: item["body"] for item in evidence["requests"]}
+    evidence = json.loads((Path(__file__).parent / "fixtures/fee_discrepancy.json").read_text())
+    responses = evidence["responses"]
     calls = []
 
     def handle(request):
