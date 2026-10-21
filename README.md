@@ -137,6 +137,9 @@ python view_paper_trades.py
 
 ## Development
 
+For the provisioned DigitalOcean server, connection details and manual start/stop
+commands are in [deployment instructions](docs/digitalocean-deployment.md).
+
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q

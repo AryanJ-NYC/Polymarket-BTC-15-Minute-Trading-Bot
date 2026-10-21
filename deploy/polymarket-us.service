@@ -1,0 +1,27 @@
+[Unit]
+Description=Polymarket US BTC bot (live configuration, manual activation)
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+ConditionPathExists=/etc/polymarket-us/.env.us
+
+[Service]
+Type=simple
+User=polymarket-us
+Group=polymarket-us
+WorkingDirectory=/opt/polymarket-us/app
+ExecStart=/opt/polymarket-us/app/.venv/bin/python /opt/polymarket-us/app/bot.py --live --env-file /etc/polymarket-us/.env.us
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+Restart=no
+KillSignal=SIGINT
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/polymarket-us
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -18,3 +18,10 @@
   RESOLVED. Fresh public/authenticated reads returned YES settlement 0, while the
   ordinary URL kept returning 404. Both book and settlement now share `_fresh_get`;
   tests preserve the distinction between unresolved 404 and a genuine zero payout.
+- DigitalOcean: the saved default doctl context returned 403. Use the explicitly
+  selected personal team in the authenticated browser; do not reuse company
+  contexts. A newly Active Droplet briefly refused SSH while cloud-init was
+  still running; wait for boot/SSH and `cloud-init status --wait` before setup.
+- Local credential-validation scripts need `.venv/bin/python`; system Python
+  lacks python-dotenv. Use the project environment instead of installing into
+  system Python or treating a following successful command as a passed check.

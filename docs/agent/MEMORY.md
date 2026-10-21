@@ -33,3 +33,9 @@
   SQLite requires a single process, checkout, and host for now. Recommend paper
   mode pending broader account ownership, recovery, timing, and economic work.
   The user authorized committing and pushing this chat's changes on `main`.
+- DigitalOcean deployment: personal AJab team, project polymarket-us, Droplet
+  611323289 / 167.99.236.49 / NYC1 / Ubuntu 24.04 / 1 GB / $6 monthly; no paid
+  add-ons. User requested a new dedicated SSH key, credential upload, and live
+  deployment. Exact release e7ba296 is installed; read-only API check and durable
+  journal check pass. The live systemd service is installed, stopped, disabled,
+  and Restart=no. User must perform trading activation. See deployment guide.
