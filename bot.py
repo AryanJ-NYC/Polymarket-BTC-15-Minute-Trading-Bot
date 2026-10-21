@@ -19,12 +19,15 @@ from polymarket_us import APIConnectionError, APIError, APITimeoutError
 from core.strategy_brain.strategies.btc_15min_strategy import BTCStrategy15Min
 from execution.polymarket_client import (
     OrderNotSubmitted,
+    OrderPending,
     PolymarketClient,
+    api_error_summary,
     estimate_fee,
     number,
     order_fill,
     parse_time,
     position_quantity,
+    retryable_api_error,
 )
 from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
 from execution.trade_journal import TradeJournal, pending_plan
@@ -128,11 +131,13 @@ def main() -> int:
         if isinstance(exc, (ValueError, RuntimeError)) and type(exc).__module__ == "builtins":
             logger.error("Stopped: {}", exc)
         else:
-            logger.error(
-                "Stopped: {} (HTTP status {})",
-                type(exc).__name__,
-                getattr(exc, "status_code", "unavailable"),
-            )
+            logger.error("Stopped: {}", api_error_summary(exc))
+        # Status 2 is an operator/reconciliation stop, excluded from systemd
+        # restart. A supervisor must never turn unknown submissions into retries.
+        if isinstance(exc, (ValueError, RuntimeError)) or (
+            isinstance(exc, APIError) and not retryable_api_error(exc, missing=True)
+        ):
+            return 2
         return 1
     finally:
         for signum, handler in previous_handlers.items():
@@ -210,12 +215,28 @@ class TradingBot:
     def tick(self) -> None:
         if time.monotonic() < self.next_data_attempt:
             return
-        if not self._reconcile():
-            return
-        self._manage_positions()
-        if any(row["pending"] for row in self.journal.records()):
-            return
+        try:
+            self._tick()
+        except (APIError, APIConnectionError, APITimeoutError) as exc:
+            if any(row["pending"] and not row["order_id"] for row in self.journal.records()):
+                raise RuntimeError(
+                    "An order submission has an unknown outcome; reconcile before restarting. "
+                    + api_error_summary(exc)
+                ) from None
+            if not retryable_api_error(exc):
+                raise
+            self._wait_for_data(exc)
+
+    def _tick(self) -> None:
+        self._reconcile()
         if time.monotonic() < self.next_data_attempt:
+            return
+        unavailable = self._manage_positions()
+        if (
+            unavailable
+            or any(row["pending"] for row in self.journal.records())
+            or time.monotonic() < self.next_data_attempt
+        ):
             return
         if self.one_trade and self.trade_slug is not None:
             return
@@ -498,25 +519,34 @@ class TradingBot:
         if self.live:
             try:
                 order_id = self.exchange.submit(plan)
-            except OrderNotSubmitted:
+            except OrderNotSubmitted as exc:
                 self.journal.finish_order(plan.slug, Decimal("0"), Decimal("0"), Decimal("0"))
-                logger.info("Order skipped: plan expired before submission")
+                logger.warning("Order not submitted for {}: {}", plan.slug, exc)
+                if isinstance(exc.cause, APIError):
+                    if getattr(exc.cause, "status_code", None) in {401, 403}:
+                        raise exc.cause from None
+                    self._wait_for_data(exc.cause)
                 return
+            except Exception as exc:
+                raise RuntimeError(
+                    "An order submission has an unknown outcome; reconcile before restarting. "
+                    + api_error_summary(exc)
+                ) from None
             self.journal.update(plan.slug, order_id=order_id)
             try:
                 order = self.exchange.cancel(order_id, plan.slug)
-            except (APIError, APIConnectionError, APITimeoutError) as exc:
-                if not _unavailable_book(exc):
+            except (APIError, OrderPending) as exc:
+                if not isinstance(exc, OrderPending) and not retryable_api_error(exc, missing=True):
                     raise
-                self._wait_for_data(exc)
-                logger.warning(
-                    "Known order readback is pending; no further order will be submitted"
-                )
+                self._wait_for_order(order_id, exc)
                 return
             quantity, notional, fee = order_fill(order, plan)
         else:
             quantity, notional = plan.quantity, plan.notional
             fee = estimate_fee(market.fee_coefficient, quantity, plan.yes_price)
+        self._finish_order(plan, quantity, notional, fee)
+
+    def _finish_order(self, plan, quantity, notional, fee) -> None:
         self.journal.finish_order(plan.slug, quantity, notional, fee)
         logger.info(
             "{} {} {} | {} shares | notional ${:.4f} | fees {}",
@@ -532,7 +562,7 @@ class TradingBot:
                 "Actual fill exceeded its reserved budget; review the recorded order"
             )
 
-    def _reconcile(self) -> bool:
+    def _reconcile(self) -> None:
         for row in self.journal.records():
             if not row["pending"]:
                 continue
@@ -546,29 +576,32 @@ class TradingBot:
             plan = pending_plan(row)
             try:
                 order = self.exchange.cancel(row["order_id"], row["slug"])
-            except (APIError, APIConnectionError, APITimeoutError) as exc:
-                if not _unavailable_book(exc):
+            except (APIError, OrderPending) as exc:
+                if not isinstance(exc, OrderPending) and not retryable_api_error(exc, missing=True):
                     raise
-                self._wait_for_data(exc)
-                logger.warning(
-                    "Known order readback is pending; no further order will be submitted"
-                )
-                return False
-            quantity, notional, fee = order_fill(order, plan)
-            self.journal.finish_order(row["slug"], quantity, notional, fee)
-            if plan.action == "BUY" and fee is not None and notional + fee > plan.budget:
-                raise RuntimeError(
-                    "Actual fill exceeded its reserved budget; review the recorded order"
-                )
-        return True
+                self._wait_for_order(row["order_id"], exc)
+                if time.monotonic() < self.next_data_attempt:
+                    break
+                continue
+            self._finish_order(plan, *order_fill(order, plan))
 
     def _account_guard(self):
         account = self.exchange.account()
-        if account.orders:
-            raise RuntimeError("Account has open orders; reconcile them before starting this bot")
+        rows = self.journal.records()
+        pending = {row["order_id"]: row for row in rows if row["pending"] and row["order_id"]}
+        for order in account.orders:
+            row = pending.get(order["id"])
+            if (
+                row is None
+                or order["marketSlug"] != row["slug"]
+                or order["intent"] != row["pending"]["request"]["intent"]
+            ):
+                raise RuntimeError(
+                    "Account has open orders; reconcile them before starting this bot"
+                )
         expected = {
             row["slug"]: number(row["quantity"]) * (1 if row["outcome"] == "up" else -1)
-            for row in self.journal.records()
+            for row in rows
             if row["state"] == "open"
         }
         actual = {
@@ -581,88 +614,122 @@ class TradingBot:
             for slug, qty in expected.items()
             if not account.positions.get(slug, {}).get("expired")
         }
+        # While one known order awaits readback, other owned positions still
+        # need exits. Only that order's bounded fill range may differ; entries
+        # stay blocked until every pending order has been reconciled.
+        for row in pending.values():
+            plan = pending_plan(row)
+            sign = 1 if row["outcome"] == "up" else -1
+            before = number(row["quantity"]) * sign
+            after = before + plan.quantity * sign * (1 if plan.action == "BUY" else -1)
+            quantity = actual.pop(row["slug"], Decimal("0"))
+            # A settled contract may disappear while its order readback is
+            # delayed. Keep it unresolved without blocking other owned exits;
+            # terminal fill + provider resolution still gate its accounting.
+            ended = datetime.now(timezone.utc) >= parse_time(row["end"])
+            if not (ended and quantity == 0) and not min(before, after) <= quantity <= max(
+                before, after
+            ):
+                raise RuntimeError("Exchange pending position exceeds the reserved order quantity")
+            expected.pop(row["slug"], None)
         if expected != actual:
             raise RuntimeError(
                 "Exchange positions differ from the bot journal; reconcile before trading"
             )
         return account
 
-    def _manage_positions(self) -> None:
+    def _manage_positions(self) -> bool:
+        unavailable = False
         for row in self.journal.records():
-            if row["state"] not in {"open", "closed"}:
+            if row["state"] not in {"open", "closed"} or row["pending"]:
                 continue
-            if datetime.now(timezone.utc) >= parse_time(row["end"]):
-                if row.get("settlement"):
-                    continue
-                value = self.exchange.settlement(row["slug"])
-                if value is not None:
-                    resolution = None
-                    net_filled_quantity = sum(
-                        number(order["quantity"]) * (1 if order["action"] == "BUY" else -1)
-                        for order in row["orders"]
-                    )
-                    if self.live and (row["state"] == "open" or net_filled_quantity > 0):
-                        if row["state"] == "open":
-                            position = self.exchange.account().positions.get(row["slug"])
-                            if (
-                                position
-                                and not position.get("expired")
-                                and position_quantity(position) != 0
-                            ):
-                                continue
-                            quantity = number(row["quantity"])
-                        else:
-                            # Older journals closed at settlement without retaining
-                            # activity; recheck the holding left after any exits.
-                            quantity = net_filled_quantity
-                        signed_quantity = quantity * (1 if row["outcome"] == "up" else -1)
-                        resolution = self.exchange.resolution(row["slug"], signed_quantity)
-                        if resolution is None:
-                            raise RuntimeError(
-                                "Account settlement is unconfirmed; reconcile before trading"
-                            )
-                    self.journal.settle(row["slug"], value, resolution=resolution)
-                    logger.info("{} settled at YES {}", row["slug"], value)
-                continue
-            if row["state"] != "open":
-                continue
-            if row["entry_cost"] is None or row["proceeds"] is None:
-                logger.warning("Price exit unavailable until missing fill accounting is reconciled")
-                continue
-            market = self.exchange.market(row["slug"])
             try:
-                book = self.exchange.book(market)
-                plan = self.exchange.sell_plan(
-                    market, book, row["outcome"], number(row["quantity"])
-                )
-            except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
-                if not _unavailable_book(exc):
+                unavailable = self._manage_position(row) or unavailable
+            except (APIError, APIConnectionError, APITimeoutError) as exc:
+                if not retryable_api_error(exc, missing=True):
                     raise
                 self._wait_for_data(exc)
-                if time.monotonic() < self.next_data_attempt:
-                    return
-                continue
-            # Include entry fees and previously realized exit proceeds in the return.
-            estimated_value = number(row["proceeds"]) + (
-                number(row["quantity"]) / plan.quantity * (plan.notional - plan.fee_bound)
-            )
-            change = estimated_value / number(row["entry_cost"]) - 1
-            settings = row.get("settings") or self.settings
-            if change <= number(settings.get("stop_loss", self.settings["stop_loss"])) or (
-                change >= number(settings.get("take_profit", self.settings["take_profit"]))
-            ):
-                if self.live:
-                    self._account_guard()
-                    position = self.exchange.account().positions[row["slug"]]
-                    available = abs(number(position["qtyAvailableDecimal"]))
-                    if available < plan.quantity:
+                unavailable = True
+            if time.monotonic() < self.next_data_attempt:
+                break
+        return unavailable
+
+    def _manage_position(self, row: dict) -> bool:
+        if datetime.now(timezone.utc) >= parse_time(row["end"]):
+            if row.get("settlement"):
+                return False
+            value = self.exchange.settlement(row["slug"])
+            if value is not None:
+                resolution = None
+                net_filled_quantity = sum(
+                    number(order["quantity"]) * (1 if order["action"] == "BUY" else -1)
+                    for order in row["orders"]
+                )
+                if self.live and (row["state"] == "open" or net_filled_quantity > 0):
+                    if row["state"] == "open":
+                        position = self.exchange.account().positions.get(row["slug"])
+                        if (
+                            position
+                            and not position.get("expired")
+                            and position_quantity(position) != 0
+                        ):
+                            return False
+                        quantity = number(row["quantity"])
+                    else:
+                        # Older journals closed at settlement without retaining
+                        # activity; recheck the holding left after any exits.
+                        quantity = net_filled_quantity
+                    signed_quantity = quantity * (1 if row["outcome"] == "up" else -1)
+                    resolution = self.exchange.resolution(row["slug"], signed_quantity)
+                    if resolution is None:
                         raise RuntimeError(
-                            "Bot position is not fully available for the requested exit"
+                            "Account settlement is unconfirmed; reconcile before trading"
                         )
-                self.journal.reserve_exit(plan)
-                self._execute(plan, market)
-                if self.journal.get(plan.slug)["pending"]:
-                    return
+                self.journal.settle(row["slug"], value, resolution=resolution)
+                logger.info("{} settled at YES {}", row["slug"], value)
+            return False
+        if row["state"] != "open":
+            return False
+        if row["entry_cost"] is None or row["proceeds"] is None:
+            logger.warning("Price exit unavailable until missing fill accounting is reconciled")
+            return False
+        market = self.exchange.market(row["slug"])
+        try:
+            book = self.exchange.book(market)
+            plan = self.exchange.sell_plan(market, book, row["outcome"], number(row["quantity"]))
+        except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
+            if not _unavailable_book(exc):
+                raise
+            self._wait_for_data(exc)
+            return True
+        # Include entry fees and previously realized exit proceeds in the return.
+        estimated_value = number(row["proceeds"]) + (
+            number(row["quantity"]) / plan.quantity * (plan.notional - plan.fee_bound)
+        )
+        change = estimated_value / number(row["entry_cost"]) - 1
+        settings = row.get("settings") or self.settings
+        if change <= number(settings.get("stop_loss", self.settings["stop_loss"])) or (
+            change >= number(settings.get("take_profit", self.settings["take_profit"]))
+        ):
+            if self.live:
+                self._account_guard()
+                position = self.exchange.account().positions[row["slug"]]
+                available = abs(number(position["qtyAvailableDecimal"]))
+                if available < plan.quantity:
+                    raise RuntimeError("Bot position is not fully available for the requested exit")
+            self.journal.reserve_exit(plan)
+            self._execute(plan, market)
+
+        return False
+
+    def _wait_for_order(self, order_id: str, exc: Exception) -> None:
+        logger.warning(
+            "Order {} remains pending; retrying reconciliation without resubmission: {}",
+            order_id,
+            str(exc) if isinstance(exc, OrderPending) else api_error_summary(exc),
+        )
+        if getattr(exc, "status_code", None) == 429:
+            self._wait_for_data(exc)
 
     def _wait_for_data(self, exc: Exception) -> None:
         if getattr(exc, "status_code", None) == 429:
@@ -680,14 +747,12 @@ class TradingBot:
             if not 0 <= delay < float("inf"):
                 delay = 30
             self.next_data_attempt = time.monotonic() + max(30, delay)
-        logger.warning("Waiting for usable market data ({})", type(exc).__name__)
+        detail = api_error_summary(exc) if isinstance(exc, APIError) else str(exc)
+        logger.warning("Waiting for exchange data: {}", detail)
 
 
 def _unavailable_book(exc: Exception) -> bool:
-    if isinstance(exc, (ValueError, APIConnectionError, APITimeoutError)):
-        return True
-    status = getattr(exc, "status_code", 0) or 0
-    return status in {404, 429} or status >= 500
+    return isinstance(exc, ValueError) or retryable_api_error(exc, missing=True)
 
 
 ROOT = Path(__file__).resolve().parent

@@ -194,7 +194,8 @@ def test_invalid_requested_model_never_connects_or_falls_back(tmp_path, monkeypa
         pytest.fail("invalid model must fail before exchange access")
 
     monkeypatch.setattr(bot.PolymarketClient, "connect", forbidden_connect)
-    assert bot.main() == 1
+    # Invalid configuration requires operator action, so systemd must not restart it.
+    assert bot.main() == 2
     assert not (tmp_path / "logs").exists()
 
 
