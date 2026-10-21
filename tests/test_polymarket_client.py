@@ -246,11 +246,13 @@ def test_cancel_rejects_wrong_contract_before_write(venue):
 @pytest.mark.parametrize("failure", [404, 409, 500, 503, "connection", "timeout"])
 def test_known_order_recovers_from_transient_reads_without_submission(venue, monkeypatch, failure):
     requests = []
+    freshness = []
     delays = []
     order = {"id": "known-order", "state": "ORDER_STATE_FILLED"}
 
     def respond(request):
         requests.append((request.method, request.url.path))
+        freshness.append(request.url.params.get("_ts"))
         if len(requests) < 3:
             if failure == "connection":
                 raise httpx.ConnectError("Temporary failure", request=request)
@@ -266,6 +268,7 @@ def test_known_order_recovers_from_transient_reads_without_submission(venue, mon
     monkeypatch.setattr(client_module, "sleep", delays.append)
     assert venue.client.order("known-order") == order
     assert requests == [("GET", "/v1/order/known-order")] * 3
+    assert all(freshness) and len(set(freshness)) == 3
     assert len(delays) == 2 and all(0 < delay <= 30 for delay in delays)
 
 

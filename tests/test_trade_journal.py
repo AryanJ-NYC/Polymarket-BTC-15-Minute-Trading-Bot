@@ -181,6 +181,109 @@ def test_exposure_uses_existing_durable_order_records_after_reopen(venue, tmp_pa
         reopened.close()
 
 
+@pytest.mark.parametrize(
+    "fee_delta,cost_delta,allowed",
+    [
+        ("0.0100", "0.0100", True),
+        ("-0.0100", "-0.0100", True),
+        ("0.0101", "0.0101", False),
+        ("0.0070", "0.0060", False),
+    ],
+)
+def test_settled_fee_tolerance_preserves_dispute_and_budgets_higher_cost(
+    venue, journal, clock, fee_delta, cost_delta, allowed
+):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("1.35"), Decimal("0.9585"), Decimal("0.0200"))
+    provider_cost = Decimal("0.9785") + Decimal(cost_delta)
+    resolution = {
+        "beforePosition": {
+            "cost": {"value": str(provider_cost), "currency": "USD"},
+            "fees": {"value": str(Decimal("0.0200") + Decimal(fee_delta)), "currency": "USD"},
+        }
+    }
+    journal.settle(market.slug, Decimal("0"), resolution=resolution)
+    row = journal.get(market.slug)
+    assert row["pnl"] is None
+    assert len(row["accounting_issues"]) == 2
+    if not allowed:
+        with pytest.raises(RuntimeError, match="unknown or disputed"):
+            journal.entry_budget(Decimal("100"), Decimal("100"))
+        return
+    journal.risk_check(Decimal("1"), Decimal("100"))
+    higher_cost = max(Decimal("0.9785"), provider_cost)
+    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1") - higher_cost
+    assert journal.exposure() == 0
+    assert journal.get(market.slug) == row
+    # Even a legacy exact-looking P&L must not hide the accepted fee difference
+    # from the daily guard; this only changes a synthetic test journal.
+    journal.update(market.slug, pnl="-0.9785")
+    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1") - higher_cost
+    clock.current += timedelta(days=1)
+    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("0.2")
+
+
+def test_previously_recorded_small_fee_dispute_allows_entries_after_reopen(venue, tmp_path):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    path = tmp_path / "accepted.sqlite"
+    journal = TradeJournal(path)
+    try:
+        journal.reserve_entry(plan, market.end)
+        journal.finish_order(market.slug, Decimal("1.35"), Decimal("0.9585"), Decimal("0.02"))
+        journal.settle(
+            market.slug,
+            Decimal("0"),
+            resolution={
+                "beforePosition": {
+                    "cost": {"value": "0.9855", "currency": "USD"},
+                    "fees": {"value": "0.0270", "currency": "USD"},
+                }
+            },
+        )
+        before = journal.get(market.slug)
+    finally:
+        journal.close()
+    reopened = TradeJournal(path)
+    try:
+        reopened.risk_check(Decimal("1"), Decimal("100"))
+        assert reopened.get(market.slug) == before
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("fault", ["other_issue", "missing_fee", "missing_cost", "open_position"])
+def test_small_difference_does_not_waive_other_accounting_guards(venue, journal, fault):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("1.35"), Decimal("0.9585"), Decimal("0.02"))
+    resolution = {
+        "beforePosition": {
+            "cost": {"value": "0.9855", "currency": "USD"},
+            "fees": {"value": "0.0270", "currency": "USD"},
+        }
+    }
+    journal.settle(market.slug, Decimal("0"), resolution=resolution)
+    if fault == "other_issue":
+        journal.update(
+            market.slug,
+            accounting_issues=journal.get(market.slug)["accounting_issues"]
+            + ["Unresolved partial exit"],
+        )
+    elif fault in {"missing_fee", "missing_cost"}:
+        resolution["beforePosition"]["fees" if fault == "missing_fee" else "cost"] = None
+        journal.update(market.slug, settlement={"resolution": resolution})
+    else:
+        journal.update(market.slug, state="open", quantity="1.35")
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.entry_budget(Decimal("100"), Decimal("100"))
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.exposure()
+
+
 def _record_buy(journal, plan, cost):
     plan = replace(plan, quantity=Decimal("10"), notional=cost, fee_bound=Decimal("0"))
     journal.reserve_entry(plan, plan.expires_at)
