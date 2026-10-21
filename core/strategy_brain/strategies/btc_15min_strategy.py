@@ -105,3 +105,6 @@ class BTCStrategy15Min:
             fused.confidence,
         )
         return outcome
+
+
+BASELINE_POLICY_VERSION = "btc-15m-fusion-v2"

@@ -17,7 +17,10 @@ from loguru import logger
 from polymarket_us import APIConnectionError, APIError, APITimeoutError
 
 from core.strategy_brain.context import ContextRefresher
-from core.strategy_brain.strategies.btc_15min_strategy import BTCStrategy15Min
+from core.strategy_brain.strategies.btc_15min_strategy import (
+    BASELINE_POLICY_VERSION,
+    BTCStrategy15Min,
+)
 from execution.market_stream import MarketStream, StreamUnavailable
 from execution.polymarket_client import (
     OrderNotSubmitted,
@@ -203,7 +206,7 @@ class TradingBot:
                 self.trade_slug = unfinished[0]["slug"]
         self.strategy = BTCStrategy15Min()
         self.settings = {
-            "policy_version": "btc-15m-fusion-v2",
+            "policy_version": BASELINE_POLICY_VERSION,
             "entry_start_seconds": 780,
             "entry_end_seconds": 840,
             "minimum_snapshots": 20,

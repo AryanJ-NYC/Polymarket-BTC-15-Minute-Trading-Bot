@@ -48,6 +48,7 @@ def test_baseline_submits_only_the_favorite_supported_by_real_signals(
             "ORDER_INTENT_BUY_LONG" if outcome == "up" else "ORDER_INTENT_BUY_SHORT"
         )
         assert journal.records()[0]["settings"]["entry_bankroll_fraction"] == "0.02"
+        assert journal.records()[0]["settings"]["policy_version"] == "btc-15m-fusion-v2"
     fusions = trader.strategy.fusion.get_recent_fusions()
     if sentiment != 50:
         assert fusions[-1].score == 100
