@@ -138,3 +138,6 @@ $RECYCLE.BIN/
 *.swo
 node_modules/
 .cache/
+
+# Session review packets stay local; PRs and CI retain review evidence.
+/docs/agent/*REVIEW.md
