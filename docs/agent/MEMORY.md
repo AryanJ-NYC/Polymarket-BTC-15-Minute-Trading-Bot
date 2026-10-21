@@ -5,12 +5,9 @@
   do not feed raw stream frequency into warmup or count-based features. REST
   remains for discovery/reconciliation/settlement and bounded position fallback.
   No live activation or provider order writes are part of this implementation.
-- Streaming review closed five findings: bounded subscription shutdown, complete
-  observer worker cleanup, centralized executable quote-age policy, actual
-  feature-horizon replay, and owned-position subscription retention. Local
-  verification passes 144 tests, lint/format, compilation, package consistency,
-  and whitespace checks. Keep exact-source observation metrics separate from
-  deterministic lifecycle tests and actual real-order execution.
+- Keep session review packets (`docs/agent/*REVIEW.md`) local and ignored.
+  PRs and CI retain review and verification evidence. Keep durable decisions in
+  this file, recurring failures in ERRORS.md, and runtime guidance in the docs.
 
 - 2026-10-21: The user explicitly chose a complete US-only migration. One runner
   uses the official `polymarket-us` SDK and `.env.us`; international execution,
