@@ -1,0 +1,49 @@
+{
+  "trade_count": 1,
+  "known_closed_count": 0,
+  "pending_count": 0,
+  "unresolved_closed_count": 1,
+  "known_realized_net_pnl": "0",
+  "total_net_pnl": null,
+  "win_rate": null,
+  "average_win": null,
+  "average_loss": null,
+  "max_drawdown": null,
+  "metrics_basis": "Known closed trades only; drawdown uses closing-time order, USD",
+  "unresolved": [
+    {
+      "slug": "cpc-btc-updown-15m-2026-10-21-1945z",
+      "state": "closed",
+      "order_id": null,
+      "issues": [
+        "Resolution cost differs from recorded entry cost",
+        "Resolution fees differ from collected order fees"
+      ]
+    }
+  ],
+  "opportunity_count": 0,
+  "checked_at": "2026-10-21T21:03:54.781841+00:00",
+  "accounting_status": "disputed_pending_provider_cash_ledger_or_field_definitions",
+  "provenance": {
+    "kind": "isolated reconstruction from captured provider order/resolution through MockTransport and results_report.py; not the production journal",
+    "source": "issue-13-provider-accounting.json",
+    "filled_order_id": "D83GRPYG10JK",
+    "filled_trade_id": "D83GRPYG6ZRN",
+    "filled_execution_id": "D83GRPYG6ZRP",
+    "production_state_modified": false,
+    "new_live_round_trip_performed": false,
+    "runtime_account_checks": "synthetic flat-account MockTransport responses, not new account observations",
+    "order_collected_fee_usd": "0.0200",
+    "execution_collected_fee_usd": "0.0200",
+    "trade_cost_usd": "0.9785",
+    "resolution_fee_usd": "0.0270",
+    "order_implied_entry_cost_usd": "0.9785",
+    "resolution_cost_usd": "0.9855",
+    "resolution_after_realized_usd": "-0.9585",
+    "official_yes_settlement": "0",
+    "official_payout_usd": "0",
+    "fee_cost_difference_usd": "0.0070",
+    "authoritative_cash_debit_usd": null,
+    "original_issue_5_evidence_preserved": true
+  }
+}

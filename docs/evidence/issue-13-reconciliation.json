@@ -1,0 +1,152 @@
+{
+  "order_id": "D83GRPYG10JK",
+  "market_slug": "cpc-btc-updown-15m-2026-10-21-1945z",
+  "checked_at": "2026-10-21T21:14:00.991151+00:00",
+  "status": "disputed_or_incomplete",
+  "issues": [
+    "Resolution fees and collected order accounting disagree",
+    "Resolution cost and collected order accounting disagree"
+  ],
+  "order_notional_usd": "0.958500",
+  "order_collected_fee_usd": "0.0200",
+  "order_implied_entry_cost_usd": "0.978500",
+  "execution_collected_fee_usd": "0.0200",
+  "trade_cost_usd": "0.9785",
+  "official_yes_settlement": "0",
+  "authoritative_cash_debit_usd": null,
+  "cash_evidence_needed": "Posted cash-ledger debit/fee bound to this order and execution",
+  "sources": {
+    "order": {
+      "id": "D83GRPYG10JK",
+      "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+      "intent": "ORDER_INTENT_BUY_LONG",
+      "state": "ORDER_STATE_FILLED",
+      "quantity": 1.35,
+      "cumQuantity": 1.35,
+      "avgPx": {
+        "value": "0.7100",
+        "currency": "USD"
+      },
+      "commissionNotionalTotalCollected": {
+        "value": "0.0200",
+        "currency": "USD"
+      },
+      "createTime": "2026-10-21T19:58:17.978076692Z",
+      "insertTime": "2026-10-21T19:58:17.979329534Z",
+      "lastTransactTime": "2026-10-21T19:58:17.979329534Z"
+    },
+    "matching_trades": [
+      {
+        "id": "D83GRPYG6ZRN",
+        "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+        "state": "TRADE_STATE_NEW",
+        "price": {
+          "value": "0.7100",
+          "currency": "USD"
+        },
+        "qtyDecimal": "1.3500",
+        "cost": {
+          "value": "0.9785",
+          "currency": "USD"
+        },
+        "createTime": "2026-10-21T19:58:17.979329534Z",
+        "updateTime": "2026-10-21T19:58:17.979329534Z",
+        "isAggressor": true,
+        "execution": {
+          "id": "D83GRPYG6ZRP",
+          "tradeId": "D83GRPYG6ZRN",
+          "type": "EXECUTION_TYPE_FILL",
+          "lastShares": "1.3500",
+          "lastPx": {
+            "value": "0.7100",
+            "currency": "USD"
+          },
+          "commissionNotionalCollected": {
+            "value": "0.0200",
+            "currency": "USD"
+          },
+          "transactTime": "2026-10-21T19:58:17.979329534Z",
+          "aggressor": true,
+          "order": {
+            "id": "D83GRPYG10JK",
+            "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+            "intent": "ORDER_INTENT_BUY_LONG",
+            "state": "ORDER_STATE_FILLED",
+            "quantity": 1.35,
+            "cumQuantity": 1.35,
+            "avgPx": {
+              "value": "0.7100",
+              "currency": "USD"
+            },
+            "commissionNotionalTotalCollected": {
+              "value": "0.0200",
+              "currency": "USD"
+            },
+            "createTime": "2026-10-21T19:58:17.978076692Z",
+            "insertTime": "2026-10-21T19:58:17.979329534Z",
+            "lastTransactTime": "2026-10-21T19:58:17.979329534Z"
+          }
+        }
+      }
+    ],
+    "resolutions": [
+      {
+        "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+        "updateTime": "2026-10-21T20:00:16.266705608Z",
+        "tradeId": "",
+        "side": "POSITION_RESOLUTION_SIDE_SHORT",
+        "beforePosition": {
+          "netPositionDecimal": "1.3500",
+          "qtyBoughtDecimal": "1.3500",
+          "qtySoldDecimal": "0.0000",
+          "cost": {
+            "value": "0.9855",
+            "currency": "USD"
+          },
+          "fees": {
+            "value": "0.0270",
+            "currency": "USD"
+          },
+          "baseCost": {
+            "value": "0.9585",
+            "currency": "USD"
+          },
+          "realized": {
+            "value": "0.0000",
+            "currency": "USD"
+          },
+          "cashValue": {
+            "value": "0",
+            "currency": "USD"
+          },
+          "avgPx": {
+            "value": "0.7100",
+            "currency": "USD"
+          },
+          "updateTime": "2026-10-21T19:58:17.979329534Z"
+        },
+        "afterPosition": {
+          "netPositionDecimal": "0.0000",
+          "qtyBoughtDecimal": "1.3500",
+          "qtySoldDecimal": "1.3500",
+          "cost": {
+            "value": "0.0000",
+            "currency": "USD"
+          },
+          "fees": null,
+          "baseCost": null,
+          "realized": {
+            "value": "-0.9585",
+            "currency": "USD"
+          },
+          "cashValue": {
+            "value": "0",
+            "currency": "USD"
+          },
+          "avgPx": null,
+          "updateTime": "2026-10-21T20:00:16.266705608Z"
+        }
+      }
+    ]
+  }
+}

@@ -91,3 +91,18 @@
   historical GET evidence confirms one 1.35-share filled loss and one expired
   unfilled order, with a $0.0070 fee/cost discrepancy. Production journal/service
   untouched. New live-money QA is blocked; preserve that gate and leave #5 open.
+- Issue #13: matching trade D83GRPYG6ZRN/execution D83GRPYG6ZRP corroborate
+  order D83GRPYG10JK's $0.0200 collected fee and $0.9785 trade cost. Position
+  fees/cost remain $0.0270/$0.9855; before-position uses the fill timestamp.
+  UI reproduces the difference. No documented fee-field precedence resolves
+  cash; institutional cash-ledger access requires separate RSA/JWT entitlements.
+  `reconcile_order.py` is a GET-only diagnostic, never a journal repair or trading
+  activation. Preserve dispute and risk blocking; do not promote fee arithmetic
+  or agreeing order/execution fields into proof of the exact cash debit. See
+  verification-issue-13.md and the retained source/evidence JSON files.
+- Issue #13 wrap: integrated with main b65d250 (bankroll percentages), preserving
+  current sizing and dispute guards. All 211 tests, Ruff lint/format, syntax,
+  dependency, JSON/link and evidence-preservation checks pass. Independent
+  code-health/design/spec reviews completed; intent identity and synthetic Down
+  principal findings fixed. Historical cash confirmation still requires the
+  provider; request text is prepared, with no outreach or journal write implied.

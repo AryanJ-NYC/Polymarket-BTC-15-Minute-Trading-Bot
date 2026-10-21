@@ -47,6 +47,13 @@ A local isolated reconstruction with the new journal and report must expose it
 as one unresolved closed trade, not an exact result. The deployed older journal
 currently records -$0.978500 without this flag. It was not modified by this task.
 
+Follow-up: [issue #13 investigation](verification-issue-13.md) adds the matching
+execution's $0.0200 collected fee, trade cost $0.9785, provider UI corroboration,
+and a repeatable read-only reconciliation command. Position fees/cost still
+disagree; authoritative cash evidence remains unavailable and exact P&L stays
+disputed. The original JSON below is preserved; the follow-up has a separate
+source capture and actual-results summary.
+
 The DigitalOcean service was already active when inspected. Only its systemd
 status and read-only SQLite data were read over SSH. Provider evidence used a
 request hook rejecting every method except GET. No account balance, credentials,

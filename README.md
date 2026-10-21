@@ -248,3 +248,16 @@ runner. A bounded run may finish with pending results that need later readback.
 
 [Issue #5 evidence and remaining live QA](docs/verification-issue-5.md) separates
 fake-transport regression coverage from read-only actual execution evidence.
+
+Inspect one known filled entry's provider accounting without opening a journal
+or starting the trading runner:
+
+```bash
+python reconcile_order.py --order-id D83GRPYG10JK
+```
+
+This reads the order, matching executions/trade costs, position resolution, and
+official settlement. It preserves missing amounts and disagreements, deduplicates
+fills, and prints JSON with source fields/timestamps. It does not correct a
+journal or establish a cash debit from conflicting records. See the
+[issue #13 findings and remaining provider evidence](docs/verification-issue-13.md).

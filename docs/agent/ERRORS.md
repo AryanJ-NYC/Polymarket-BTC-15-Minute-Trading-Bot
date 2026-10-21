@@ -53,3 +53,10 @@
   workflow regression reproduced this; compare evidence before the closed-state
   return and clear exact P&L on discrepancy. Preserve the original order and
   provider resolution fields for later reconciliation.
+- Issue #13 readback confirms the fee disagreement is present in the provider
+  order/execution versus position representations, not just local calculation.
+  Retail activities can return unrelated funding entries even with marketSlug;
+  bind trade/resolution market IDs and execution order IDs, and omit unrelated
+  data. After-resolution null fees do not mean zero. Decimal strings can retain
+  different trailing-zero precision; compare Decimal values when verifying
+  arithmetic rather than changing production serialization to satisfy a test.

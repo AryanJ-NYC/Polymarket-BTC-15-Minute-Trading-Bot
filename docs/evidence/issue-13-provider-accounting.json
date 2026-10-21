@@ -1,0 +1,267 @@
+{
+  "issue": 13,
+  "order_id": "D83GRPYG10JK",
+  "market_slug": "cpc-btc-updown-15m-2026-10-21-1945z",
+  "scope": "Exact-target read-only GETs; no account, journal, service or trading mutation",
+  "publication": "Allowlisted source fields with original values and timestamps; omitted unrelated balance activity, counterparty execution, user/position IDs, metadata and headers. sha256 hashes the original HTTP response bytes, not these projections.",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/v1/order/D83GRPYG10JK",
+      "query": {
+        "_ts": "1792616634622990000"
+      },
+      "retrieved_at": "2026-10-21T21:03:54.781841+00:00",
+      "status": 200,
+      "server_date": "Wed, 21 Oct 2026 21:03:54 GMT",
+      "sha256": "f20ac6867f47cebfbd17efdf780388b636fb2f18985ad536c26f74d3ea49bd7a",
+      "body": {
+        "order": {
+          "id": "D83GRPYG10JK",
+          "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+          "side": "ORDER_SIDE_BUY",
+          "type": "ORDER_TYPE_LIMIT",
+          "price": {
+            "value": "0.72",
+            "currency": "USD"
+          },
+          "quantity": 1.35,
+          "cumQuantity": 1.35,
+          "leavesQuantity": 0,
+          "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+          "intent": "ORDER_INTENT_BUY_LONG",
+          "state": "ORDER_STATE_FILLED",
+          "commissionNotionalTotalCollected": {
+            "value": "0.0200",
+            "currency": "USD"
+          },
+          "commissionsBasisPoints": "0",
+          "makerCommissionsBasisPoints": "0",
+          "avgPx": {
+            "value": "0.7100",
+            "currency": "USD"
+          },
+          "insertTime": "2026-10-21T19:58:17.979329534Z",
+          "createTime": "2026-10-21T19:58:17.978076692Z",
+          "lastTransactTime": "2026-10-21T19:58:17.979329534Z"
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/portfolio/activities",
+      "query": {
+        "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+        "limit": "100",
+        "_ts": "1792616634781937000"
+      },
+      "retrieved_at": "2026-10-21T21:03:54.899785+00:00",
+      "status": 200,
+      "server_date": "Wed, 21 Oct 2026 21:03:54 GMT",
+      "sha256": "6689a0bf354028c2d715daa1bdd36026e10095d719dc64404b704e6b5d21447c",
+      "body": {
+        "activities": [
+          {
+            "type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+            "positionResolution": {
+              "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+              "updateTime": "2026-10-21T20:00:16.266705608Z",
+              "tradeId": "",
+              "side": "POSITION_RESOLUTION_SIDE_SHORT",
+              "beforePosition": {
+                "netPositionDecimal": "1.3500",
+                "qtyBoughtDecimal": "1.3500",
+                "qtySoldDecimal": "0.0000",
+                "cost": {
+                  "value": "0.9855",
+                  "currency": "USD"
+                },
+                "realized": {
+                  "value": "0.0000",
+                  "currency": "USD"
+                },
+                "cashValue": {
+                  "value": "0",
+                  "currency": "USD"
+                },
+                "avgPx": {
+                  "value": "0.7100",
+                  "currency": "USD"
+                },
+                "fees": {
+                  "value": "0.0270",
+                  "currency": "USD"
+                },
+                "baseCost": {
+                  "value": "0.9585",
+                  "currency": "USD"
+                },
+                "costPerShare": null,
+                "expired": false,
+                "updateTime": "2026-10-21T19:58:17.979329534Z"
+              },
+              "afterPosition": {
+                "netPositionDecimal": "0.0000",
+                "qtyBoughtDecimal": "1.3500",
+                "qtySoldDecimal": "1.3500",
+                "cost": {
+                  "value": "0.0000",
+                  "currency": "USD"
+                },
+                "realized": {
+                  "value": "-0.9585",
+                  "currency": "USD"
+                },
+                "cashValue": {
+                  "value": "0",
+                  "currency": "USD"
+                },
+                "avgPx": null,
+                "fees": null,
+                "baseCost": null,
+                "costPerShare": null,
+                "expired": false,
+                "updateTime": "2026-10-21T20:00:16.266705608Z"
+              }
+            }
+          },
+          {
+            "type": "ACTIVITY_TYPE_TRADE",
+            "trade": {
+              "id": "D83GRPYG6ZRN",
+              "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+              "state": "TRADE_STATE_NEW",
+              "createTime": "2026-10-21T19:58:17.979329534Z",
+              "updateTime": "2026-10-21T19:58:17.979329534Z",
+              "price": {
+                "value": "0.7100",
+                "currency": "USD"
+              },
+              "qtyDecimal": "1.3500",
+              "cost": {
+                "value": "0.9785",
+                "currency": "USD"
+              },
+              "isAggressor": true,
+              "createTradeDate": "2026-10-21T00:00:00Z",
+              "updateTradeDate": "2026-10-21T00:00:00Z",
+              "tradeLinkId": "D83GRQ3G0ZRH",
+              "aggressorExecution": {
+                "id": "D83GRPYG6ZRP",
+                "lastShares": "1.3500",
+                "lastPx": {
+                  "value": "0.7100",
+                  "currency": "USD"
+                },
+                "type": "EXECUTION_TYPE_FILL",
+                "transactTime": "2026-10-21T19:58:17.979329534Z",
+                "tradeId": "D83GRPYG6ZRN",
+                "aggressor": true,
+                "commissionNotionalCollected": {
+                  "value": "0.0200",
+                  "currency": "USD"
+                },
+                "commissionSpreadPx": {
+                  "value": "0.7100",
+                  "currency": "USD"
+                },
+                "transactTradeDate": "2026-10-21T00:00:00Z",
+                "order": {
+                  "id": "D83GRPYG10JK",
+                  "marketSlug": "cpc-btc-updown-15m-2026-10-21-1945z",
+                  "side": "ORDER_SIDE_BUY",
+                  "type": "ORDER_TYPE_LIMIT",
+                  "price": {
+                    "value": "0.72",
+                    "currency": "USD"
+                  },
+                  "quantity": 1.35,
+                  "cumQuantity": 1.35,
+                  "leavesQuantity": 0,
+                  "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                  "intent": "ORDER_INTENT_BUY_LONG",
+                  "state": "ORDER_STATE_FILLED",
+                  "commissionNotionalTotalCollected": {
+                    "value": "0.0200",
+                    "currency": "USD"
+                  },
+                  "commissionsBasisPoints": "0",
+                  "makerCommissionsBasisPoints": "0",
+                  "avgPx": {
+                    "value": "0.7100",
+                    "currency": "USD"
+                  },
+                  "insertTime": "2026-10-21T19:58:17.979329534Z",
+                  "createTime": "2026-10-21T19:58:17.978076692Z",
+                  "lastTransactTime": "2026-10-21T19:58:17.979329534Z"
+                }
+              }
+            }
+          }
+        ],
+        "nextCursor": "",
+        "eof": true
+      },
+      "omitted_unrelated_activity_counts": {
+        "ACTIVITY_TYPE_REFERRAL_BONUS": 1,
+        "ACTIVITY_TYPE_ACCOUNT_DEPOSIT": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/markets/cpc-btc-updown-15m-2026-10-21-1945z/settlement",
+      "query": {
+        "_ts": "1792616634900048000"
+      },
+      "retrieved_at": "2026-10-21T21:03:54.973663+00:00",
+      "status": 200,
+      "server_date": "Wed, 21 Oct 2026 21:03:54 GMT",
+      "sha256": "f350e21be32c437b2f5f52b492a625cd6902b38839e8d8587d75607d9916a349",
+      "body": {
+        "slug": "cpc-btc-updown-15m-2026-10-21-1945z",
+        "settlement": 0
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/market/slug/cpc-btc-updown-15m-2026-10-21-1945z",
+      "query": {
+        "_ts": "1792616634973721000"
+      },
+      "retrieved_at": "2026-10-21T21:03:55.215033+00:00",
+      "status": 200,
+      "server_date": "Wed, 21 Oct 2026 21:03:55 GMT",
+      "sha256": "8607347d2a4aa5e2225fd9fa81852c9f923c238633988c1ca2b23d07cbe78e3f",
+      "body": {
+        "market": {
+          "slug": "cpc-btc-updown-15m-2026-10-21-1945z",
+          "feeCoefficient": 0.0695,
+          "minimumTradeQty": 0.01,
+          "orderPriceMinTickSize": 0.01,
+          "status": "MARKET_STATUS_RESOLVED",
+          "ep3Status": "EXPIRED",
+          "updatedAt": "2026-10-21T20:12:27Z",
+          "assetPriceTerms": {
+            "marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN",
+            "asset": {
+              "assetClass": "ASSET_CLASS_CRYPTO",
+              "symbol": "btc"
+            },
+            "indexSymbol": "BRTI",
+            "horizon": "15m",
+            "windowStart": "2026-10-21T19:45:00Z",
+            "windowEnd": "2026-10-21T20:00:00Z",
+            "priceToBeat": {
+              "value": "84484.18",
+              "currency": "USD"
+            },
+            "settlementPrice": {
+              "value": "84474.00",
+              "currency": "USD"
+            }
+          }
+        }
+      }
+    }
+  ]
+}
