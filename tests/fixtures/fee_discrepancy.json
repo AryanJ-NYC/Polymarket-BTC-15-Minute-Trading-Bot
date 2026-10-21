@@ -1,0 +1,184 @@
+{
+  "description": "Synthetic provider response fixture for the observed sub-cent fee discrepancy; no account IDs or captured request metadata.",
+  "order_id": "fixture-entry",
+  "market_slug": "btc-fee-dispute-fixture",
+  "responses": {
+    "/v1/order/fixture-entry": {
+      "order": {
+        "id": "fixture-entry",
+        "marketSlug": "btc-fee-dispute-fixture",
+        "side": "ORDER_SIDE_BUY",
+        "type": "ORDER_TYPE_LIMIT",
+        "price": {
+          "value": "0.72",
+          "currency": "USD"
+        },
+        "quantity": 1.35,
+        "cumQuantity": 1.35,
+        "leavesQuantity": 0,
+        "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+        "intent": "ORDER_INTENT_BUY_LONG",
+        "state": "ORDER_STATE_FILLED",
+        "commissionNotionalTotalCollected": {
+          "value": "0.0200",
+          "currency": "USD"
+        },
+        "commissionsBasisPoints": "0",
+        "makerCommissionsBasisPoints": "0",
+        "avgPx": {
+          "value": "0.7100",
+          "currency": "USD"
+        },
+        "insertTime": "2026-10-21T19:58:17.979329534Z",
+        "createTime": "2026-10-21T19:58:17.978076692Z",
+        "lastTransactTime": "2026-10-21T19:58:17.979329534Z"
+      }
+    },
+    "/v1/portfolio/activities": {
+      "activities": [
+        {
+          "type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+          "positionResolution": {
+            "marketSlug": "btc-fee-dispute-fixture",
+            "updateTime": "2026-10-21T20:00:16.266705608Z",
+            "tradeId": "",
+            "side": "POSITION_RESOLUTION_SIDE_SHORT",
+            "beforePosition": {
+              "netPositionDecimal": "1.3500",
+              "qtyBoughtDecimal": "1.3500",
+              "qtySoldDecimal": "0.0000",
+              "cost": {
+                "value": "0.9855",
+                "currency": "USD"
+              },
+              "realized": {
+                "value": "0.0000",
+                "currency": "USD"
+              },
+              "cashValue": {
+                "value": "0",
+                "currency": "USD"
+              },
+              "avgPx": {
+                "value": "0.7100",
+                "currency": "USD"
+              },
+              "fees": {
+                "value": "0.0270",
+                "currency": "USD"
+              },
+              "baseCost": {
+                "value": "0.9585",
+                "currency": "USD"
+              },
+              "costPerShare": null,
+              "expired": false,
+              "updateTime": "2026-10-21T19:58:17.979329534Z"
+            },
+            "afterPosition": {
+              "netPositionDecimal": "0.0000",
+              "qtyBoughtDecimal": "1.3500",
+              "qtySoldDecimal": "1.3500",
+              "cost": {
+                "value": "0.0000",
+                "currency": "USD"
+              },
+              "realized": {
+                "value": "-0.9585",
+                "currency": "USD"
+              },
+              "cashValue": {
+                "value": "0",
+                "currency": "USD"
+              },
+              "avgPx": null,
+              "fees": null,
+              "baseCost": null,
+              "costPerShare": null,
+              "expired": false,
+              "updateTime": "2026-10-21T20:00:16.266705608Z"
+            }
+          }
+        },
+        {
+          "type": "ACTIVITY_TYPE_TRADE",
+          "trade": {
+            "id": "fixture-trade",
+            "marketSlug": "btc-fee-dispute-fixture",
+            "state": "TRADE_STATE_NEW",
+            "createTime": "2026-10-21T19:58:17.979329534Z",
+            "updateTime": "2026-10-21T19:58:17.979329534Z",
+            "price": {
+              "value": "0.7100",
+              "currency": "USD"
+            },
+            "qtyDecimal": "1.3500",
+            "cost": {
+              "value": "0.9785",
+              "currency": "USD"
+            },
+            "isAggressor": true,
+            "createTradeDate": "2026-10-21T00:00:00Z",
+            "updateTradeDate": "2026-10-21T00:00:00Z",
+            "aggressorExecution": {
+              "id": "fixture-execution",
+              "lastShares": "1.3500",
+              "lastPx": {
+                "value": "0.7100",
+                "currency": "USD"
+              },
+              "type": "EXECUTION_TYPE_FILL",
+              "transactTime": "2026-10-21T19:58:17.979329534Z",
+              "tradeId": "fixture-trade",
+              "aggressor": true,
+              "commissionNotionalCollected": {
+                "value": "0.0200",
+                "currency": "USD"
+              },
+              "commissionSpreadPx": {
+                "value": "0.7100",
+                "currency": "USD"
+              },
+              "transactTradeDate": "2026-10-21T00:00:00Z",
+              "order": {
+                "id": "fixture-entry",
+                "marketSlug": "btc-fee-dispute-fixture",
+                "side": "ORDER_SIDE_BUY",
+                "type": "ORDER_TYPE_LIMIT",
+                "price": {
+                  "value": "0.72",
+                  "currency": "USD"
+                },
+                "quantity": 1.35,
+                "cumQuantity": 1.35,
+                "leavesQuantity": 0,
+                "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                "intent": "ORDER_INTENT_BUY_LONG",
+                "state": "ORDER_STATE_FILLED",
+                "commissionNotionalTotalCollected": {
+                  "value": "0.0200",
+                  "currency": "USD"
+                },
+                "commissionsBasisPoints": "0",
+                "makerCommissionsBasisPoints": "0",
+                "avgPx": {
+                  "value": "0.7100",
+                  "currency": "USD"
+                },
+                "insertTime": "2026-10-21T19:58:17.979329534Z",
+                "createTime": "2026-10-21T19:58:17.978076692Z",
+                "lastTransactTime": "2026-10-21T19:58:17.979329534Z"
+              }
+            }
+          }
+        }
+      ],
+      "nextCursor": "",
+      "eof": true
+    },
+    "/v1/markets/btc-fee-dispute-fixture/settlement": {
+      "slug": "btc-fee-dispute-fixture",
+      "settlement": 0
+    }
+  }
+}

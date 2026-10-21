@@ -326,3 +326,24 @@ realized result of earlier exits.
 Track each experiment's sample counts, checks, deployed revision, prediction
 metrics and actual execution results in its GitHub issue or PR. Automated fixture
 coverage, deployed behavior and live execution are separate evidence.
+
+## Fee reconciliation
+
+Inspect one known filled entry's provider accounting without opening a journal
+or starting the trading runner:
+
+```bash
+python reconcile_order.py --order-id YOUR_KNOWN_ORDER_ID
+```
+
+This reads fresh order, matching execution/trade, resolution and settlement
+records. It preserves missing amounts and disagreements, deduplicates fills,
+and prints JSON with relevant source fields and timestamps. It does not repair
+a journal or claim an authoritative cash debit. See the maintained
+[fee accounting contract](docs/polymarket-us-api.md#fee-reconciliation).
+
+A fully settled trade's fee dispute does not block new entries when the
+resolution fee and total cost differ from collected-order accounting by the
+same amount, up to $0.01. The report keeps the dispute and unknown exact P&L;
+the daily loss budget uses the higher entry cost. Missing amounts, unsettled
+orders, other accounting issues, and larger differences still require review.

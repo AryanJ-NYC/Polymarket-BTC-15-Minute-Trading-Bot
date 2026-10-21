@@ -128,7 +128,8 @@ A market outcome alone does not prove an account payout. Live position settlemen
 also needs paginated resolution activity with the matching pre-resolution signed
 quantity and zero remaining quantity. Preserve before/after position evidence,
 actual fill fees and provider cost fields. Disagreements leave P&L unresolved and
-block new entries. Busted trades and ambiguous activity need reconciliation.
+block new entries, except for the settled fee tolerance below. Busted trades
+and ambiguous activity need reconciliation.
 
 Keep account use exclusive, including while stopped with open positions. Final
 net quantity cannot identify offsetting manual trades that restore the same
@@ -136,6 +137,38 @@ holding. Never delete the journal or invent a settlement to bypass uncertainty.
 
 References: [settlement](https://docs.polymarket.us/api-reference/markets/get-market-settlement),
 [activity](https://docs.polymarket.us/api-reference/portfolio/get-activities).
+
+## Fee reconciliation
+
+`reconcile_order.py --order-id KNOWN_ORDER_ID` reads one filled entry without
+opening a journal. It binds executions to the order/trade/market, checks complete
+quantity, deduplicates executions and counts each trade cost once. Completed
+principal and cost come from individual fills; rounded `avgPx`-implied order
+claims are retained separately. Missing fees stay unknown and explicit zero
+stays zero. Negative taker commissions are rejected; confirmed maker rebates
+retain their documented negative sign. Each known-order read/retry and activity
+page has a new `_ts` query; market/cursor filters and bounded retries remain.
+
+Position fee/cost fields can disagree with collected commission. For example,
+$0.9585 principal plus $0.0200 collected commission implies $0.9785 cost, while a
+resolution can report $0.0270 fees and $0.9855 cost. Agreement among order,
+execution and trade records does not resolve a conflicting cash claim. The
+diagnostic preserves all relevant fields without asserting an authoritative
+cash debit. Provider cash-ledger confirmation or field definitions are needed
+to settle that interpretation; no provider defect or extra charge is assumed.
+
+A fully closed, zero-quantity trade with known costs/proceeds and no pending
+order may pass entry guards if its only issues are equal resolution fee/cost
+differences within $0.01. The report retains disputed exact P&L. The daily loss
+budget uses the higher entry cost, so accepted uncertainty cannot hide losses.
+This policy recognizes existing records on read without rewriting evidence.
+Unknown, unrelated, open-position, larger or inconsistent differences remain
+blocking. Reproducible synthetic fixtures live under `tests/fixtures/`; private
+captures and issue-specific run reports remain local or in the issue/PR.
+
+[Collected commission schema](https://docs.polymarket.us/api-reference/oapi-schemas/orders-schema.json),
+[fee/rebate rules](https://docs.polymarket.us/fees),
+[cash-ledger reconciliation](https://docs.polymarket.us/partners/reconciliation).
 
 ## Rate limits and unavailable data
 

@@ -164,7 +164,7 @@ class PolymarketClient:
         # a lost create response cannot safely be replayed.
         for attempt in range(3):
             try:
-                order = self.client.orders.retrieve(order_id)["order"]
+                order = self._fresh_get(f"/v1/order/{order_id}")["order"]
                 break
             except (APIError, APIConnectionError, APITimeoutError) as exc:
                 if not retryable_api_error(exc, missing=True) or attempt == 2:
