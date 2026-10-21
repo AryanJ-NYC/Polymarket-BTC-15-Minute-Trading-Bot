@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+from time import monotonic
 
 import httpx
 from loguru import logger
@@ -22,6 +23,7 @@ class BTCStrategy15Min:
     def __init__(self):
         self.slug = None
         self.ticks = deque(maxlen=200)
+        self.last_sample = None
         self.processors = [
             SpikeDetectionProcessor(),
             SentimentProcessor(),
@@ -45,9 +47,16 @@ class BTCStrategy15Min:
         if self.slug != book.slug:
             self.slug = book.slug
             self.ticks.clear()
-        # Cached HTTP responses must not manufacture price-history observations.
-        if not self.ticks or book.timestamp > self.ticks[-1]["ts"]:
+            self.last_sample = None
+        # Sample the latest distinct snapshot at most every three seconds, with
+        # no catch-up after slow context reads. Transport frequency must not
+        # shorten the 20-observation warmup or count-based feature horizons.
+        now = monotonic()
+        if (self.last_sample is None or now - self.last_sample >= 3) and (
+            not self.ticks or book.timestamp > self.ticks[-1]["ts"]
+        ):
             self.ticks.append({"ts": book.timestamp, "price": book.mid})
+            self.last_sample = now
 
     def decide(self, market: Market, book: Book) -> str | None:
         self.observe(book)

@@ -53,8 +53,9 @@ This preserves the normal warmup and entry window. It can take more than one
 opened while the first waits for exit or settlement. A restart resumes a single
 unfinished trade; it refuses to choose between multiple unfinished trades.
 
-For a bounded smoke check, `python bot.py --duration 65`. For one observation,
-`python bot.py --once`. `python 15m_bot_runner.py` calls the same entry point;
+For a bounded smoke check, `python bot.py --duration 65`. For one streamed observation,
+`python bot.py --once` waits up to 15 seconds for an eligible snapshot.
+`python 15m_bot_runner.py` calls the same entry point;
 it does not restart failed processes automatically. `--env-file /path/to/.env.us`
 selects a credential file explicitly.
 
@@ -74,25 +75,39 @@ management. An interrupted/unknown submission stops trading for reconciliation.
 - Discovers BTC, 15-minute, Up/Down contracts by their typed US asset terms,
   paginating the public API. Uses `windowStart` / `windowEnd`, not slug guesses or
   the later expiration timestamp.
-- Preserves the previous late-window entry policy: collect at least 20 distinct
-  book snapshots, enter only between minute 13 and minute 14, follow Up above a
+- Preserves the previous late-window entry policy: sample the latest distinct
+  book at most once every three seconds (20 observations take at least 57 seconds),
+  enter only between minute 13 and minute 14, follow Up above a
   YES midpoint of 0.60 or Down below 0.40, and require at least one signal and a
   fusion result. Fusion is informational; the midpoint sets trade direction.
   History resets for each contract. Starting late may skip the current window.
 - Reuses spike, tick velocity, order-flow, divergence, sentiment, and options
   processors. Optional external context can be unavailable; no input is invented.
-- Uses authenticated REST order books every three seconds. Each request has a
-  unique query to avoid intermediary caches replaying a 30-second-old response.
-  The provider's timestamp must still advance to count as new history.
-  Null timestamps, books older
-  than 35 seconds, future timestamps, closed/crossed/empty books are rejected.
-  This is a REST polling strategy, not a low-latency streaming system.
+- Uses the official SDK's authenticated full `marketData` WebSocket for paper
+  and live books. It tracks provider timestamps and monotonic receipt times,
+  rejecting missing/invalid, crossed, empty, non-open, incorrectly bound, stale
+  (>35 seconds), and future-dated (>5 seconds) books. Heartbeats do not refresh
+  quotes. One latest snapshot per active contract bounds application buffering.
+- Disconnects block entries and discard executable cached books. Reconnection
+  uses bounded jittered backoff and requires a new valid snapshot for each active
+  subscription. Current entry and unexpired owned-position contracts are followed;
+  obsolete subscriptions are removed. Read-only health logs explain paused trading.
+- Reconciliation continues through quote outages. Existing positions can use
+  validated authenticated REST books at most once per three seconds per contract;
+  429 responses respect Retry-After with a minimum 30-second delay. Fallback books
+  never enable entries. Healthy subscribed operation does not poll REST books.
+  Discovery, account/order reads, submissions, reconciliation, and settlement
+  still use REST. The receiver runs independently of synchronous HTTP/disk work.
 - Uses YES-denominated prices for both Up and Down US intents. Down entry cost
   is `1 - YES bid`; Up entry cost is `YES ask`. Prices must match the market tick.
 - Uses limit IOC orders at visible best prices, with fractional quantities
   rounded down to the market increment and visible depth. **At most $1 per new
   trade, including a conservative fee reserve.** Never increases spend to meet
   minimum quantity. Maximum five open positions and $10 total entry exposure.
+- Rechecks eligible book generation, executable price/depth, freshness, and entry
+  deadline after slow work and immediately before submission, including after
+  preview. Known preflight rejections safely release the reserved order;
+  ambiguous create outcomes remain pending and are never retried automatically.
 - Reserves a UTC daily $5 loss budget against recorded losses plus the full cost
   of still-open positions and the next order. This is the bot's own ledger, not
   a claim about account-wide daily P&L or strategy profitability.
@@ -112,6 +127,12 @@ have one entry attempt, committed before submitting to the exchange. Successful
 submissions record the exchange order ID, then verify terminal state and actual
 cumulative fills. Partial IOC fills are tracked at their actual quantity and fee.
 Only a known bot order can be canceled; the bot never cancels all account orders.
+Transient known-order read failures retain the reserved ID for later reconciliation.
+Ctrl+C, SIGTERM, and duration expiry finish the current serial tick, then close
+the receiver/socket before releasing the journal and REST client.
+
+See [streaming operations and the read-only comparison recorder](docs/streaming.md)
+for health fields, outage recovery, sampling, and reproducible measurements.
 
 Live startup checks exchange quantities against the journal and rejects unknown
 positions/open orders. Live settlement also requires paginated provider resolution

@@ -1,5 +1,17 @@
 # Agent errors and recovery
 
+- Issue #1 receiver lifecycle: callbacks that close over the reconnect loop's
+  generation can accidentally use the next connection's value. Bind the
+  generation when registering each callback. Retire removed request IDs
+  immediately; a fast remove/re-add must receive a new subscription and snapshot.
+- Issue #1 shutdown review: checking stop only outside a batch of timed socket
+  operations can exceed the thread join deadline. Check between operations.
+  Observer shutdown must also finish its REST worker before closing its client
+  or reading evidence; a timed join alone does not prove termination.
+- Replay clocks must include time-aware signal processors, not only the
+  strategy facade. Constant-price replay can hide missing 30/60-second velocity
+  inputs behind another signal; use varying prices and assert feature values.
+
 - The original `requirements.txt` was UTF-16 and pinned the international
   Nautilus stack. The US migration replaces it with a small UTF-8 dependency file.
 - Account balances contain numeric `buyingPower`, unlike order prices, which

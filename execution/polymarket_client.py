@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path
-from time import time_ns
+from time import monotonic, time_ns
 
 from dotenv import dotenv_values
 from polymarket_us import NotFoundError, PolymarketUS
@@ -28,6 +29,11 @@ class PolymarketClient:
 
     def close(self) -> None:
         self.client.close()
+
+    def market_stream(self):
+        from execution.market_stream import MarketStream
+
+        return MarketStream(self.client.ws.markets)
 
     def account(self) -> Account:
         balances = self.client.account.balances()["balances"]
@@ -98,25 +104,15 @@ class PolymarketClient:
         # gateway returns a cached 404 for a newly opened measurement window.
         # A unique query keeps intermediary caches from replaying a 30s-old book;
         # the provider timestamp is still independently validated below.
-        data = self._fresh_get(f"/v1/markets/{market.slug}/book")["marketData"]
-        now = datetime.now(timezone.utc)
-        if data["marketSlug"] != market.slug or data["state"] != "MARKET_STATE_OPEN":
-            raise ValueError("Market book is not open or belongs to another contract")
-        timestamp = parse_time(data["transactTime"])
-        age = (now - timestamp).total_seconds()
-        # Public REST books are cached for up to 30 seconds by the exchange.
-        if not -5 <= age <= 35:
-            raise ValueError("Market book timestamp is stale or in the future")
-        bids = _levels(data["bids"], reverse=True)
-        asks = _levels(data["offers"], reverse=False)
-        if not bids or not asks or bids[0][0] >= asks[0][0]:
-            raise ValueError("Missing or crossed order book")
-        if not market.start <= now < market.end:
-            raise ValueError("Contract is outside its measurement window")
-        return Book(market.slug, bids, asks, timestamp)
+        response = self._fresh_get(f"/v1/markets/{market.slug}/book")
+        try:
+            data = response["marketData"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("Malformed market book response") from exc
+        return parse_book(market, data)
 
     def buy_plan(self, market: Market, book: Book, outcome: str, budget: Decimal) -> Plan:
-        _validate_book(market, book)
+        validate_book(market, book)
         if outcome not in {"up", "down"} or not ZERO < budget <= Decimal("1"):
             raise ValueError("Expected Up/Down and a budget of at most $1")
         yes_price, available = book.asks[0] if outcome == "up" else book.bids[0]
@@ -134,7 +130,7 @@ class PolymarketClient:
         return _plan(market, book, outcome, "BUY", yes_price, quantity, fee_bound)
 
     def sell_plan(self, market: Market, book: Book, outcome: str, quantity: Decimal) -> Plan:
-        _validate_book(market, book)
+        validate_book(market, book)
         if outcome not in {"up", "down"}:
             raise ValueError("Expected Up or Down")
         yes_price, available = book.bids[0] if outcome == "up" else book.asks[0]
@@ -144,25 +140,37 @@ class PolymarketClient:
         fee = estimate_fee(market.fee_coefficient, quantity, Decimal("0.5"))
         return _plan(market, book, outcome, "SELL", yes_price, quantity, fee)
 
-    def submit(self, plan: Plan) -> str:
+    def submit(self, plan: Plan, *, validate: Callable[[], None] | None = None) -> str:
         """Preview and submit exactly once, returning the exchange-assigned ID.
 
         The caller must durably reserve the attempt before entering this method.
-        Any exception after reservation is unresolved until reconciled, never retried.
+        OrderPreflightError guarantees create was never called. Other failures
+        remain unresolved until reconciled and must never be blindly retried.
         """
-        if datetime.now(timezone.utc) >= plan.expires_at:
-            raise ValueError("Order plan has expired")
-        preview = self.client.orders.preview({"request": plan.request})["order"]
-        for field in ("marketSlug", "intent", "type", "tif"):
-            if preview.get(field) != plan.request[field]:
-                raise ValueError("Order preview changed the requested contract or order terms")
-        if (
-            number(preview["quantity"]) != plan.quantity
-            or amount(preview["price"]) != plan.yes_price
-        ):
-            raise ValueError("Order preview changed the requested price or quantity")
-        if datetime.now(timezone.utc) >= plan.expires_at:
-            raise ValueError("Order plan expired during preview")
+        try:
+            if datetime.now(timezone.utc) >= plan.expires_at:
+                raise OrderPreflightError("Order plan has expired")
+            if validate:
+                validate()
+            preview = self.client.orders.preview({"request": plan.request})["order"]
+            for field in ("marketSlug", "intent", "type", "tif"):
+                if preview.get(field) != plan.request[field]:
+                    raise OrderPreflightError(
+                        "Order preview changed the requested contract or order terms"
+                    )
+            if (
+                number(preview["quantity"]) != plan.quantity
+                or amount(preview["price"]) != plan.yes_price
+            ):
+                raise OrderPreflightError("Order preview changed the requested price or quantity")
+            if validate:
+                validate()
+            if datetime.now(timezone.utc) >= plan.expires_at:
+                raise OrderPreflightError("Order plan expired during preview")
+        except OrderPreflightError:
+            raise
+        except Exception as exc:
+            raise OrderPreflightError(f"Order preflight failed ({type(exc).__name__})") from exc
         result = self.client.orders.create(plan.request)
         order_id = result["id"]
         if not isinstance(order_id, str) or not order_id:
@@ -279,6 +287,41 @@ def parse_market(row: dict) -> Market:
     )
 
 
+def parse_book(market: Market, data: dict) -> Book:
+    """Normalize a full REST or streamed snapshot with identical safety checks."""
+    try:
+        if data["marketSlug"] != market.slug or data["state"] != "MARKET_STATE_OPEN":
+            raise ValueError("Market book is not open or belongs to another contract")
+        timestamp = parse_time(data["transactTime"])
+        bids = _levels(data["bids"], reverse=True)
+        asks = _levels(data["offers"], reverse=False)
+        if not bids or not asks or bids[0][0] >= asks[0][0]:
+            raise ValueError("Missing or crossed order book")
+        book = Book(market.slug, bids, asks, timestamp)
+        validate_book(market, book)
+        return book
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError("Malformed market book") from exc
+
+
+def validate_book(market: Market, book: Book) -> None:
+    """Enforce one executable quote policy for every transport and order plan."""
+    now = datetime.now(timezone.utc)
+    if not market.tradable or book.slug != market.slug or not market.start <= now < market.end:
+        raise ValueError("Contract is not currently tradable")
+    if (
+        not -BOOK_FUTURE_TOLERANCE_SECONDS
+        <= (now - book.timestamp).total_seconds()
+        <= BOOK_MAX_AGE_SECONDS
+    ):
+        raise ValueError("Market book timestamp is stale or in the future")
+    if (
+        book.received_at is not None
+        and not 0 <= monotonic() - book.received_at <= BOOK_MAX_AGE_SECONDS
+    ):
+        raise ValueError("Order book receipt is stale")
+
+
 def position_quantity(position: dict) -> Decimal:
     return number(position["netPositionDecimal"])
 
@@ -306,7 +349,10 @@ def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal]:
 
 
 def number(value) -> Decimal:
-    result = Decimal(str(value))
+    try:
+        result = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise ValueError("Expected a decimal number") from exc
     if not result.is_finite():
         raise ValueError("Expected a finite decimal")
     return result
@@ -348,14 +394,6 @@ def _levels(rows: list[dict], *, reverse: bool) -> tuple:
     return tuple(sorted((level for level in levels if level[1] > ZERO), reverse=reverse))
 
 
-def _validate_book(market: Market, book: Book) -> None:
-    now = datetime.now(timezone.utc)
-    if not market.tradable or book.slug != market.slug or not market.start <= now < market.end:
-        raise ValueError("Contract is not currently tradable")
-    if not -5 <= (now - book.timestamp).total_seconds() <= 35:
-        raise ValueError("Order book is stale")
-
-
 def _floor(value: Decimal, increment: Decimal) -> Decimal:
     return (value / increment).to_integral_value(rounding=ROUND_DOWN) * increment
 
@@ -383,7 +421,9 @@ def _plan(
         "synchronousExecution": True,
     }
     price = yes_price if outcome == "up" else ONE - yes_price
-    expires = min(market.end, book.timestamp + timedelta(seconds=35))
+    expires = min(market.end, book.timestamp + timedelta(seconds=BOOK_MAX_AGE_SECONDS))
+    if action == "BUY":
+        expires = min(expires, market.start + timedelta(minutes=14))
     return Plan(
         market.slug, outcome, action, yes_price, quantity, quantity * price, fee, request, expires
     )
@@ -406,6 +446,8 @@ class Book:
     bids: tuple[tuple[Decimal, Decimal], ...]
     asks: tuple[tuple[Decimal, Decimal], ...]
     timestamp: datetime
+    received_at: float | None = None
+    generation: int | None = None
 
     @property
     def mid(self) -> Decimal:
@@ -442,9 +484,15 @@ class Account:
     orders: list[dict]
 
 
+class OrderPreflightError(ValueError):
+    """The order create endpoint was never called; reservation can be released."""
+
+
 ZERO = Decimal("0")
 ONE = Decimal("1")
 CENT = Decimal("0.01")
+BOOK_MAX_AGE_SECONDS = 35
+BOOK_FUTURE_TOLERANCE_SECONDS = 5
 TERMINAL_STATES = {
     "ORDER_STATE_FILLED",
     "ORDER_STATE_CANCELED",
