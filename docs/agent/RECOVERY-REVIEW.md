@@ -96,3 +96,13 @@ Integrated verification after the 409 correction: `python -m pytest -q` (220
 passed); `ruff check .`; `ruff format --check .` (42 files); `python -m compileall
 -q bot.py execution core results_report.py tests deploy`; `python -m pip check`;
 `git diff --check` all pass. No service restart or live trade was needed.
+
+## Probability-model main integration
+
+Merged main 8758fb3 (#14). Preserve model selection and fee-aware entries,
+post-cutoff historical labeling, cutoff clipping and bankroll sizing. Retain the
+recovery branch's preflight exception/cause and unknown-create handling; remove
+the conflicting second expiry-only exception definition. The invalid-model CLI
+regression now expects operator-stop exit 2 while still forbidding any exchange
+connection. All 283 integrated tests, Ruff checks (47 files), compileall,
+dependency consistency and whitespace checks pass. No live service/provider writes.

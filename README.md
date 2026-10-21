@@ -262,3 +262,60 @@ runner. A bounded run may finish with pending results that need later readback.
 
 [Issue #5 evidence and remaining live QA](docs/verification-issue-5.md) separates
 fake-transport regression coverage from read-only actual execution evidence.
+
+## Probability model experiment
+
+Fit a regularized logistic model from the existing journal's observed midpoint,
+spread and seconds remaining, labeled by the official YES settlement outcome.
+The runner now also looks up settlement for skipped contracts; missing and
+nonbinary outcomes are excluded from fitting. This uses the same journal and
+runner. No paper stage is required.
+
+Fitting needs Python 3.11+ and one optional fitting dependency. Inference uses
+only the existing runtime dependencies; keep the larger scientific packages
+outside the small deployment when fitting elsewhere:
+
+```bash
+python -m pip install -r requirements-model.txt
+python probability_model.py fit --journal logs/us-live.sqlite --output logs/model.json
+```
+
+The last 20% of contracts (at least five) form the evaluation set; all observations
+for a contract stay together. Fitting requires at least 20 earlier training
+contracts with both official outcomes represented. Contracts that overlap the
+first evaluation contract are excluded from training. Each contract has equal
+weight. These are practical minimum sample counts, not a profitability or
+statistical promotion gate. An insufficient sample leaves any existing model
+file untouched; baseline collection can continue without `--model`.
+
+The saved JSON holds the feature transform, coefficients, fitting settings,
+chronological split boundaries and prediction metrics. The CLI reports sample
+sizes, Brier score and log loss for the model and midpoint comparator. Evaluation
+contracts are not used to refit this artifact. Compare those prediction metrics
+with actual financial results separately; neither proves profitability.
+
+Select that exact model for entries using `--model logs/model.json` with the
+existing `--duration` or `--one-trade` controls. The model policy keeps the normal
+20 distinct snapshots and minute 13–14 entry window, but uses its fitted Up
+probability instead of heuristic fusion or the baseline midpoint thresholds.
+An unreadable or invalid requested model stops startup before connecting to the
+exchange. There is no automatic fallback from model mode to baseline entries.
+
+For the refreshed book and Decimal-sized executable quantity Q, entries compare
+both `Q*(q - YES ask) - F` for Up and `Q*(YES bid - q) - F` for Down. F is the
+existing conservative rounded fee bound, counted once. `--extra-cost-usd` may
+subtract one additional nonnegative modeled dollar cost per entry. Only a
+strictly positive result may enter. Both policies use the current bankroll
+limits: 2% entry target, 10% funded exposure and 10% daily loss budget, with
+existing depth and five-position checks. Slow account reads and order
+preview cannot extend the minute-14 cutoff.
+
+Decision settings retain the full model JSON, its SHA-256 tag, q, candidate
+quantities, prices, fee bounds and EV. `results_report.py` adds `by_policy` metrics
+for each model tag and baseline policy, using actual fills, fees and P&L; it does
+not treat prediction scores as trading returns. Existing exit settings remain
+in effect, so entry EV is a settlement-payoff estimate, not a promise about the
+realized result of earlier exits.
+
+[Issue #6 verification](docs/verification-issue-6.md) records the tested target,
+independent reviews, and the separate live execution/data limitations.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,13 +22,17 @@ def main() -> int:
     with sqlite3.connect(f"{args.journal.resolve().as_uri()}?mode=ro", uri=True) as db:
         rows = [json.loads(raw) for (raw,) in db.execute("SELECT data FROM trades ORDER BY rowid")]
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        opportunities = (
-            db.execute("SELECT count(*) FROM opportunities").fetchone()[0]
-            if ("opportunities" in tables)
-            else 0
-        )
+        decisions = {}
+        if "opportunities" in tables:
+            for (raw,) in db.execute("SELECT data FROM opportunities"):
+                opportunity = json.loads(raw)
+                policy = _policy(opportunity)
+                decisions.setdefault(policy, Counter())[opportunity["decision"]] += 1
     report = summarize(rows)
-    report["opportunity_count"] = opportunities
+    report["opportunity_count"] = sum(sum(counts.values()) for counts in decisions.values())
+    report["opportunity_decisions"] = {
+        policy: dict(sorted(counts.items())) for policy, counts in sorted(decisions.items())
+    }
     report["trades"] = rows
     if args.json:
         print(json.dumps(report, indent=2))
@@ -44,6 +49,16 @@ def main() -> int:
 
 
 def summarize(rows: list[dict]) -> dict:
+    policies = {}
+    for row in rows:
+        policies.setdefault(_policy(row), []).append(row)
+    return {
+        **_summarize(rows),
+        "by_policy": {policy: _summarize(trades) for policy, trades in sorted(policies.items())},
+    }
+
+
+def _summarize(rows: list[dict]) -> dict:
     closed = sorted(
         (row for row in rows if row["state"] == "closed"),
         key=lambda row: row.get("closed_at", ""),
@@ -89,6 +104,11 @@ def summarize(rows: list[dict]) -> dict:
             for row in pending + unresolved
         ],
     }
+
+
+def _policy(row: dict) -> str:
+    settings = row.get("settings") or {}
+    return settings.get("model_tag") or settings.get("policy_version") or "legacy"
 
 
 if __name__ == "__main__":
