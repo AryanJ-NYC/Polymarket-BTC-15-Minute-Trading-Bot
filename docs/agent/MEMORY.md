@@ -8,6 +8,29 @@
 - Keep session review packets (`docs/agent/*REVIEW.md`) local and ignored.
   PRs and CI retain review and verification evidence. Keep durable decisions in
   this file, recurring failures in ERRORS.md, and runtime guidance in the docs.
+- 2026-10-21 issue #8: entry target is 2% of fresh account bankroll and aggregate
+  funded exposure is 10%; shared Decimal fractions live in `execution/risk.py`.
+  Bankroll uses credited fiat plus signed holdings at fresh YES midquotes, since
+  provider `assetNotional`/`cashValue` do not establish trustworthy total equity.
+  Short-sale proceeds are already in fiat. Never add pending credit or margin.
+  Unavailable valuation blocks entries while existing exits retain account reads.
+  Live plans use the later account snapshot before the definitive sizing/skip
+  decision, so an initially unfunded snapshot cannot prevent a fresh read.
+  Exposure releases entry cost and fees proportionally on partial exits; pending
+  BUY reservations count once. User follow-up replaces the original issue's $5
+  daily budget with 10% of the same current bankroll snapshot, configured as
+  `DAILY_LOSS_FRACTION`. UTC realized losses are not offset by gains, and daily
+  capacity conservatively reserves original cost until full close. A partial exit
+  can therefore release exposure while daily capacity still blocks entries.
+  The five-position guard remains. Percentage labels derive from configuration.
+  No journal migration, deployment, service restart or real order is part of #8.
+- PR #11 integration: merged `main` at `279e1f7` (issue #5 actual results), retaining
+  opportunity/settings capture, known-order recovery and unknown/disputed-cost
+  admission guards alongside percentage sizing. Recorded settings now describe
+  entry/exposure/daily fractions instead of obsolete fixed dollar amounts.
+  Review thread `4341941179` reproduced three missed-entry cases on an initially
+  unusable account snapshot; sizing now follows the fresh guarded read. The
+  combined suite passes 190 tests without provider or live-service writes.
 
 - 2026-10-21: The user explicitly chose a complete US-only migration. One runner
   uses the official `polymarket-us` SDK and `.env.us`; international execution,
@@ -63,3 +86,16 @@
   pending order with an order ID; account reads reported no orders/nonzero
   positions. Preserve evidence and reconcile history before resuming; automation
   must not clear this record or restart the failed trading service.
+- Issue #5 implementation: record late-window opportunities in an additive table
+  in the existing journal, retain actual fills/fees, persist experiment settings,
+  and report known versus pending/disputed results through a read-only CLI.
+  Missing collected fees remain null; explicit zero remains zero. Fee/cost
+  disagreement at resolution invalidates exact P&L and blocks further admissions.
+  Recovery retries only known-order GETs, never create; the pending ID survives
+  exhausted readback and restart. No new recorder service or execution simulator.
+- Final issue #5 review fixed zero-fill SELL discrepancy suppression, legacy
+  partial-settlement evidence binding, and recovered-fill budget breach checks.
+  Full local suite: 116 passed; lint/format/compileall/pip checks pass. Actual
+  historical GET evidence confirms one 1.35-share filled loss and one expired
+  unfilled order, with a $0.0070 fee/cost discrepancy. Production journal/service
+  untouched. New live-money QA is blocked; preserve that gate and leave #5 open.

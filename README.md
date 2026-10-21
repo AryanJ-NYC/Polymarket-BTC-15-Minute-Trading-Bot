@@ -101,15 +101,17 @@ management. An interrupted/unknown submission stops trading for reconciliation.
 - Uses YES-denominated prices for both Up and Down US intents. Down entry cost
   is `1 - YES bid`; Up entry cost is `YES ask`. Prices must match the market tick.
 - Uses limit IOC orders at visible best prices, with fractional quantities
-  rounded down to the market increment and visible depth. **At most $1 per new
-  trade, including a conservative fee reserve.** Never increases spend to meet
-  minimum quantity. Maximum five open positions and $10 total entry exposure.
+  rounded down to the market increment and visible depth. **Targets at most 2%
+  of current account bankroll per entry, including a conservative fee reserve,
+  with 10% aggregate funded exposure.** Never increases spend to meet minimum
+  quantity. Maximum five open positions.
 - Rechecks eligible book generation, executable price/depth, freshness, and entry
   deadline after slow work and immediately before submission, including after
   preview. Known preflight rejections safely release the reserved order;
   ambiguous create outcomes remain pending and are never retried automatically.
-- Reserves a UTC daily $5 loss budget against recorded losses plus the full cost
-  of still-open positions and the next order. This is the bot's own ledger, not
+- Reserves a UTC daily loss budget of **10% of current bankroll** against recorded
+  losses plus the full cost of still-open positions and the next order. This is
+  the bot's own ledger, not
   a claim about account-wide daily P&L or strategy profitability.
 - Checks for 30% stop loss and 20% take profit using executable exit prices and
   estimated fees. Exits can fill partially. Liquidity, stale books, outages, and
@@ -118,6 +120,58 @@ management. An interrupted/unknown submission stops trading for reconciliation.
   visible top-of-book liquidity fills at the quoted price and estimates fees.
   P&L stays pending until an executable exit or actual exchange settlement.
   It does not invent random wins or mark unresolved settlement as a loss.
+
+### Bankroll sizing
+
+The shared Decimal fractions in `execution/risk.py` are `0.02` (2% per entry),
+`0.10` (10% aggregate exposure), and `0.10` (10% daily loss budget).
+All amounts below are USD:
+
+```text
+bankroll = credited currentBalance + sum(signed YES quantity * fresh YES midpoint)
+exposure = sum(entry cost including fees * remaining quantity / filled entry quantity)
+           + still-unaccounted BUY reservations
+daily loss budget remaining = 0.10 * bankroll - realized losses today (UTC)
+                              - original full entry cost of open trades
+entry budget = max(0, min(0.02 * bankroll, buyingPower,
+                          0.10 * bankroll - exposure, daily loss budget remaining))
+```
+
+This values the entire authenticated account, with short YES quantities negative.
+For example, $95 fiat plus 10 YES shares marked at $0.50 gives $100 bankroll;
+$5.70 fiat with one short YES marked at $0.70 gives $5, without counting locked
+collateral twice. The valuation policy uses fresh validated midquotes; it may
+differ from the provider website's valuation. It adds no `pendingCredit`,
+`unsettledFunds`, reservation, margin, or `assetNotional` amounts to cash.
+Trading uses eligible streamed marks for subscribed holdings. Missing or
+unsubscribed marks make bankroll unavailable and block entries; they do not
+trigger routine REST book polling or prevent ownership reads and safe exits.
+[Provider field mapping and evidence](docs/polymarket-us-api.md#bankroll-valuation).
+
+Every entry reads the account again; live mode makes its final sizing decision
+from a second snapshot after strategy evaluation, before reservation. Gains/losses
+and credited deposits or
+withdrawals change the next target. Missing/nonfinite cash, an unpriceable holding,
+or nonzero holdings awaiting settlement make bankroll unavailable and skip entry.
+Zero equity or exhausted exposure room also skips entry. Existing position exits
+continue under their usual rules; a percentage breach does not force liquidation.
+
+$100 bankroll targets $2 with a $10 daily loss budget; $500 targets $10 with a
+$50 daily loss budget, before tighter limits. The five-open-position guard and
+remaining exposure/daily capacity can limit entries further. The daily percentage
+uses the same current account snapshot as entry and exposure sizing, rather than
+a balance frozen at the start of the day. Realized losses are counted by UTC
+calendar day; realized gains do not offset them. The daily guard conservatively
+keeps each open trade's original full entry cost reserved even after a partial
+exit; aggregate exposure releases cost
+proportionally. Falling quotes do not release funded cost. Unresolved orders
+continue to block new entries until reconciled.
+
+The planner floors quantity to the market increment and visible depth, reserving
+fees inside the budget. The log records bankroll, percentage target, affordable
+budget, exposure, buying power, and the binding limit. Paper mode uses the same
+account-based sizing with its separate simulated journal; simulated P&L does not
+change actual account equity.
 
 ## State and recovery
 
@@ -183,3 +237,38 @@ and position state; [the strategy](core/strategy_brain/strategies/btc_15min_stra
 owns signals and entry timing. See [API evidence](docs/polymarket-us-api.md) and
 [verification](docs/verification.md) for provider details and tested limits.
 Agent notes: [decisions](docs/agent/MEMORY.md), [errors](docs/agent/ERRORS.md).
+
+## Actual experiment results
+
+The existing runner also records late-window opportunities, including skips, in
+`opportunities` inside its current SQLite journal. Each observation includes the
+contract/window, decision, midpoint/spread, quote timestamp, time remaining,
+usable top-level quantity on both sides, fee coefficient, and policy/exit settings.
+The current entry planner consumes that top level only. Unavailable quotes remain
+explicitly null. Trades keep actual filled quantity, average outcome execution
+price, collected fees, order IDs, exit proceeds and eventual official settlement.
+
+Read the live journal without starting a runner or contacting the exchange:
+
+```bash
+python results_report.py --journal logs/us-live.sqlite
+python results_report.py --journal logs/us-live.sqlite --json
+```
+
+The report gives filled trade count, known realized net P&L, win rate, average
+win/loss and maximum realized drawdown in closing-time order. Win/loss metrics
+use known closed trades only. Pending trades and missing/disputed fees are
+listed; total net P&L remains unknown until all trades reconcile. A zero official
+payout is a known zero, while an unavailable amount stays null. The report can
+read an older journal without migrating it, but older records lack capture and
+policy fields. Keep live and paper journals separate when comparing results.
+
+Existing `--one-trade` and `--duration SECONDS` controls still bound a run. A known
+order ID is retained through transient read failures; up to three reads retry
+that ID, with at most two 30-second waits. The duration is checked between ticks,
+so in-flight requests/readback can outlast it. An unresolved create is never
+retried. Restart with the same journal; do not delete state or start a second
+runner. A bounded run may finish with pending results that need later readback.
+
+[Issue #5 evidence and remaining live QA](docs/verification-issue-5.md) separates
+fake-transport regression coverage from read-only actual execution evidence.

@@ -30,6 +30,8 @@ refreshing book age. Older and duplicate snapshots never replace a newer book.
 
 Subscriptions include the current entry contract and unexpired contracts with
 bot-owned positions. Removing a subscription immediately removes its cached book.
+Owned subscriptions remain active while fill accounting is unknown or a known
+exit awaits reconciliation; those states still block unsafe order mutations.
 Every connection generation requires a fresh validated snapshot for each active
 contract; a disconnected socket's books are unusable.
 

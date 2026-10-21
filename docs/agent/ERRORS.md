@@ -1,5 +1,12 @@
 # Agent errors and recovery
 
+- Missing PR CI after a push can mean merge conflicts, even when Actions is
+  enabled. Check head/base and mergeability first. During issue #1, newer bankroll
+  and accounting changes on main required integration before PR CI could start.
+- Streaming/accounting integration: a restarted owned position can have unknown
+  collected fees or a pending SELL. Hydrate its bounded metadata/subscription
+  before those accounting gates; the gates block new order mutations, not
+  observation. Otherwise one-trade recovery silently omits an owned contract.
 - Issue #1 receiver lifecycle: callbacks that close over the reconnect loop's
   generation can accidentally use the next connection's value. Bind the
   generation when registering each callback. Retire removed request IDs
@@ -11,6 +18,19 @@
 - Replay clocks must include time-aware signal processors, not only the
   strategy facade. Constant-price replay can hide missing 30/60-second velocity
   inputs behind another signal; use varying prices and assert feature values.
+- PR #11 review: skipping after sizing the first account snapshot prevented the
+  later refresh when equity was unavailable, buying power was zero, or the first
+  budget was below minimum. Three transport/clock regressions reproduced the
+  missed entry in the last eligible second. Make the definitive sizing decision
+  after the second guarded account read and recheck the entry window afterward.
+
+- Bankroll mapping: `assetNotional` is unspecified aggregate notional, and
+  `cashValue` has conflicting PnL/value descriptions. Adding fiat to positive NO
+  position value double-counts short collateral. Use signed YES quantities with
+  fresh marks; $5.70 fiat plus -1 YES at .70 must equal $5, not $6. Account values
+  may be missing or nonfinite; unavailable valuation must not invent zero-priced
+  holdings or prevent otherwise valid exits. Provider sources are linked in the
+  API guide. Tests cover both long and short cash flows.
 
 - The original `requirements.txt` was UTF-16 and pinned the international
   Nautilus stack. The US migration replaces it with a small UTF-8 dependency file.
@@ -46,3 +66,8 @@
   ID plus pending reservation. Read-only account counts were zero afterward;
   counts alone cannot establish the order outcome. Do not delete the journal or
   restart blindly. This incident remains unresolved; updater gates preserve it.
+- Issue #5 regression: an already-closed legacy settlement returned before
+  checking provider resolution fees/cost, preserving false precision. A failing
+  workflow regression reproduced this; compare evidence before the closed-state
+  return and clear exact P&L on discrepancy. Preserve the original order and
+  provider resolution fields for later reconciliation.

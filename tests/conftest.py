@@ -66,7 +66,22 @@ def venue(market_row, clock):
             self.calls = []
             self.on_request = None
             self.market = copy.deepcopy(market_row)
+            self.markets = {}
             self.positions = {}
+            self.position_pages = None
+            self.balance = {
+                "currency": "USD",
+                "buyingPower": 100.0,
+                "currentBalance": 100.0,
+                "assetNotional": 0.0,
+                "assetAvailable": 0.0,
+                "openOrders": 0.0,
+                "marginRequirement": 0.0,
+                "unsettledFunds": 0.0,
+                "pendingCredit": 0.0,
+                "balanceReservation": 0.0,
+            }
+            self.balance_snapshots = []
             self.activities = []
             self.activity_pages = None
             self.open_orders = []
@@ -105,9 +120,15 @@ def venue(market_row, clock):
                 assert request.headers.get("X-PM-Access-Key")
                 assert request.headers.get("X-PM-Signature")
             if path == "/v1/account/balances":
-                body = {"balances": [{"currency": "USD", "buyingPower": 100.0}]}
+                if self.balance_snapshots:
+                    self.balance = self.balance_snapshots.pop(0)
+                body = {"balances": [self.balance]}
             elif path == "/v1/portfolio/positions":
-                body = {"positions": self.positions, "eof": True}
+                body = (
+                    self.position_pages[request.url.params.get("cursor", "first")]
+                    if self.position_pages
+                    else {"positions": self.positions, "eof": True}
+                )
             elif path == "/v1/portfolio/activities":
                 if self.activity_pages:
                     body = self.activity_pages[request.url.params.get("cursor", "first")]
@@ -119,7 +140,7 @@ def venue(market_row, clock):
                 offset = int(request.url.params.get("offset", 0))
                 body = {"markets": self.pages[offset] if self.pages else [self.market]}
             elif path.startswith("/v1/market/slug/"):
-                body = {"market": self.market}
+                body = {"market": self.markets.get(path.rsplit("/", 1)[1], self.market)}
             elif path.endswith("/book"):
                 self.book_request_ids.append(request.url.params.get("_ts"))
                 if self.book_limited:
@@ -130,7 +151,7 @@ def venue(market_row, clock):
                     return httpx.Response(404, json={"error": "Book not available yet"})
                 body = {
                     "marketData": {
-                        "marketSlug": self.market["slug"],
+                        "marketSlug": self.markets.get(path.split("/")[-2], self.market)["slug"],
                         "state": "MARKET_STATE_OPEN",
                         "transactTime": self.timestamp,
                         "bids": [{"px": {"value": self.bid, "currency": "USD"}, "qty": "100"}],

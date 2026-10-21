@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import monotonic, time_ns
 
 from dotenv import dotenv_values
-from polymarket_us import NotFoundError, PolymarketUS
+from polymarket_us import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    NotFoundError,
+    PolymarketUS,
+)
 
 
 class PolymarketClient:
@@ -35,8 +44,8 @@ class PolymarketClient:
 
         return MarketStream(self.client.ws.markets)
 
-    def account(self) -> Account:
-        balances = self.client.account.balances()["balances"]
+    def account(self, *, book_source: Callable[[str], Book] | None = None) -> Account:
+        balances = self._fresh_get("/v1/account/balances")["balances"]
         usd = [row for row in balances if row["currency"] == "USD"]
         if len(usd) != 1:
             raise ValueError("Expected exactly one USD account balance")
@@ -47,7 +56,7 @@ class PolymarketClient:
             params = {"limit": 100}
             if cursor:
                 params["cursor"] = cursor
-            page = self.client.portfolio.positions(params)
+            page = self._fresh_get("/v1/portfolio/positions", params)
             positions.update(page["positions"])
             if page.get("eof") is True:
                 break
@@ -61,7 +70,8 @@ class PolymarketClient:
         # Validate quantity fields rather than treating missing data as zero.
         for position in positions.values():
             position_quantity(position)
-        return Account(buying_power, positions, orders)
+        bankroll = self._bankroll(usd[0], positions, book_source)
+        return Account(buying_power, positions, orders, bankroll)
 
     def discover_market(self) -> Market | None:
         """Discover by typed asset terms and measurement windows, never slug guesses."""
@@ -100,21 +110,14 @@ class PolymarketClient:
         return parse_market(self.client.markets.retrieve_by_slug(slug)["market"])
 
     def book(self, market: Market) -> Book:
-        # The authenticated route serves current contracts even when the public
-        # gateway returns a cached 404 for a newly opened measurement window.
-        # A unique query keeps intermediary caches from replaying a 30s-old book;
-        # the provider timestamp is still independently validated below.
-        response = self._fresh_get(f"/v1/markets/{market.slug}/book")
-        try:
-            data = response["marketData"]
-        except (KeyError, TypeError) as exc:
-            raise ValueError("Malformed market book response") from exc
-        return parse_book(market, data)
+        book = self._book(market.slug)
+        validate_book(market, book)
+        return book
 
     def buy_plan(self, market: Market, book: Book, outcome: str, budget: Decimal) -> Plan:
         validate_book(market, book)
-        if outcome not in {"up", "down"} or not ZERO < budget <= Decimal("1"):
-            raise ValueError("Expected Up/Down and a budget of at most $1")
+        if outcome not in {"up", "down"} or not budget.is_finite() or budget <= ZERO:
+            raise ValueError("Expected Up/Down and a finite positive entry budget")
         yes_price, available = book.asks[0] if outcome == "up" else book.bids[0]
         price = yes_price if outcome == "up" else ONE - yes_price
         # The maximum fee per share bounds cost even when a fill improves in price.
@@ -178,7 +181,18 @@ class PolymarketClient:
         return order_id
 
     def order(self, order_id: str) -> dict:
-        order = self.client.orders.retrieve(order_id)["order"]
+        """Read a known ID with bounded recovery; never replay order creation."""
+        for attempt in range(3):
+            try:
+                order = self.client.orders.retrieve(order_id)["order"]
+                break
+            except (APIConnectionError, APIStatusError) as exc:
+                status = getattr(exc, "status_code", None)
+                if attempt == 2 or (
+                    status is not None and status not in {404, 429} and not 500 <= status < 600
+                ):
+                    raise
+                time.sleep(_order_read_delay(exc, attempt))
         if order["id"] != order_id:
             raise ValueError("Order readback ID mismatch")
         return order
@@ -207,8 +221,8 @@ class PolymarketClient:
             raise ValueError("Invalid settlement value")
         return value
 
-    def confirm_resolution(self, slug: str, expected_quantity: Decimal) -> bool:
-        """Require account activity proving ownership immediately before payout."""
+    def resolution(self, slug: str, expected_quantity: Decimal) -> dict | None:
+        """Return matching provider evidence without interpreting its fee/cost fields."""
         cursor = None
         resolutions = []
         for _ in range(100):
@@ -239,7 +253,7 @@ class PolymarketClient:
         else:
             raise ValueError("Settlement activity pagination limit reached")
         if not resolutions:
-            return False
+            return None
         if len(resolutions) != 1:
             raise RuntimeError("Ambiguous account resolution history; reconcile the live journal")
         before, after = resolutions[0]["beforePosition"], resolutions[0]["afterPosition"]
@@ -247,12 +261,56 @@ class PolymarketClient:
             raise RuntimeError(
                 "Resolved quantity differs from bot ownership; reconcile the live journal"
             )
-        if not after.get("expired") and position_quantity(after) != 0:
+        if position_quantity(after) != 0:
             raise RuntimeError("Account resolution did not close the bot position")
-        return True
+        return resolutions[0]
 
-    def _fresh_get(self, path: str) -> dict:
-        return self.client.get(path, query={"_ts": str(time_ns())}, authenticated=True)
+    def confirm_resolution(self, slug: str, expected_quantity: Decimal) -> bool:
+        """Require account activity proving ownership immediately before payout."""
+        return self.resolution(slug, expected_quantity) is not None
+
+    def _book(self, slug: str) -> Book:
+        # The authenticated route serves current contracts even when the public
+        # gateway returns a cached 404 for a newly opened measurement window.
+        # A unique query keeps intermediary caches from replaying a 30s-old book;
+        # the provider timestamp is still independently validated below.
+        response = self._fresh_get(f"/v1/markets/{slug}/book")
+        try:
+            data = response["marketData"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("Malformed market book response") from exc
+        return _parse_book(slug, data)
+
+    def _bankroll(
+        self, balance: dict, positions: dict, book_source: Callable[[str], Book] | None
+    ) -> Decimal | None:
+        # currentBalance is credited fiat, including short-sale proceeds. A short
+        # is a signed YES liability, so adding positive NO value would count its
+        # collateral twice. Pending credits/reservations are never added to cash.
+        try:
+            equity = number(balance["currentBalance"])
+            for slug, position in positions.items():
+                quantity = position_quantity(position)
+                if quantity:
+                    if position.get("expired"):
+                        return None  # Wait for cash/quantity settlement reconciliation.
+                    if book_source is None:
+                        book = self._book(slug)
+                    else:
+                        book = book_source(slug)
+                        if book.slug != slug:
+                            raise ValueError("Valuation book belongs to another contract")
+                        _validate_quote_age(book)
+                    equity += quantity * book.mid
+            return equity if equity >= ZERO else None
+        except (KeyError, ValueError, APIError, APIConnectionError, APITimeoutError):
+            # An unavailable valuation must block entries without blocking exits.
+            return None
+
+    def _fresh_get(self, path: str, query: dict | None = None) -> dict:
+        return self.client.get(
+            path, query={**(query or {}), "_ts": str(time_ns())}, authenticated=True
+        )
 
 
 def parse_market(row: dict) -> Market:
@@ -289,19 +347,9 @@ def parse_market(row: dict) -> Market:
 
 def parse_book(market: Market, data: dict) -> Book:
     """Normalize a full REST or streamed snapshot with identical safety checks."""
-    try:
-        if data["marketSlug"] != market.slug or data["state"] != "MARKET_STATE_OPEN":
-            raise ValueError("Market book is not open or belongs to another contract")
-        timestamp = parse_time(data["transactTime"])
-        bids = _levels(data["bids"], reverse=True)
-        asks = _levels(data["offers"], reverse=False)
-        if not bids or not asks or bids[0][0] >= asks[0][0]:
-            raise ValueError("Missing or crossed order book")
-        book = Book(market.slug, bids, asks, timestamp)
-        validate_book(market, book)
-        return book
-    except (KeyError, TypeError, AttributeError) as exc:
-        raise ValueError("Malformed market book") from exc
+    book = _parse_book(market.slug, data)
+    validate_book(market, book)
+    return book
 
 
 def validate_book(market: Market, book: Book) -> None:
@@ -309,27 +357,19 @@ def validate_book(market: Market, book: Book) -> None:
     now = datetime.now(timezone.utc)
     if not market.tradable or book.slug != market.slug or not market.start <= now < market.end:
         raise ValueError("Contract is not currently tradable")
-    if (
-        not -BOOK_FUTURE_TOLERANCE_SECONDS
-        <= (now - book.timestamp).total_seconds()
-        <= BOOK_MAX_AGE_SECONDS
-    ):
-        raise ValueError("Market book timestamp is stale or in the future")
-    if (
-        book.received_at is not None
-        and not 0 <= monotonic() - book.received_at <= BOOK_MAX_AGE_SECONDS
-    ):
-        raise ValueError("Order book receipt is stale")
+    _validate_quote_age(book)
 
 
 def position_quantity(position: dict) -> Decimal:
     return number(position["netPositionDecimal"])
 
 
-def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal]:
-    """Return actual quantity, outcome-price notional, and exchange-collected fee."""
+def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal | None]:
+    """Return terminal fills and actual collected fee, retaining unknown fees."""
     if order["marketSlug"] != plan.slug or order["intent"] != plan.request["intent"]:
         raise ValueError("Filled order contract or intent mismatch")
+    if order["state"] not in TERMINAL_STATES:
+        raise ValueError("Order is not terminal; fill accounting is not final")
     quantity = number(order["cumQuantity"])
     if not ZERO <= quantity <= plan.quantity:
         raise ValueError("Invalid cumulative fill quantity")
@@ -342,8 +382,9 @@ def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal]:
     limit = plan.yes_price if plan.outcome == "up" else ONE - plan.yes_price
     if (plan.action == "BUY" and price > limit) or (plan.action == "SELL" and price < limit):
         raise ValueError("Fill violated the limit price")
-    fee = amount(order["commissionNotionalTotalCollected"])
-    if fee < ZERO:
+    collected = order.get("commissionNotionalTotalCollected")
+    fee = amount(collected) if collected is not None else None
+    if fee is not None and fee < ZERO:
         raise ValueError("Unexpected negative taker fee")
     return quantity, quantity * price, fee
 
@@ -351,8 +392,8 @@ def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal]:
 def number(value) -> Decimal:
     try:
         result = Decimal(str(value))
-    except InvalidOperation as exc:
-        raise ValueError("Expected a decimal number") from exc
+    except InvalidOperation:
+        raise ValueError("Expected a finite decimal") from None
     if not result.is_finite():
         raise ValueError("Expected a finite decimal")
     return result
@@ -387,11 +428,56 @@ def _credential(config: dict, *names: str) -> str:
     return values.pop()
 
 
+def _order_read_delay(error: Exception, attempt: int) -> float:
+    delay = float(2**attempt)
+    if isinstance(error, APIStatusError):
+        header = error.response.headers.get("Retry-After", "")
+        try:
+            retry_after = float(header)
+        except ValueError:
+            try:
+                retry_after = (
+                    parsedate_to_datetime(header) - datetime.now(timezone.utc)
+                ).total_seconds()
+            except (ValueError, TypeError, OverflowError):
+                return delay
+        if retry_after >= 0:
+            delay = max(delay, retry_after)
+    return min(delay, 30.0)
+
+
 def _levels(rows: list[dict], *, reverse: bool) -> tuple:
     levels = [(amount(row["px"]), number(row["qty"])) for row in rows]
     if any(not ZERO < price < ONE or quantity < ZERO for price, quantity in levels):
         raise ValueError("Invalid order book level")
     return tuple(sorted((level for level in levels if level[1] > ZERO), reverse=reverse))
+
+
+def _parse_book(slug: str, data: dict) -> Book:
+    try:
+        if data["marketSlug"] != slug or data["state"] != "MARKET_STATE_OPEN":
+            raise ValueError("Market book is not open or belongs to another contract")
+        timestamp = parse_time(data["transactTime"])
+        bids = _levels(data["bids"], reverse=True)
+        asks = _levels(data["offers"], reverse=False)
+        if not bids or not asks or bids[0][0] >= asks[0][0]:
+            raise ValueError("Missing or crossed order book")
+        book = Book(slug, bids, asks, timestamp)
+        _validate_quote_age(book)
+        return book
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError("Malformed market book") from exc
+
+
+def _validate_quote_age(book: Book) -> None:
+    age = (datetime.now(timezone.utc) - book.timestamp).total_seconds()
+    if not -BOOK_FUTURE_TOLERANCE_SECONDS <= age <= BOOK_MAX_AGE_SECONDS:
+        raise ValueError("Market book timestamp is stale or in the future")
+    if (
+        book.received_at is not None
+        and not 0 <= monotonic() - book.received_at <= BOOK_MAX_AGE_SECONDS
+    ):
+        raise ValueError("Order book receipt is stale")
 
 
 def _floor(value: Decimal, increment: Decimal) -> Decimal:
@@ -482,6 +568,7 @@ class Account:
     buying_power: Decimal
     positions: dict
     orders: list[dict]
+    bankroll: Decimal | None
 
 
 class OrderPreflightError(ValueError):
