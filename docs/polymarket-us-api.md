@@ -78,6 +78,15 @@ The actual intent strings carry the `ORDER_INTENT_` prefix. Use limit IOC orders
 market-aligned prices, and quantities rounded down to the increment and visible
 top-level depth. Never increase the budget to meet a minimum quantity.
 
+Exit valuation walks the bids for Up or the complementary offers for Down,
+rounding each sellable slice down to the quantity increment and subtracting a
+conservative rounded fee bound per slice. It does not scale one best-price slice
+across the holding. Only fully covered depth has a whole-position return and can
+trigger take-profit. For incomplete depth, logs identify the unpriced remainder;
+the stop uses the sellable slice's proportional entry cost and prior proceeds.
+This snapshot estimate does not guarantee later liquidity. Execution continues
+one bounded best-price IOC at a time, with fresh checks and actual-fill readback.
+
 The fee estimate is `feeCoefficient * quantity * p * (1 - p)`, rounded to cents
 with HALF_EVEN. Use the market coefficient; `p = .5` bounds the fee reserve when
 sizing. Actual collected commission comes from terminal execution readback and
@@ -138,6 +147,12 @@ quantity and zero remaining quantity. Preserve before/after position evidence,
 actual fill fees and provider cost fields. Disagreements leave P&L unresolved and
 block new entries, except for the settled fee tolerance below. Busted trades
 and ambiguous activity need reconciliation.
+
+After partial sales, retain actual net sale proceeds and pay settlement only for
+the remaining shares. Resolution cost and entry fees are compared with the
+proportion of original fills still held. Matching remaining-position evidence
+permits exact P&L; missing collected fees and mismatched amounts stay unresolved.
+The existing settled fee tolerance below applies only without filled exits.
 
 Keep account use exclusive, including while stopped with open positions. Final
 net quantity cannot identify offsetting manual trades that restore the same

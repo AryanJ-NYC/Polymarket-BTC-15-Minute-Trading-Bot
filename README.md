@@ -114,8 +114,14 @@ Temporary read failures retain known order IDs and recover automatically.
   losses plus the full cost of still-open positions and the next order. This is
   the bot's own ledger, not
   a claim about account-wide daily P&L or strategy profitability.
-- Checks for 30% stop loss and 20% take profit using executable exit prices and
-  estimated fees. Exits can fill partially. Liquidity, stale books, outages, and
+- Checks for 30% stop loss and 20% take profit using available exit depth and
+  conservative fee bounds for successive IOC slices. Logs show sellable quantity,
+  its net value, and the unpriced remainder. Take-profit requires depth for the
+  entire remaining holding. With insufficient depth, the stop compares the
+  sellable slice against its proportional share of entry cost and prior proceeds;
+  this slice return does not price the remainder. Each order still sells only
+  visible best-price quantity, and actual fills determine realized proceeds.
+  Exits can fill partially. Liquidity, stale books, outages, and
   stopping the process can delay exits; these are not exchange-hosted stops.
 - Paper mode sends no order previews, submissions, or cancellations. It assumes
   visible top-of-book liquidity fills at the quoted price and estimates fees;

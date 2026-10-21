@@ -249,19 +249,31 @@ class TradeJournal:
         has_exit_fill = any(
             o["action"] == "SELL" and number(o["quantity"]) > 0 for o in data["orders"]
         )
-        if resolution and not has_exit_fill:
+        if resolution:
             before = resolution.get("beforePosition", {})
+            bought = retained = Decimal("1")
+            if has_exit_fill:
+                bought = sum(
+                    (number(o["quantity"]) for o in data["orders"] if o["action"] == "BUY"),
+                    Decimal("0"),
+                )
+                sold = sum(
+                    (number(o["quantity"]) for o in data["orders"] if o["action"] == "SELL"),
+                    Decimal("0"),
+                )
+                # Resolution describes only the shares retained after actual sales.
+                # Rebuild this quantity from fills, including for already-settled rows.
+                retained = bought - sold
             if before.get("cost") is not None and data["entry_cost"] is not None:
-                if amount(before["cost"]) != number(data["entry_cost"]):
+                if amount(before["cost"]) != number(data["entry_cost"]) * retained / bought:
                     issues.append(RESOLUTION_COST_ISSUE)
             fees = [o["fee"] for o in data["orders"] if o["action"] == "BUY"]
             if before.get("fees") is not None and all(fee is not None for fee in fees):
-                if amount(before["fees"]) != sum((number(fee) for fee in fees), Decimal("0")):
+                if (
+                    amount(before["fees"])
+                    != sum((number(fee) for fee in fees), Decimal("0")) * retained / bought
+                ):
                     issues.append(RESOLUTION_FEE_ISSUE)
-        elif resolution and has_exit_fill:
-            before = resolution.get("beforePosition", {})
-            if before.get("cost") is not None or before.get("fees") is not None:
-                issues.append("Resolution cost/fee basis after partial exit is not reconciled")
         if data["state"] == "closed":
             self.update(
                 slug,
@@ -415,6 +427,9 @@ def _risk_entry_cost(row: dict) -> Decimal | None:
         or number(row["quantity"]) != 0
         or row["pending"]
         or row["proceeds"] is None
+        or any(
+            order["action"] == "SELL" and number(order["quantity"]) > 0 for order in row["orders"]
+        )
     ):
         return None
     resolution = (row.get("settlement") or {}).get("resolution") or {}
