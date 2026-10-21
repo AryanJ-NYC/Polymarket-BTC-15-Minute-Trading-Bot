@@ -18,7 +18,7 @@ def test_missing_resolution_pauses_new_entries_with_current_book(
     if not public_outcome:
         venue.on_request = None
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
 
     trader.tick()
 
@@ -35,7 +35,7 @@ def test_delayed_paper_outcome_keeps_exposure_without_blocking_later_entry(
     settlement_response = venue.on_request
     venue.on_request = None  # The official outcome is still 404/unavailable.
     trader = TradingBot(venue.client, journal, books)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
 
     trader.tick()
 
@@ -149,7 +149,7 @@ def test_fully_sold_trade_does_not_block_entries_on_missing_official_outcome(
     )
     venue.on_request = None  # The public outcome is still 404/unavailable.
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
 
     trader.tick()
 
@@ -164,7 +164,7 @@ def test_legacy_closed_holding_still_waits_for_matching_resolution(
     expired = awaiting_settlement
     journal.update(expired.slug, state="closed", quantity="0", proceeds="1", pnl="0.62")
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
 
     trader.tick()
 

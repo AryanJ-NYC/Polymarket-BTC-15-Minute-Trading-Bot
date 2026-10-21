@@ -80,8 +80,11 @@ Temporary read failures retain known order IDs and recover automatically.
   book at most once every three seconds (20 observations take at least 57 seconds),
   enter only between minute 13 and minute 14, follow Up above a
   YES midpoint of 0.60 or Down below 0.40, and require at least one signal and a
-  fusion result. Fusion is informational; the midpoint sets trade direction.
-  History resets for each contract. Starting late may skip the current window.
+  dominant fused direction supporting that favorite with strictly more than
+  50% consensus. Opposite signals, ties, and no signal skip entry. Consensus is
+  the winning share of weighted signal contributions; confidence is the average
+  indicator confidence. Neither is a settlement probability or a sizing input.
+  Book history resets for each contract. Starting late may skip the current window.
 - Reuses spike, tick velocity, order-flow, divergence, sentiment, and options
   processors. Optional external context can be unavailable; no input is invented.
 - Uses the official SDK's authenticated full `marketData` WebSocket for paper

@@ -203,14 +203,14 @@ class TradingBot:
                 self.trade_slug = unfinished[0]["slug"]
         self.strategy = BTCStrategy15Min()
         self.settings = {
-            "policy_version": "btc-15m-fusion-v1",
+            "policy_version": "btc-15m-fusion-v2",
             "entry_start_seconds": 780,
             "entry_end_seconds": 840,
             "minimum_snapshots": 20,
             "up_midpoint": "0.60",
             "down_midpoint": "0.40",
             "min_signals": 1,
-            "min_consensus": 40,
+            "min_consensus": 50,  # Exclusive; the dominant direction must match the favorite.
             "take_profit": "0.20",
             "stop_loss": "-0.30",
             "entry_bankroll_fraction": str(ENTRY_BANKROLL_FRACTION),

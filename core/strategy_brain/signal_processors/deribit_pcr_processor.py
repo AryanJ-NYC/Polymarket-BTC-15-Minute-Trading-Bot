@@ -1,36 +1,9 @@
-"""
-Deribit Put/Call Ratio Signal Processor
-Consumes refreshed BTC options data from Deribit (free public API)
-and uses the put/call ratio as a proxy for institutional sentiment.
+"""Contrarian heuristics from refreshed Deribit BTC options open interest.
 
-WHY THIS WORKS:
-  Professional traders hedge and speculate using BTC options on Deribit —
-  the world's largest crypto options exchange ($15B+ daily volume).
-
-  Put/Call Ratio (PCR) = open_interest_puts / open_interest_calls
-
-  PCR interpretation (CONTRARIAN — options markets lean the opposite):
-    PCR > 1.2  → More puts than calls = FEAR → contrarian BULLISH
-    PCR < 0.7  → More calls than puts = GREED → contrarian BEARISH
-    0.7–1.2    → Balanced → no strong signal
-
-  We look specifically at SHORT-DATED options (0-1 days to expiry)
-  which are most sensitive to near-term price movements — ideal for
-  15-minute trading.
-
-  We also track the 25-delta skew (difference between put and call IV)
-  as a secondary signal:
-    Positive skew (puts more expensive) → fear → contrarian BULLISH
-    Negative skew (calls more expensive) → greed → contrarian BEARISH
-
-API USED (completely free, no auth required):
-  GET https://www.deribit.com/api/v2/public/get_book_summary_by_currency
-    ?currency=BTC&kind=option
-
-  Returns all active BTC option contracts with:
-    - open_interest
-    - instrument_name (e.g. BTC-20FEB26-95000-P = Put, -C = Call)
-    - days to expiry (parsed from instrument name)
+PCR = put open interest / call open interest. The existing heuristic maps
+PCR >= 1.2 to bullish and PCR <= 0.7 to bearish, preferring options with at most
+two days to expiry. Zero short-option PCR is valid. No implied-volatility skew
+is calculated, and these thresholds do not establish predictive performance.
 """
 
 import math
@@ -90,8 +63,8 @@ class DeribitPCRProcessor(BaseSignalProcessor):
         pcr_data: Dict,
     ) -> Optional[TradingSignal]:
         """Generate signal from PCR data."""
-        # Prefer short-dated PCR; fall back to overall
-        pcr = pcr_data.get("short_pcr") or pcr_data.get("overall_pcr", 1.0)
+        # The parser supplies a validated short ratio (including a valid zero).
+        pcr = pcr_data["short_pcr"]
 
         if pcr >= self.bullish_pcr_threshold:
             # High PCR = excessive put buying = FEAR = contrarian BULLISH
