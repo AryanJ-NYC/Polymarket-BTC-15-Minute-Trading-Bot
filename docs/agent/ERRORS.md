@@ -1,5 +1,13 @@
 # Agent errors and recovery
 
+- Bankroll mapping: `assetNotional` is unspecified aggregate notional, and
+  `cashValue` has conflicting PnL/value descriptions. Adding fiat to positive NO
+  position value double-counts short collateral. Use signed YES quantities with
+  fresh marks; $5.70 fiat plus -1 YES at .70 must equal $5, not $6. Account values
+  may be missing or nonfinite; unavailable valuation must not invent zero-priced
+  holdings or prevent otherwise valid exits. Provider sources are linked in the
+  API guide. Tests cover both long and short cash flows.
+
 - The original `requirements.txt` was UTF-16 and pinned the international
   Nautilus stack. The US migration replaces it with a small UTF-8 dependency file.
 - Account balances contain numeric `buyingPower`, unlike order prices, which

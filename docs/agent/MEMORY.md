@@ -1,5 +1,17 @@
 # Agent memory
 
+- 2026-10-21 issue #8: entry target is 2% of fresh account bankroll and aggregate
+  funded exposure is 10%; shared Decimal fractions live in `execution/risk.py`.
+  Bankroll uses credited fiat plus signed holdings at fresh YES midquotes, since
+  provider `assetNotional`/`cashValue` do not establish trustworthy total equity.
+  Short-sale proceeds are already in fiat. Never add pending credit or margin.
+  Unavailable valuation blocks entries while existing exits retain account reads.
+  Live plans are rebuilt from the later account snapshot before reservation.
+  Exposure releases entry cost and fees proportionally on partial exits; pending
+  BUY reservations count once. Existing $5 daily loss and five-position guards
+  remain; daily loss conservatively reserves original cost until full close.
+  No journal migration, deployment, service restart or real order is part of #8.
+
 - 2026-10-21: The user explicitly chose a complete US-only migration. One runner
   uses the official `polymarket-us` SDK and `.env.us`; international execution,
   Nautilus/Redis, patches, and unused phase scaffolding are removed.

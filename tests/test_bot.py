@@ -25,7 +25,7 @@ def test_default_runner_is_read_only_even_when_it_paper_trades(venue, journal, m
     row = journal.records()[0]
     assert row["state"] == "open"
     assert Decimal(row["quantity"]) > 0
-    assert Decimal(row["entry_cost"]) <= 1
+    assert Decimal(row["entry_cost"]) <= 2
     assert row["pnl"] is None  # No fabricated immediate WIN/LOSS.
     assert all(method == "GET" for method, _, _ in venue.calls)
     trader.tick()
@@ -40,6 +40,158 @@ def test_live_partial_fill_is_actual_quantity_not_requested(venue, journal, monk
     assert Decimal(row["quantity"]) == Decimal("0.5")
     assert Decimal(row["entry_cost"]) == Decimal("0.33")
     assert row["orders"][0]["id"] == "bot-order-1"
+
+
+@pytest.mark.parametrize("equity,maximum", [("100", "2"), ("500", "5"), ("25", "0.50")])
+@pytest.mark.parametrize("outcome", ["up", "down"])
+def test_live_runner_sizes_from_account_with_daily_limit(
+    venue, journal, monkeypatch, equity, maximum, outcome
+):
+    venue.balance.update(currentBalance=equity, buyingPower=equity)
+    if outcome == "down":
+        venue.bid, venue.ask, venue.fill_price = "0.35", "0.37", "0.36"
+    trader = TradingBot(venue.client, journal, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: outcome)
+    trader.tick()
+    row = journal.records()[0]
+    request = next(body for method, path, body in venue.calls if path == "/v1/orders")
+    price = Decimal(request["price"]["value"])
+    price = price if outcome == "up" else 1 - price
+    # Independently bound notional plus the maximum per-share fee, rounded to cents.
+    quantity = Decimal(str(request["quantity"]))
+    fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
+    assert Decimal(maximum) - Decimal("0.02") < quantity * price + fee <= Decimal(maximum)
+    assert Decimal(row["entry_cost"]) <= Decimal(maximum)
+
+
+@pytest.mark.parametrize(
+    "later_equity,later_power,maximum",
+    [("20", "20", "0.40"), ("100", "0.40", "0.40"), ("0", "0", "0")],
+)
+def test_lower_second_account_snapshot_resizes_or_skips(
+    venue, journal, monkeypatch, later_equity, later_power, maximum
+):
+    venue.balance_snapshots = [
+        dict(venue.balance),
+        {**venue.balance, "currentBalance": later_equity, "buyingPower": later_power},
+    ]
+    # Small enough to remain a valid fake partial fill after a budget reduction.
+    venue.fill_quantity = 0.1
+    trader = TradingBot(venue.client, journal, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    if maximum == "0":
+        assert journal.records() == []
+        assert all(method == "GET" for method, _, _ in venue.calls)
+    else:
+        request = next(body for method, path, body in venue.calls if path == "/v1/orders")
+        quantity = Decimal(str(request["quantity"]))
+        fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
+        assert Decimal("0.38") < quantity * Decimal("0.65") + fee <= Decimal(maximum)
+
+
+@pytest.mark.parametrize(
+    "cash,budget", [("125", "2.50"), ("75", "1.50"), ("150", "3"), ("50", "1")]
+)
+def test_later_credited_gain_loss_deposit_or_withdrawal_changes_entry(
+    venue, journal, monkeypatch, cash, budget
+):
+    venue.balance_snapshots = [
+        dict(venue.balance),
+        {**venue.balance, "currentBalance": cash, "buyingPower": cash},
+    ]
+    trader = TradingBot(venue.client, journal, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    request = next(body for method, path, body in venue.calls if path == "/v1/orders")
+    quantity = Decimal(str(request["quantity"]))
+    fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
+    assert Decimal(budget) - Decimal("0.02") < quantity * Decimal("0.65") + fee <= Decimal(budget)
+
+
+@pytest.mark.parametrize("cash", [None, "NaN", "Infinity", "0"])
+def test_unavailable_or_zero_equity_never_reserves_an_entry(venue, journal, monkeypatch, cash):
+    venue.balance["currentBalance"] = cash
+    trader = TradingBot(venue.client, journal, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    assert journal.records() == []
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize("entry_notional,exits", [("0.65", False), ("0.95", True)])
+def test_low_equity_does_not_force_liquidation_or_block_normal_exit(
+    venue, journal, entry_notional, exits
+):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("1"), Decimal(entry_notional), Decimal("0.01"))
+    venue.positions = {market.slug: {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}}
+    venue.balance.update(currentBalance="0", buyingPower="0")
+    venue.fill_price = "0.63"
+    trader = TradingBot(venue.client, journal, live=True, one_trade=True)
+    trader.tick()
+    sells = [body for method, path, body in venue.calls if path == "/v1/orders"]
+    if exits:
+        assert len(sells) == 1
+        assert sells[0]["intent"] == "ORDER_INTENT_SELL_LONG"
+        assert Decimal(journal.get(market.slug)["quantity"]) == Decimal("0.5")
+    else:
+        assert sells == []
+        assert Decimal(journal.get(market.slug)["quantity"]) == 1
+
+
+@pytest.mark.parametrize(
+    "funded,exit_quantity,expected_quantity",
+    [
+        ("1.90", "0", "0.14"),
+        ("2.00", "0", None),
+        ("2.10", "0", None),
+        ("2.10", "0.25", "0.11"),
+    ],
+)
+def test_live_request_fits_remaining_exposure_after_partial_exits(
+    venue, journal, monkeypatch, funded, exit_quantity, expected_quantity
+):
+    held_slug = "held-btc-contract"
+    venue.markets[held_slug] = {**venue.market, "slug": held_slug}
+    held = parse_market(venue.markets[held_slug])
+    plan = venue.client.buy_plan(held, venue.client.book(held), "up", Decimal("3"))
+    journal.reserve_entry(plan, held.end)
+    journal.finish_order(
+        held_slug, Decimal("3"), Decimal(funded) - Decimal("0.02"), Decimal("0.02")
+    )
+    if Decimal(exit_quantity):
+        exit_plan = venue.client.sell_plan(
+            held, venue.client.book(held), "up", Decimal(exit_quantity)
+        )
+        journal.reserve_exit(exit_plan)
+        journal.finish_order(held_slug, Decimal(exit_quantity), Decimal("0.1575"), Decimal("0"))
+    remaining = Decimal("3") - Decimal(exit_quantity)
+    exposure = Decimal(funded) * remaining / 3
+    assert journal.exposure() == exposure
+    venue.positions = {
+        held_slug: {"netPositionDecimal": str(remaining), "qtyAvailableDecimal": str(remaining)}
+    }
+    # Marked holdings plus cash total exactly $20; changing the quote does not
+    # replace the original funded cost used for the exposure cap.
+    venue.balance.update(currentBalance=str(20 - remaining * Decimal("0.64")), buyingPower="10")
+    venue.fill_quantity = 0.01
+    trader = TradingBot(venue.client, journal, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    trader.tick()
+    requests = [body for method, path, body in venue.calls if path == "/v1/orders"]
+    if expected_quantity is None:
+        assert requests == []
+        assert journal.get(venue.market["slug"]) is None
+    else:
+        assert len(requests) == 1
+        assert requests[0]["marketSlug"] == venue.market["slug"]
+        quantity = Decimal(str(requests[0]["quantity"]))
+        assert quantity == Decimal(expected_quantity)
+        fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
+        assert quantity * Decimal("0.65") + fee <= Decimal("2") - exposure
 
 
 def test_ambiguous_submission_survives_restart_without_retry(venue, journal, monkeypatch):
@@ -120,7 +272,7 @@ def test_journal_reopen_preserves_one_entry_and_pending_order(venue, tmp_path):
     try:
         assert not second.reserve_entry(plan, market.end)
         with pytest.raises(RuntimeError, match="unresolved"):
-            second.risk_check(plan.budget)
+            second.risk_check(plan.budget, Decimal("100"))
     finally:
         second.close()
 
@@ -144,7 +296,7 @@ def test_daily_loss_budget_counts_open_cost_and_new_order(venue, journal, clock)
         market.slug, state="closed", quantity="0", pnl="-4.50", closed_at=clock.current.isoformat()
     )
     with pytest.raises(ValueError, match="loss budget"):
-        journal.risk_check(plan.budget)
+        journal.risk_check(plan.budget, Decimal("100"))
 
 
 def test_cli_check_does_not_open_journal_or_write_api(venue, tmp_path, monkeypatch):

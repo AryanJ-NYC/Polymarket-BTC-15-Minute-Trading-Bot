@@ -1,0 +1,83 @@
+# Bankroll sizing verification — issue #8
+
+Target: `aj/bankroll-sizing`, PR base `main`, pinned review base
+`022cdc4c33ec5aa71294b2ecdd42f3fcf8a420d8`.
+Scope: account valuation, entry planning, funded exposure, operator documentation.
+No real account credentials, orders, deployments or service changes were used.
+
+## Evidence
+
+The issue's three AI QA groups have deterministic SDK-transport/controlled-clock
+coverage. SQLite journals are temporary pytest fixtures and are closed after use.
+
+| Group | Result | Evidence |
+| --- | --- | --- |
+| Account bankroll | Passed | `test_equity_marks_signed_positions_without_counting_collateral_twice`: $95 cash plus $5 long value = $100; $5.70 cash minus $.70 short liability = $5. Mark gains/losses, reserved cash, pending deposits, missing/nonfinite/zero equity, all position pages and later credited gain/loss/deposit/withdrawal snapshots are covered. |
+| Entry/exposure workflow | Passed | `test_live_runner_sizes_from_account_with_daily_limit`: $100 targets $2; $500 targets $10 before the existing $5 daily guard. `test_lower_second_account_snapshot_resizes_or_skips` checks the later snapshot. `test_live_request_fits_remaining_exposure_after_partial_exits` inspects actual fake-SDK create payloads below/at/above the cap and after a partial exit. Journal tests cover pending reservations, restart, cost/fee attribution, daily losses and five positions. Up/Down planner tests cover fee, increment, tick, depth and minimums. |
+| Checks, settings and logs | Passed | Full suite **134 passed**. Ruff lint/format, compileall, pip consistency and whitespace checks passed. Percentage labels derive from the same Decimal fractions as enforcement; README/API/deployment docs describe the same USD formula and tighter daily/count limits. |
+
+Representative exact Decimal traces from fixtures:
+
+```text
+bankroll=100; target=2.00; budget=2.00; exposure=0; limit=2% entry target
+bankroll=500; target=10.00; budget=5; exposure=0; limit=daily $5 loss budget
+bankroll=20; target=.40; exposure=1.90; room=.10; Up quantity=.14; reserve=.091
+bankroll=20; exposure=2.00 or 2.10; budget=0; no entry
+entry cost=2.10; entry qty=3; partial exit=.25; exposure=1.925;
+room=.075; Up quantity=.11; reserve=.0715
+```
+
+Red/green evidence: new planner tests first failed on the fixed $1 rejection
+(and NaN handling), then passed after budget validation changed. Runner tests
+first failed on the fixed $1 request and insufficient-power skip, then passed
+with percentage sizing and second-snapshot rebuilding. Journal tests initially
+failed on absent sizing methods and unreleased partial-exit cost, then passed.
+
+Commands, using the existing project virtualenv from the isolated worktree:
+
+```bash
+python -m pytest -q
+ruff check .
+ruff format --check .
+python -m compileall -q bot.py execution core tests deploy
+python -m pip check
+git diff --check
+```
+
+## Independent review
+
+Three read-only lanes ran concurrently against the pinned diff and new files:
+code health with code-pruning, design integrity with codebase-design, and spec.
+Main owned verification commands; reviewers consumed their results.
+
+- Spec P2: journal-only exposure checks lacked runner/request evidence. Added
+  existing-holding workflow scenarios; independent spec recheck confirmed closure.
+- Design P3: reason strings duplicated percentage values. Derived labels from
+  shared constants; independent design recheck confirmed closure.
+- Health P3: a fallback/test modeled partially accounted pending BUY state that
+  the journal's atomic write never creates. Removed it while preserving actual
+  reservation/partial-fill coverage; independent health recheck confirmed closure.
+
+No remaining material review findings. The design probe covered fraction changes
+and partial exits: journal ownership keeps policy/accounting local, and existing
+BUY fills avoid a schema migration. A runner-only cap calculation would leak
+ledger knowledge and duplicate validation. No new dependency, test-only runtime
+parameter or new risk platform was introduced.
+
+## Limits and cleanup
+
+This Python CLI has no frontend, browser, preview deployment, JavaScript, React
+or static typecheck command. Impeccable, React Doctor and Fallow do not apply;
+compileall checks Python syntax/import compilation rather than static typing.
+No real order or paper soak is required by the issue's arithmetic QA checklist.
+
+Provider field interpretation is supported by official schema/cash-flow evidence
+linked in the API guide. Midquotes are the bot's explicit valuation policy,
+not a claim of equality with the website's portfolio summary. Account/position/
+book reads are sequential rather than atomic. Unavailable marks block entries.
+Real-provider response compatibility and real fills were not revalidated here.
+
+All provider activity used `httpx.MockTransport`; account keys in fixtures are
+synthetic. Temporary journals are cleaned by pytest; no shared data or provider
+state needs restoration. Existing unrelated audit/research edits remain in the
+original checkout. This PR does not merge, deploy or activate trading.

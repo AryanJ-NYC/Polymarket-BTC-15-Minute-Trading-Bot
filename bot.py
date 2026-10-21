@@ -24,6 +24,7 @@ from execution.polymarket_client import (
     parse_time,
     position_quantity,
 )
+from execution.risk import ENTRY_BANKROLL_FRACTION
 from execution.trade_journal import TradeJournal, pending_plan
 
 
@@ -34,7 +35,7 @@ def main() -> int:
         "--check", action="store_true", help="Check account and market data; no orders"
     )
     mode.add_argument(
-        "--live", action="store_true", help="Enable real orders, capped at $1 including fees"
+        "--live", action="store_true", help="Enable real orders with bankroll percentage sizing"
     )
     parser.add_argument(
         "--once", action="store_true", help="Run one paper/live observation and stop"
@@ -206,21 +207,52 @@ class TradingBot:
             elapsed = (datetime.now(timezone.utc) - self.market.start).total_seconds()
             if not 780 <= elapsed < 840:
                 return
-            plan = self.exchange.buy_plan(self.market, book, outcome, Decimal("1"))
-            self.journal.risk_check(plan.budget)
+            account = account if self.live else self.exchange.account()
+            plan = self._entry_plan(book, outcome, account)
+            if plan is None:
+                return
+            if self.live:
+                # Account equity and spendable cash may change during planning.
+                # Rebuild against the later snapshot before making a reservation.
+                account = self._account_guard()
+                plan = self._entry_plan(book, outcome, account)
+                if plan is None:
+                    return
         except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
             if not _unavailable_book(exc):
                 raise
             self._wait_for_data(exc)
             return
-        if self.live:
-            account = self._account_guard()
-            if account.buying_power < plan.budget:
-                logger.info("Entry skipped: insufficient USD buying power")
-                return
         if self.journal.reserve_entry(plan, self.market.end):
             self.trade_slug = plan.slug
             self._execute(plan, self.market)
+
+    def _entry_plan(self, book, outcome, account):
+        if account.bankroll is None:
+            logger.info(
+                "Entry skipped: bankroll unavailable; cash or position valuation is invalid"
+            )
+            return None
+        budget, reason = self.journal.entry_budget(account.bankroll, account.buying_power)
+        logger.info(
+            "Entry sizing | bankroll=${} | target=${} | budget=${} | exposure=${} | "
+            "buying power=${} | limit={}",
+            account.bankroll,
+            account.bankroll * ENTRY_BANKROLL_FRACTION,
+            budget,
+            self.journal.exposure(),
+            account.buying_power,
+            reason,
+        )
+        if budget <= 0:
+            return None
+        try:
+            plan = self.exchange.buy_plan(self.market, book, outcome, budget)
+        except ValueError as exc:
+            logger.info("Entry skipped: {}", exc)
+            return None
+        self.journal.risk_check(plan.budget, account.bankroll)
+        return plan
 
     def _execute(self, plan, market) -> None:
         if self.live:

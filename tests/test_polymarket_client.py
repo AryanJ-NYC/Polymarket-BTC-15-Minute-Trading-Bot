@@ -10,11 +10,79 @@ from execution.polymarket_client import PolymarketClient, order_fill, parse_mark
 def test_account_and_current_typed_market(venue, market_row):
     account = venue.client.account()
     assert account.buying_power == Decimal("100")
+    assert account.bankroll == Decimal("100")
     assert account.positions == {}
     market = venue.client.discover_market()
     assert market.slug == market_row["slug"]
     assert market.end - market.start == timedelta(minutes=15)
     assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize(
+    "cash,quantity,bid,ask,equity",
+    [
+        ("95", "10", "0.49", "0.51", "100"),
+        ("5.70", "-1", "0.69", "0.71", "5"),
+        ("95", "10", "0.59", "0.61", "101"),
+        ("95", "10", "0.39", "0.41", "99"),
+    ],
+)
+def test_equity_marks_signed_positions_without_counting_collateral_twice(
+    venue, cash, quantity, bid, ask, equity
+):
+    venue.balance.update(currentBalance=cash, buyingPower="1", assetNotional="999")
+    venue.positions = {venue.market["slug"]: {"netPositionDecimal": quantity}}
+    venue.bid, venue.ask = bid, ask
+    account = venue.client.account()
+    assert account.bankroll == Decimal(equity)
+    assert account.buying_power == 1
+
+
+def test_equity_keeps_reserved_cash_and_does_not_add_pending_deposits(venue):
+    venue.balance.update(
+        buyingPower="60",
+        openOrders="30",
+        balanceReservation="10",
+        pendingCredit="50",
+        unsettledFunds="50",
+    )
+    assert venue.client.account().bankroll == 100
+
+
+@pytest.mark.parametrize("cash", [None, "NaN", "Infinity", "-1"])
+def test_invalid_equity_is_unavailable_without_hiding_positions(venue, cash):
+    venue.balance["currentBalance"] = cash
+    account = venue.client.account()
+    assert account.bankroll is None
+    assert account.positions == {}
+
+
+def test_missing_cash_or_unpriceable_holding_does_not_invent_equity(venue):
+    del venue.balance["currentBalance"]
+    assert venue.client.account().bankroll is None
+    venue.balance["currentBalance"] = 95
+    venue.positions = {venue.market["slug"]: {"netPositionDecimal": "10"}}
+    venue.book_missing = True
+    assert venue.client.account().bankroll is None
+
+
+def test_account_equity_includes_all_position_pages(venue):
+    venue.balance.update(currentBalance="95", buyingPower="60")
+    venue.bid, venue.ask = "0.49", "0.51"
+    for slug in ("long-contract", "short-contract"):
+        venue.markets[slug] = {**venue.market, "slug": slug}
+    venue.position_pages = {
+        "first": {
+            "positions": {"long-contract": {"netPositionDecimal": "10"}},
+            "eof": False,
+            "nextCursor": "next",
+        },
+        "next": {"positions": {"short-contract": {"netPositionDecimal": "-2"}}, "eof": True},
+    }
+    account = venue.client.account()
+    assert account.bankroll == 99
+    assert account.buying_power == 60
+    assert len(account.positions) == 2
 
 
 def test_discovery_searches_full_pages_and_ignores_other_assets(venue):
@@ -76,6 +144,44 @@ def test_minimum_trade_qty_does_not_increase_budget(venue):
     market = replace(parse_market(venue.market), increment=Decimal("5"))
     with pytest.raises(ValueError, match="minimum trade"):
         venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+
+
+@pytest.mark.parametrize("outcome", ["up", "down"])
+@pytest.mark.parametrize("budget", ["2", "10", "0.01"])
+def test_entry_budget_has_no_fixed_dollar_cap(venue, outcome, budget):
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+    plan = venue.client.buy_plan(market, book, outcome, Decimal(budget))
+    assert 0 < plan.budget <= Decimal(budget)
+    assert plan.quantity % market.increment == 0
+    assert plan.quantity <= (book.asks[0][1] if outcome == "up" else book.bids[0][1])
+    if budget == "10":
+        assert plan.budget > 9
+
+
+@pytest.mark.parametrize("budget", ["0", "-1", "NaN", "Infinity"])
+def test_invalid_entry_budget_never_plans(venue, budget):
+    market = parse_market(venue.market)
+    with pytest.raises(ValueError):
+        venue.client.buy_plan(market, venue.client.book(market), "up", Decimal(budget))
+
+
+@pytest.mark.parametrize("outcome", ["up", "down"])
+def test_large_budget_still_obeys_visible_depth_and_minimum(venue, outcome):
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+    book = replace(
+        book, bids=((Decimal("0.63"), Decimal("0.03")),), asks=((Decimal("0.65"), Decimal("0.03")),)
+    )
+    plan = venue.client.buy_plan(market, book, outcome, Decimal("10"))
+    assert plan.quantity == Decimal("0.03")
+    book = replace(
+        book,
+        bids=((Decimal("0.63"), Decimal("0.009")),),
+        asks=((Decimal("0.65"), Decimal("0.009")),),
+    )
+    with pytest.raises(ValueError, match="minimum trade"):
+        venue.client.buy_plan(market, book, outcome, Decimal("10"))
 
 
 def test_price_tick_and_nonfinite_values_fail_closed(venue):
