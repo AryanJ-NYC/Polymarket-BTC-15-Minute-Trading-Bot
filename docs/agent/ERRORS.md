@@ -34,3 +34,8 @@
   ID plus pending reservation. Read-only account counts were zero afterward;
   counts alone cannot establish the order outcome. Do not delete the journal or
   restart blindly. This incident remains unresolved; updater gates preserve it.
+- Issue #5 regression: an already-closed legacy settlement returned before
+  checking provider resolution fees/cost, preserving false precision. A failing
+  workflow regression reproduced this; compare evidence before the closed-state
+  return and clear exact P&L on discrepancy. Preserve the original order and
+  provider resolution fields for later reconciliation.

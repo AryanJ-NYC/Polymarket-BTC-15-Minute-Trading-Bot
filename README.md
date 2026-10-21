@@ -162,3 +162,38 @@ and position state; [the strategy](core/strategy_brain/strategies/btc_15min_stra
 owns signals and entry timing. See [API evidence](docs/polymarket-us-api.md) and
 [verification](docs/verification.md) for provider details and tested limits.
 Agent notes: [decisions](docs/agent/MEMORY.md), [errors](docs/agent/ERRORS.md).
+
+## Actual experiment results
+
+The existing runner also records late-window opportunities, including skips, in
+`opportunities` inside its current SQLite journal. Each observation includes the
+contract/window, decision, midpoint/spread, quote timestamp, time remaining,
+usable top-level quantity on both sides, fee coefficient, and policy/exit settings.
+The current entry planner consumes that top level only. Unavailable quotes remain
+explicitly null. Trades keep actual filled quantity, average outcome execution
+price, collected fees, order IDs, exit proceeds and eventual official settlement.
+
+Read the live journal without starting a runner or contacting the exchange:
+
+```bash
+python results_report.py --journal logs/us-live.sqlite
+python results_report.py --journal logs/us-live.sqlite --json
+```
+
+The report gives filled trade count, known realized net P&L, win rate, average
+win/loss and maximum realized drawdown in closing-time order. Win/loss metrics
+use known closed trades only. Pending trades and missing/disputed fees are
+listed; total net P&L remains unknown until all trades reconcile. A zero official
+payout is a known zero, while an unavailable amount stays null. The report can
+read an older journal without migrating it, but older records lack capture and
+policy fields. Keep live and paper journals separate when comparing results.
+
+Existing `--one-trade` and `--duration SECONDS` controls still bound a run. A known
+order ID is retained through transient read failures; up to three reads retry
+that ID, with at most two 30-second waits. The duration is checked between ticks,
+so in-flight requests/readback can outlast it. An unresolved create is never
+retried. Restart with the same journal; do not delete state or start a second
+runner. A bounded run may finish with pending results that need later readback.
+
+[Issue #5 evidence and remaining live QA](docs/verification-issue-5.md) separates
+fake-transport regression coverage from read-only actual execution evidence.
