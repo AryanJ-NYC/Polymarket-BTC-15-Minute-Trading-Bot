@@ -10,11 +10,11 @@ AryanJ-NYC), project **polymarket-us**.
 | Region / image | NYC1 / Ubuntu 24.04 LTS x64 |
 | Capacity / price | 1 vCPU, 1 GB RAM, 25 GB SSD / $6 per month before tax |
 | Public IPv4 | `167.99.236.49` |
-| Runtime release | `e7ba2962352f5045258b9c9d93bd7249d63e7d67` |
-| Application / Python | `/opt/polymarket-us/app` / `.venv/bin/python` (Python 3.12) |
+| Bootstrap release | `e7ba2962352f5045258b9c9d93bd7249d63e7d67` at `/opt/polymarket-us/app` |
+| Application / Python | `/opt/polymarket-us/current` symlink / `.venv/bin/python` (Python 3.12) |
 | Credentials | `/etc/polymarket-us/.env.us`, root-owned, mode 0640, service group read access |
 | Persistent state | `/var/lib/polymarket-us`, mode 0700; application `logs/` points here |
-| Service | `polymarket-us.service`, live configuration, **stopped and disabled** at handoff |
+| Service | `polymarket-us.service`, live configuration, `Restart=no`, disabled at boot |
 
 No paid volumes, backups, databases, or other add-ons were enabled. A new
 dedicated Ed25519 key was created at `~/.ssh/polymarket_us_digitalocean` on the
@@ -22,6 +22,13 @@ user's Mac. Its public key, named **Polymarket US DigitalOcean**, is the only
 selected SSH key for this Droplet. The private key stays on the Mac, mode 0600.
 
 ## Start and observe
+
+**Current incident:** the user started the service at 19:41 UTC. It failed at
+19:58:18 UTC with an API 404 after a signal. Read-only inspection found a reserved
+journal row with a pending request and an order ID; account reads reported no open
+orders or nonzero positions. Preserve the record and inspect the
+order's history before restarting. These counts do not resolve the unfinished
+order. The updater will not clear the reservation or revive the failed bot.
 
 In DigitalOcean, open the Droplet link above, click **Web Console**, and connect
 as `root`. The server commands below work there. A copy of this guide is also
@@ -67,8 +74,8 @@ stops remain available for inspection. It is not enabled at boot.
 This check authenticates and reads account/market data without creating orders:
 
 ```bash
-runuser -u polymarket-us -- /opt/polymarket-us/app/.venv/bin/python \
-  /opt/polymarket-us/app/bot.py --check \
+cd /opt/polymarket-us/current
+runuser -u polymarket-us -- .venv/bin/python bot.py --check \
   --env-file /etc/polymarket-us/.env.us
 ```
 
@@ -83,7 +90,81 @@ unprivileged service user, restricts writes to the state directory, keeps the
 credentials outside the code tree, and sends logs to the system journal. The
 firewall allows inbound SSH only; the bot needs no public HTTP endpoint.
 
-## Verified at handoff
+## Automatic updates
+
+The root-owned `polymarket-update.timer` checks `main` every five minutes. For each
+new commit it requires a successful **push** run of this repository's `ci.yml`
+workflow for that exact main SHA. Pull-request checks alone do not deploy it.
+There is no approval environment, deploy button, webhook, or GitHub SSH secret.
+The public source and public CI status need no GitHub token. This uses the existing
+Droplet; [standard GitHub Actions runners for public repositories are free](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
+A deployment waits for all of the following:
+
+- Every journal row is closed or unfilled, with zero quantity and no pending
+  request or order ID. The journal must exist and be readable.
+- Authenticated reads report no open orders and no nonzero positions, including
+  expired positions. An expired nonzero balance can therefore defer updates
+  indefinitely until it is resolved; this gate is stricter than the bot's guard.
+- The clock is between minute 1 and minute 11 of the current UTC quarter hour.
+  The current strategy only enters in minutes 13–14.
+- The service is active or inactive; failed/activating/stopping states defer.
+
+Dependencies build before the bot stops, in a contained systemd unit as
+`polymarket-build`, which cannot read account credentials or state. Finished
+releases are root-owned and readable by the bot. The controller stops an active
+bot, takes its journal lock, rechecks main and all readiness gates, makes a
+consistent SQLite backup including WAL data, and atomically switches `current`.
+It starts the new release only if the previous service was active. An operator's
+inactive state is preserved. Three prepared releases and three local journal
+backups are retained; the original bootstrap directory also remains. Local
+backups share the Droplet's disk and are not disaster recovery.
+
+The new bot finishes its current tick on SIGINT/SIGTERM before closing state.
+The bootstrap release lacks this cooperative handler; the flat/window checks
+reduce the first upgrade's interruption risk, but cannot eliminate it. Any failed
+post-stop check leaves the old release selected and the bot **stopped**, even if
+the cause is a newer main commit, a closed window, or a temporary read failure.
+The timer preserves that stop until the operator investigates and resumes it.
+A failed new startup also stays stopped; there is no blind rollback or retry of
+trading requests.
+
+Observe deployment separately from trading:
+
+```bash
+systemctl list-timers polymarket-update.timer --no-pager
+journalctl -u polymarket-update.service -n 30 --no-pager
+python3 /usr/local/lib/polymarket-us/update.py --check
+cat /opt/polymarket-us/DEPLOYED_REVISION
+readlink -f /opt/polymarket-us/current
+```
+
+`--check` reports readiness without building, switching, or controlling the bot.
+Before manual maintenance, pause automatic updates:
+
+```bash
+systemctl disable --now polymarket-update.timer
+systemctl is-active polymarket-update.service
+```
+
+If the updater is already active, wait for it to finish before editing state or
+releases. Investigate a stopped service and its pending journal/account records
+before choosing to resume trading. Never delete state to force a deployment.
+To resume the deployment timer after maintenance:
+
+```bash
+systemctl enable --now polymarket-update.timer
+```
+
+The installed root controller and systemd units are deliberately outside app
+releases. Changes to `deploy/update.py`, units, or the installer require copying
+reviewed deployment files to the server and rerunning `deploy/install.sh` as root.
+Ordinary application/dependency changes need only a passing main push. The
+installer is bound to Droplet ID `611323289`, reloads units, and enables the timer;
+it does not itself start or restart the trading service. The timer may run
+immediately after installation, so inspect its eligibility first.
+
+## Initial provisioning evidence
 
 - All 33 deployed release files matched the committed source archive byte for
   byte. The credential copy matched locally without displaying its values.

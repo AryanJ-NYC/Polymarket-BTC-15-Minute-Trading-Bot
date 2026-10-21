@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from threading import Event
 
 from loguru import logger
 from polymarket_us import APIConnectionError, APIError, APITimeoutError
@@ -49,6 +51,8 @@ def main() -> int:
     logger.add(sys.stderr, level="INFO", format="{time:HH:mm:ss} | {level} | {message}")
     exchange = None
     journal = None
+    shutdown = Event()
+    previous_handlers = {}
     try:
         exchange = PolymarketClient.connect(args.env_file)
         account = exchange.account()
@@ -74,11 +78,21 @@ def main() -> int:
         mode_name = "live" if args.live else "paper"
         journal = TradeJournal(ROOT / "logs" / f"us-{mode_name}.sqlite")
         bot = TradingBot(exchange, journal, live=args.live, one_trade=args.one_trade)
+        # Finish the current tick's durable order accounting before exiting.
+        # Raising KeyboardInterrupt inside submit/readback could leave an
+        # unnecessary unknown reservation during an automated deployment.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, lambda *_: shutdown.set())
         logger.info("Starting {} mode; press Ctrl+C to stop", mode_name.upper())
         deadline = time.monotonic() + args.duration if args.duration else None
-        while True:
+        while not shutdown.is_set():
             bot.tick()
-            if bot.finished or args.once or (deadline is not None and time.monotonic() >= deadline):
+            if (
+                shutdown.is_set()
+                or bot.finished
+                or args.once
+                or (deadline is not None and time.monotonic() >= deadline)
+            ):
                 break
             delay = 3 if deadline is None else min(3, max(0, deadline - time.monotonic()))
             time.sleep(delay)
@@ -98,6 +112,8 @@ def main() -> int:
             )
         return 1
     finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
         if journal is not None:
             journal.close()
         if exchange is not None:

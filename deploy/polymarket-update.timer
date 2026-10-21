@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for a tested Polymarket US release every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+Unit=polymarket-update.service
+
+[Install]
+WantedBy=timers.target

@@ -39,3 +39,18 @@
   deployment. Exact release e7ba296 is installed; read-only API check and durable
   journal check pass. The live systemd service is installed, stopped, disabled,
   and Restart=no. User must perform trading activation. See deployment guide.
+- Automatic deployment: user rejected per-deployment approval. Use exact-SHA
+  successful main push CI plus a five-minute host pull timer, no GitHub/SSH secret.
+  Root controller/units stay outside app releases; update those through the trusted
+  installer. `/current` atomically selects root-owned versioned builds prepared as
+  an isolated build user. Credentials and SQLite remain outside releases.
+- Update only while journal/account flat and outside entry time; recheck under
+  the lifetime journal lock after stopping, backup SQLite with its backup API,
+  and preserve inactive/failed service states. Post-stop uncertainty leaves the
+  bot stopped. No blind rollback/restart. Initial bootstrap lacks cooperative
+  shutdown; new runner finishes its tick on SIGINT/SIGTERM before closing state.
+- During updater work, read-only server inspection discovered the user-started
+  bot had failed at 19:58:18 UTC with HTTP 404. The journal contains one reserved
+  pending order with an order ID; account reads reported no orders/nonzero
+  positions. Preserve evidence and reconcile history before resuming; automation
+  must not clear this record or restart the failed trading service.

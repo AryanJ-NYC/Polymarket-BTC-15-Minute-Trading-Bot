@@ -25,3 +25,12 @@
 - Local credential-validation scripts need `.venv/bin/python`; system Python
   lacks python-dotenv. Use the project environment instead of installing into
   system Python or treating a following successful command as a passed check.
+- Deployment review caught root updater UMask0077 leaking into unprivileged
+  extraction/venv installation, making releases unreadable by the runtime user.
+  Build in one transient systemd unit with UMask0022 and control-group cleanup;
+  freeze completed output root-owned, readable, and unwritable to both app users.
+  Verify actual cross-user imports on Ubuntu, not only mocked subprocess tests.
+- A live run failed after a signal at 19:58:18 UTC with API 404 and left an order
+  ID plus pending reservation. Read-only account counts were zero afterward;
+  counts alone cannot establish the order outcome. Do not delete the journal or
+  restart blindly. This incident remains unresolved; updater gates preserve it.
