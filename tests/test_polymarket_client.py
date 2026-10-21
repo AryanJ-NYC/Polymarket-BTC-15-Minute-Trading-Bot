@@ -1,13 +1,12 @@
-import time
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
-from email.utils import format_datetime
 
 import httpx
 import pytest
 from polymarket_us import APIStatusError
 
+import execution.polymarket_client as client_module
 from execution.polymarket_client import PolymarketClient, order_fill, parse_market
 
 
@@ -215,6 +214,17 @@ def test_expired_plan_cannot_submit(venue, clock):
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
+def test_preview_cannot_push_buy_past_entry_cutoff(venue, clock):
+    market = parse_market(venue.market)
+    clock.current = market.start + timedelta(minutes=13, seconds=59)
+    venue.timestamp = clock.current.isoformat()
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    venue.preview_delay = 2
+    with pytest.raises(ValueError, match="expired during preview"):
+        venue.client.submit(plan)
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+
+
 def test_submit_cancel_and_partial_fill_readback(venue):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
@@ -233,7 +243,7 @@ def test_cancel_rejects_wrong_contract_before_write(venue):
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
-@pytest.mark.parametrize("failure", [404, 429, 500, 503, "connection", "timeout"])
+@pytest.mark.parametrize("failure", [404, 409, 500, 503, "connection", "timeout"])
 def test_known_order_recovers_from_transient_reads_without_submission(venue, monkeypatch, failure):
     requests = []
     delays = []
@@ -253,34 +263,25 @@ def test_known_order_recovers_from_transient_reads_without_submission(venue, mon
 
     venue.sdk._http.close()
     venue.sdk._http = httpx.Client(transport=httpx.MockTransport(respond))
-    monkeypatch.setattr(time, "sleep", delays.append)
+    monkeypatch.setattr(client_module, "sleep", delays.append)
     assert venue.client.order("known-order") == order
     assert requests == [("GET", "/v1/order/known-order")] * 3
     assert len(delays) == 2 and all(0 < delay <= 30 for delay in delays)
 
 
-@pytest.mark.parametrize(
-    "header,expected", [("3600", [30, 30]), ("bad", [1, 2]), ("date", [10, 10])]
-)
-def test_order_read_exhaustion_honors_bounded_retry_after(
-    venue, monkeypatch, clock, header, expected
-):
+def test_order_rate_limit_defers_to_runner_without_more_requests(venue, monkeypatch):
     requests = []
-    delays = []
-    if header == "date":
-        header = format_datetime(clock.current + timedelta(seconds=10), usegmt=True)
 
     def respond(request):
         requests.append((request.method, request.url.path))
-        return httpx.Response(429, headers={"Retry-After": header}, json={"error": "Unavailable"})
+        return httpx.Response(429, headers={"Retry-After": "3600"}, json={"error": "Unavailable"})
 
     venue.sdk._http.close()
     venue.sdk._http = httpx.Client(transport=httpx.MockTransport(respond))
-    monkeypatch.setattr(time, "sleep", delays.append)
+    monkeypatch.setattr(client_module, "sleep", lambda seconds: pytest.fail("Unexpected retry"))
     with pytest.raises(APIStatusError):
         venue.client.order("known-order")
-    assert requests == [("GET", "/v1/order/known-order")] * 3
-    assert delays == expected
+    assert requests == [("GET", "/v1/order/known-order")]
 
 
 def test_order_authentication_failure_does_not_retry(venue, monkeypatch):
@@ -292,7 +293,7 @@ def test_order_authentication_failure_does_not_retry(venue, monkeypatch):
 
     venue.sdk._http.close()
     venue.sdk._http = httpx.Client(transport=httpx.MockTransport(respond))
-    monkeypatch.setattr(time, "sleep", lambda seconds: pytest.fail("Unexpected retry"))
+    monkeypatch.setattr(client_module, "sleep", lambda seconds: pytest.fail("Unexpected retry"))
     with pytest.raises(APIStatusError):
         venue.client.order("known-order")
     assert requests == [("GET", "/v1/order/known-order")]

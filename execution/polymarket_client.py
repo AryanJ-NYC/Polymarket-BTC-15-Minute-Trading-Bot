@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal, InvalidOperation
-from email.utils import parsedate_to_datetime
 from pathlib import Path
-from time import time_ns
+from time import sleep, time_ns
 
 from dotenv import dotenv_values
-from polymarket_us import (
-    APIConnectionError,
-    APIError,
-    APIStatusError,
-    APITimeoutError,
-    NotFoundError,
-    PolymarketUS,
-)
+from loguru import logger
+from polymarket_us import APIConnectionError, APIError, APITimeoutError, NotFoundError, PolymarketUS
 
 
 class PolymarketClient:
@@ -142,21 +134,25 @@ class PolymarketClient:
         """Preview and submit exactly once, returning the exchange-assigned ID.
 
         The caller must durably reserve the attempt before entering this method.
-        Expiry before create is explicitly non-submitted; create failures remain unknown.
+        OrderNotSubmitted proves create was never called. Any other exception
+        is unresolved until reconciled, never retried.
         """
-        if datetime.now(timezone.utc) >= plan.expires_at:
-            raise OrderNotSubmitted("Order plan has expired")
-        preview = self.client.orders.preview({"request": plan.request})["order"]
-        for field in ("marketSlug", "intent", "type", "tif"):
-            if preview.get(field) != plan.request[field]:
-                raise ValueError("Order preview changed the requested contract or order terms")
-        if (
-            number(preview["quantity"]) != plan.quantity
-            or amount(preview["price"]) != plan.yes_price
-        ):
-            raise ValueError("Order preview changed the requested price or quantity")
-        if datetime.now(timezone.utc) >= plan.expires_at:
-            raise OrderNotSubmitted("Order plan expired during preview")
+        try:
+            if datetime.now(timezone.utc) >= plan.expires_at:
+                raise ValueError("Order plan has expired")
+            preview = self.client.orders.preview({"request": plan.request})["order"]
+            for field in ("marketSlug", "intent", "type", "tif"):
+                if preview.get(field) != plan.request[field]:
+                    raise ValueError("Order preview changed the requested contract or order terms")
+            if (
+                number(preview["quantity"]) != plan.quantity
+                or amount(preview["price"]) != plan.yes_price
+            ):
+                raise ValueError("Order preview changed the requested price or quantity")
+            if datetime.now(timezone.utc) >= plan.expires_at:
+                raise ValueError("Order plan expired during preview")
+        except Exception as exc:
+            raise OrderNotSubmitted(exc) from None
         result = self.client.orders.create(plan.request)
         order_id = result["id"]
         if not isinstance(order_id, str) or not order_id:
@@ -164,18 +160,19 @@ class PolymarketClient:
         return order_id
 
     def order(self, order_id: str) -> dict:
-        """Read a known ID with bounded recovery; never replay order creation."""
+        # Only repeat reads of an already-known ID. Never enable SDK-wide retries:
+        # a lost create response cannot safely be replayed.
         for attempt in range(3):
             try:
                 order = self.client.orders.retrieve(order_id)["order"]
                 break
-            except (APIConnectionError, APIStatusError) as exc:
-                status = getattr(exc, "status_code", None)
-                if attempt == 2 or (
-                    status is not None and status not in {404, 429} and not 500 <= status < 600
-                ):
+            except (APIError, APIConnectionError, APITimeoutError) as exc:
+                if not retryable_api_error(exc, missing=True) or attempt == 2:
                     raise
-                time.sleep(_order_read_delay(exc, attempt))
+                if getattr(exc, "status_code", None) == 429:
+                    raise  # The runner honors Retry-After without further requests.
+                logger.warning("Retrying order {} readback: {}", order_id, api_error_summary(exc))
+                sleep(2**attempt)
         if order["id"] != order_id:
             raise ValueError("Order readback ID mismatch")
         return order
@@ -189,7 +186,7 @@ class PolymarketClient:
             self.client.orders.cancel(order_id, {"marketSlug": slug})
             order = self.order(order_id)
         if order["state"] not in TERMINAL_STATES:
-            raise ValueError("Cancellation is not confirmed; trading must stop")
+            raise OrderPending(f"Order {order_id} cancellation is not yet confirmed")
         return order
 
     def settlement(self, slug: str) -> Decimal | None:
@@ -327,6 +324,21 @@ def parse_market(row: dict) -> Market:
     )
 
 
+def retryable_api_error(exc: Exception, *, missing: bool = False) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    status = getattr(exc, "status_code", 0) or 0
+    return status in {408, 409, 429} or status >= 500 or (missing and status == 404)
+
+
+def api_error_summary(exc: Exception) -> str:
+    """Log only request method/path and status, never bodies, headers, or keys."""
+    response = getattr(exc, "response", None)
+    request = response.request if response is not None else getattr(exc, "request", None)
+    operation = f"{request.method} {request.url.path}" if request is not None else "API request"
+    return f"{operation}: {type(exc).__name__} (HTTP status {getattr(exc, 'status_code', 'unavailable')})"
+
+
 def position_quantity(position: dict) -> Decimal:
     return number(position["netPositionDecimal"])
 
@@ -395,24 +407,6 @@ def _credential(config: dict, *names: str) -> str:
     return values.pop()
 
 
-def _order_read_delay(error: Exception, attempt: int) -> float:
-    delay = float(2**attempt)
-    if isinstance(error, APIStatusError):
-        header = error.response.headers.get("Retry-After", "")
-        try:
-            retry_after = float(header)
-        except ValueError:
-            try:
-                retry_after = (
-                    parsedate_to_datetime(header) - datetime.now(timezone.utc)
-                ).total_seconds()
-            except (ValueError, TypeError, OverflowError):
-                return delay
-        if retry_after >= 0:
-            delay = max(delay, retry_after)
-    return min(delay, 30.0)
-
-
 def _levels(rows: list[dict], *, reverse: bool) -> tuple:
     levels = [(amount(row["px"]), number(row["qty"])) for row in rows]
     if any(not ZERO < price < ONE or quantity < ZERO for price, quantity in levels):
@@ -456,6 +450,8 @@ def _plan(
     }
     price = yes_price if outcome == "up" else ONE - yes_price
     expires = min(market.end, book.timestamp + timedelta(seconds=35))
+    if action == "BUY":
+        expires = min(expires, market.start + timedelta(minutes=14))
     return Plan(
         market.slug, outcome, action, yes_price, quantity, quantity * price, fee, request, expires
     )
@@ -515,6 +511,19 @@ class Account:
     bankroll: Decimal | None
 
 
+class OrderNotSubmitted(ValueError):
+    """The order failed preflight; no create request was attempted."""
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        message = str(cause) if type(cause) is ValueError else api_error_summary(cause)
+        super().__init__(message)
+
+
+class OrderPending(RuntimeError):
+    """A known order still needs terminal readback before recording its fill."""
+
+
 ZERO = Decimal("0")
 ONE = Decimal("1")
 CENT = Decimal("0.01")
@@ -524,7 +533,3 @@ TERMINAL_STATES = {
     "ORDER_STATE_REJECTED",
     "ORDER_STATE_EXPIRED",
 }
-
-
-class OrderNotSubmitted(ValueError):
-    """A plan expired before any order-create request was sent."""

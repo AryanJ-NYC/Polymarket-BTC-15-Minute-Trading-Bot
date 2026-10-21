@@ -16,7 +16,7 @@ The [installer](../deploy/install.sh) is bound to Droplet ID `611323289`.
 | Application | `/opt/polymarket-us/current` symlink |
 | Credentials | `/etc/polymarket-us/.env.us` |
 | Persistent state | `/var/lib/polymarket-us`; application `logs/` points here |
-| Trading service | `polymarket-us.service`, user `polymarket-us`, `Restart=no` |
+| Trading service | `polymarket-us.service`, user `polymarket-us`, `Restart=on-failure`, 10-second delay |
 | Update controller | `/usr/local/lib/polymarket-us/update.py` |
 | Update timer | `polymarket-update.timer` |
 
@@ -63,8 +63,10 @@ systemctl is-active polymarket-us
 
 Stopping does **not** close exchange positions. They remain unmanaged until the
 same journal and service resume. Do not run another copy locally or on another
-host against this account. The service uses `Restart=no` so fatal reconciliation
-stops remain available for inspection. Check boot activation separately with
+host against this account. The service uses `Restart=on-failure` with a 10-second
+delay. Exit 2 indicates a reconciliation, configuration or authentication stop;
+`RestartPreventExitStatus=2` keeps it stopped for inspection. A manual
+`systemctl stop` remains stopped. Check boot activation separately with
 `systemctl is-enabled polymarket-us`.
 
 ## Read-only check and storage
@@ -122,8 +124,9 @@ The bot finishes its current tick on SIGINT/SIGTERM before closing state. Any fa
 post-stop check leaves the old release selected and the bot **stopped**, even if
 the cause is a newer main commit, a closed window, or a temporary read failure.
 The timer preserves that stop until the operator investigates and resumes it.
-A failed new startup also stays stopped; there is no blind rollback or retry of
-trading requests.
+The updater never rolls back or replays trading requests after a failed startup.
+The trading unit may restart ordinary failures; exit status 2 preserves a safety
+stop for operator reconciliation.
 
 Observe deployment separately from trading:
 
