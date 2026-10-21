@@ -921,6 +921,17 @@ class TradingBot:
                     book = self.exchange.book(market)
                     streamed = False
                     logger.info("Position {} using validated REST fallback", row["slug"])
+                sellable, net_value = self.exchange.exit_value(
+                    market, book, row["outcome"], number(row["quantity"])
+                )
+                remaining = number(row["quantity"]) - sellable
+                logger.info(
+                    "Exit depth {} | sellable {} | remainder {} | net ${:.4f}",
+                    row["slug"],
+                    sellable,
+                    remaining,
+                    net_value,
+                )
                 plan = self.exchange.sell_plan(
                     market, book, row["outcome"], number(row["quantity"])
                 )
@@ -931,14 +942,22 @@ class TradingBot:
                 self._wait_for_data(exc, slug)
                 unavailable = True
                 continue
-            # Include entry fees and previously realized exit proceeds in the return.
-            estimated_value = number(row["proceeds"]) + (
-                number(row["quantity"]) / plan.quantity * (plan.notional - plan.fee_bound)
+            # Allocate cost and prior proceeds to the quoted slice only. With
+            # full depth this is the whole trade's fee-inclusive return.
+            fraction = sellable / number(row["quantity"])
+            change = (number(row["proceeds"]) * fraction + net_value) / (
+                number(row["entry_cost"]) * fraction
+            ) - 1
+            logger.info(
+                "Exit return {} | {} return {:.2%}",
+                row["slug"],
+                "position" if remaining == 0 else "slice (remainder unpriced)",
+                change,
             )
-            change = estimated_value / number(row["entry_cost"]) - 1
             settings = row.get("settings") or self.settings
             if change <= number(settings.get("stop_loss", self.settings["stop_loss"])) or (
-                change >= number(settings.get("take_profit", self.settings["take_profit"]))
+                remaining == 0
+                and change >= number(settings.get("take_profit", self.settings["take_profit"]))
             ):
                 if self.live:
                     try:
