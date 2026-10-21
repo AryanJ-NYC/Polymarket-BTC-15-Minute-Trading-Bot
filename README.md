@@ -103,7 +103,8 @@ Temporary read failures retain known order IDs and recover automatically.
   estimated fees. Exits can fill partially. Liquidity, stale books, outages, and
   stopping the process can delay exits; these are not exchange-hosted stops.
 - Paper mode sends no order previews, submissions, or cancellations. It assumes
-  visible top-of-book liquidity fills at the quoted price and estimates fees.
+  visible top-of-book liquidity fills at the quoted price and estimates fees;
+  it does not model exchange queue position.
   P&L stays pending until an executable exit or actual exchange settlement.
   It does not invent random wins or mark unresolved settlement as a loss.
 
@@ -212,7 +213,8 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ruff check .
 ruff format --check .
-python -m compileall -q bot.py execution core tests
+python -m compileall -q bot.py probability_model.py results_report.py execution core tests
+python -m pip check
 ```
 
 Tests replace HTTP transport at the official SDK seam; they do not need your
@@ -223,9 +225,16 @@ loss budgets, and read-only defaults.
 Source map: [bot.py](bot.py) owns the loop; [the exchange client](execution/polymarket_client.py)
 owns US API details; [the journal](execution/trade_journal.py) owns durable order
 and position state; [the strategy](core/strategy_brain/strategies/btc_15min_strategy.py)
-owns signals and entry timing. See [API evidence](docs/polymarket-us-api.md) and
-[verification](docs/verification.md) for provider details and tested limits.
-Agent notes: [decisions](docs/agent/MEMORY.md), [errors](docs/agent/ERRORS.md).
+owns signals and entry timing; [the probability model](probability_model.py) owns
+fitting, feature transforms and artifact identity. See the
+[API contract](docs/polymarket-us-api.md) for provider semantics and limitations.
+
+Keep committed documentation focused on maintained setup, behavior, interfaces
+and operations. Issue plans, review notes, QA run reports, deployment snapshots
+and captured provider data belong in GitHub issues/PRs or ignored local folders
+under `docs/agent/`, `docs/audits/`, `docs/evidence/` and `docs/research/`.
+Local agent memory/error notes remain local; reproducible fixtures belong in
+`tests/`, not captured production evidence.
 
 ## Actual experiment results
 
@@ -259,9 +268,6 @@ runner's Retry-After gate. The duration is checked between ticks,
 so in-flight requests/readback can outlast it. An unresolved create is never
 retried. Restart with the same journal; do not delete state or start a second
 runner. A bounded run may finish with pending results that need later readback.
-
-[Issue #5 evidence and remaining live QA](docs/verification-issue-5.md) separates
-fake-transport regression coverage from read-only actual execution evidence.
 
 ## Probability model experiment
 
@@ -317,5 +323,6 @@ not treat prediction scores as trading returns. Existing exit settings remain
 in effect, so entry EV is a settlement-payoff estimate, not a promise about the
 realized result of earlier exits.
 
-[Issue #6 verification](docs/verification-issue-6.md) records the tested target,
-independent reviews, and the separate live execution/data limitations.
+Track each experiment's sample counts, checks, deployed revision, prediction
+metrics and actual execution results in its GitHub issue or PR. Automated fixture
+coverage, deployed behavior and live execution are separate evidence.

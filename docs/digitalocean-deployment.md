@@ -1,40 +1,34 @@
 # DigitalOcean deployment
 
-Created October 21, 2026 in the personal **AJab** team (sole member/owner:
-AryanJ-NYC), project **polymarket-us**.
+Run one process on one host with persistent SQLite storage and exclusive use of
+its trading account. A separate checkout, journal or host is not covered by the
+local journal lock. Keep fatal stops available for inspection; do not configure
+an unconditional restart loop. Ephemeral filesystems require persistent storage
+before they can host this architecture.
+
+## Configured target
+
+The [installer](../deploy/install.sh) is bound to Droplet ID `611323289`.
 
 | Setting | Value |
 | --- | --- |
-| Droplet | `polymarket-us-bot`, ID `611323289` |
-| Control panel | <https://cloud.digitalocean.com/droplets/611323289?i=23d2e2> |
-| Region / image | NYC1 / Ubuntu 24.04 LTS x64 |
-| Capacity / price | 1 vCPU, 1 GB RAM, 25 GB SSD / $6 per month before tax |
-| Public IPv4 | `167.99.236.49` |
-| Bootstrap release | `e7ba2962352f5045258b9c9d93bd7249d63e7d67` at `/opt/polymarket-us/app` |
-| Application / Python | `/opt/polymarket-us/current` symlink / `.venv/bin/python` (Python 3.12) |
-| Credentials | `/etc/polymarket-us/.env.us`, root-owned, mode 0640, service group read access |
-| Persistent state | `/var/lib/polymarket-us`, mode 0700; application `logs/` points here |
-| Service | `polymarket-us.service`, live configuration, `Restart=on-failure`, 10-second delay, disabled at boot |
+| Host | `polymarket-us-bot`, `167.99.236.49` |
+| Application | `/opt/polymarket-us/current` symlink |
+| Credentials | `/etc/polymarket-us/.env.us` |
+| Persistent state | `/var/lib/polymarket-us`; application `logs/` points here |
+| Trading service | `polymarket-us.service`, user `polymarket-us`, `Restart=on-failure`, 10-second delay |
+| Update controller | `/usr/local/lib/polymarket-us/update.py` |
+| Update timer | `polymarket-update.timer` |
 
-No paid volumes, backups, databases, or other add-ons were enabled. A new
-dedicated Ed25519 key was created at `~/.ssh/polymarket_us_digitalocean` on the
-user's Mac. Its public key, named **Polymarket US DigitalOcean**, is the only
-selected SSH key for this Droplet. The private key stays on the Mac, mode 0600.
+Credentials and journal files stay outside versioned releases. The service
+restricts writes to the state directory and needs no inbound public HTTP port.
+Check service and deployment status on the host; this guide does not record a
+current release or trading state.
 
 ## Start and observe
 
-**Incident follow-up (October 21):** a user-started run exited at 19:58:18 UTC
-with HTTP 404 during post-create readback/cancellation. Subsequent order reads
-confirmed a fill; account activity confirmed a zero-payout resolution. The user
-authorized restart with automatic recovery, which was applied at 20:14:39 UTC.
-At 20:14:41 UTC the existing runner reconciled its saved order ID, closed the
-settled journal row, and resumed LIVE observation. No journal record was deleted
-or manually rewritten. Restart policy is installed through a persistent systemd
-drop-in; the application recovery changes still require this PR's deployment.
-
-In DigitalOcean, open the Droplet link above, click **Web Console**, and connect
-as `root`. The server commands below work there. A copy of this guide is also
-available at `/root/POLYMARKET-US.md`.
+Connect through the Droplet's DigitalOcean Web Console as `root`, or use the
+dedicated SSH key and known-hosts file configured on the operator's Mac.
 
 Alternatively, connect from the Mac over SSH:
 
@@ -51,8 +45,8 @@ service enables **real-money orders**, subject to the bot's existing limits:
 at most 2% of current account bankroll including the fee reserve per entry,
 five open positions, 10% aggregate funded exposure, and its own daily loss budget
 of 10% of current bankroll. The daily/count guards may impose tighter limits.
-The budget is not an account-wide guarantee. The service is not running merely because the Droplet
-is active in DigitalOcean.
+The budget is not an account-wide guarantee. Check the trading service itself;
+an active Droplet does not establish that trading is running.
 
 ```bash
 systemctl start polymarket-us
@@ -70,9 +64,10 @@ systemctl is-active polymarket-us
 Stopping does **not** close exchange positions. They remain unmanaged until the
 same journal and service resume. Do not run another copy locally or on another
 host against this account. The service uses `Restart=on-failure` with a 10-second
-delay. The recovery release exits 2 for reconciliation/configuration/authentication
-stops, and `RestartPreventExitStatus=2` keeps those stopped for inspection. A manual
-`systemctl stop` remains stopped. The service is not enabled at boot.
+delay. Exit 2 indicates a reconciliation, configuration or authentication stop;
+`RestartPreventExitStatus=2` keeps it stopped for inspection. A manual
+`systemctl stop` remains stopped. Check boot activation separately with
+`systemctl is-enabled polymarket-us`.
 
 ## Read-only check and storage
 
@@ -88,7 +83,8 @@ The live journal is `/var/lib/polymarket-us/us-live.sqlite`. Keep this directory
 across upgrades. Preserve a consistent backup and provider evidence before any
 reconciliation or migration; never delete the journal to bypass a startup stop.
 The root disk persists through process restarts and shutdowns, but is not an
-independent backup. Automatic backups are currently disabled.
+independent backup. Maintain independent backups according to the operator's
+recovery requirements.
 
 The installed [systemd unit](../deploy/polymarket-us.service) runs as an
 unprivileged service user, restricts writes to the state directory, keeps the
@@ -101,8 +97,7 @@ The root-owned `polymarket-update.timer` checks `main` every five minutes. For e
 new commit it requires a successful **push** run of this repository's `ci.yml`
 workflow for that exact main SHA. Pull-request checks alone do not deploy it.
 There is no approval environment, deploy button, webhook, or GitHub SSH secret.
-The public source and public CI status need no GitHub token. This uses the existing
-Droplet; [standard GitHub Actions runners for public repositories are free](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+The public source and public CI status need no GitHub token.
 
 A deployment waits for all of the following:
 
@@ -125,9 +120,7 @@ inactive state is preserved. Three prepared releases and three local journal
 backups are retained; the original bootstrap directory also remains. Local
 backups share the Droplet's disk and are not disaster recovery.
 
-The new bot finishes its current tick on SIGINT/SIGTERM before closing state.
-The bootstrap release lacks this cooperative handler; the flat/window checks
-reduce the first upgrade's interruption risk, but cannot eliminate it. Any failed
+The bot finishes its current tick on SIGINT/SIGTERM before closing state. Any failed
 post-stop check leaves the old release selected and the bot **stopped**, even if
 the cause is a newer main commit, a closed window, or a temporary read failure.
 The timer preserves that stop until the operator investigates and resumes it.
@@ -170,21 +163,16 @@ installer is bound to Droplet ID `611323289`, reloads units, and enables the tim
 it does not itself start or restart the trading service. The timer may run
 immediately after installation, so inspect its eligibility first.
 
-## Initial provisioning evidence
+## Investigate a stopped service
 
-- All 33 deployed release files matched the committed source archive byte for
-  byte. The credential copy matched locally without displaying its values.
-- Dependency installation and `pip check` passed on the Droplet.
-- The authenticated check ran under the service user and filesystem restrictions
-  at 19:38 UTC: **zero positions, zero open orders**, and a valid current BTC book
-  for `cpc-btc-updown-15m-2026-10-21-1930z`.
-- Creation and locking of an empty persistent live journal passed under the same
-  filesystem restrictions. No trades were recorded.
-- Clock synchronization was confirmed, inbound firewall rules were checked, and
-  SSH password/keyboard-interactive authentication were disabled by the image.
-- The live service was loaded, inactive, and disabled. No live bot process or
-  real order submission was started during deployment.
+Read systemd status/logs, the deployed revision, the read-only account check and
+the journal before choosing to resume. An order ID with a pending reservation
+needs matching provider order/activity evidence; empty current positions and
+orders alone do not establish its outcome. Preserve the journal and evidence
+before reconciliation. Do not clear reservations or restart solely to unblock
+an update.
 
-Deployment checks do not resolve the ownership, recovery, entry timing, signal,
-and paper-validity limitations in [verification](verification.md), nor establish
-an economic edge or actual live-fill interoperability. Those remain outstanding.
+The [README](../README.md#state-and-recovery) describes ownership and recovery;
+the [API contract](polymarket-us-api.md#settlement-and-reconciliation) distinguishes
+official market outcomes from account payout evidence. A deployment or account
+check does not establish actual-fill interoperability or strategy profitability.
