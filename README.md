@@ -176,7 +176,7 @@ an assumed settlement just because a provider position disappears.
 
 A known pending order ID is read and reconciled during the next tick and on
 restart. Each lookup allows three read attempts with one- and two-second delays
-for 404, timeouts, and server errors. Continued failures preserve the pending
+for 404, 408, 409, timeouts, and server errors. Continued failures preserve the pending
 record, block new entries, and retry on later ticks. Other owned positions can
 still be managed; unknown account orders or out-of-range quantities stop trading.
 429 responses stop further requests until Retry-After (at least 30 seconds).
@@ -254,7 +254,8 @@ policy fields. Keep live and paper journals separate when comparing results.
 
 Existing `--one-trade` and `--duration SECONDS` controls still bound a run. A known
 order ID is retained through transient read failures; up to three reads retry
-that ID, with at most two 30-second waits. The duration is checked between ticks,
+that ID, with one- and two-second waits. Rate limits defer further reads to the
+runner's Retry-After gate. The duration is checked between ticks,
 so in-flight requests/readback can outlast it. An unresolved create is never
 retried. Restart with the same journal; do not delete state or start a second
 runner. A bounded run may finish with pending results that need later readback.

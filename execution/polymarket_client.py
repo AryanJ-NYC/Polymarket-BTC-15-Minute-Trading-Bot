@@ -328,7 +328,7 @@ def retryable_api_error(exc: Exception, *, missing: bool = False) -> bool:
     if isinstance(exc, (APIConnectionError, APITimeoutError)):
         return True
     status = getattr(exc, "status_code", 0) or 0
-    return status in {408, 429} or status >= 500 or (missing and status == 404)
+    return status in {408, 409, 429} or status >= 500 or (missing and status == 404)
 
 
 def api_error_summary(exc: Exception) -> str:

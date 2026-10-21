@@ -113,3 +113,9 @@
   resolution evidence for both open and legacy closed rows. The shared fixture
   uses `markets`; HTTP 429 yields immediately to the runner's global Retry-After
   gate rather than sleeping inside order reads. Integrated suite: 210 passing.
+- PR #4 review thread PRRT_kwDOVSlGns6u8a7Q: HTTP 409 is transient for
+  idempotent reads under the official SDK policy. Centralize book/read status
+  classification through retryable_api_error, including 408/409. Known-ID reads
+  remain bounded; persistent conflicts retain the journal ID across restart.
+  A create conflict still has an unknown outcome, stops with exit 2 and is never
+  replayed. HTTP-mocked regressions reproduced six read failures before the fix.

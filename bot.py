@@ -608,10 +608,7 @@ class TradingBot:
 
 
 def _unavailable_book(exc: Exception) -> bool:
-    if isinstance(exc, (ValueError, APIConnectionError, APITimeoutError)):
-        return True
-    status = getattr(exc, "status_code", 0) or 0
-    return status in {404, 429} or status >= 500
+    return isinstance(exc, ValueError) or retryable_api_error(exc, missing=True)
 
 
 ROOT = Path(__file__).resolve().parent

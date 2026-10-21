@@ -78,3 +78,21 @@ restart and existing-runner reconciliation are verified separately from the
 application patch, which remains undeployed until merge. The provider's original
 404 mechanism and its differing fee fields remain unproven; accounting is still
 based on terminal order fields and matching resolution quantities.
+
+## Latest-main integration and GitHub feedback
+
+Merged main b65d250, preserving its bankroll percentage sizing, stored exit
+settings, nullable fill accounting, and provider settlement evidence. Kept the
+recovery branch's global 429 backoff and per-position failure isolation; tests
+for the superseded local 429 sleep now assert immediate deferral to the runner.
+
+GitHub thread PRRT_kwDOVSlGns6u8a7Q (comment 4341712172) correctly identified
+missing HTTP 409 read recovery. Six added read scenarios failed before including
+409 in the shared retry classification. Ten focused cases now pass: order reads,
+account/discovery/settlement reads, another owned exit, preview rejection, durable
+restart recovery, and an unreplayed create conflict. No runtime interface widened.
+
+Integrated verification after the 409 correction: `python -m pytest -q` (220
+passed); `ruff check .`; `ruff format --check .` (42 files); `python -m compileall
+-q bot.py execution core results_report.py tests deploy`; `python -m pip check`;
+`git diff --check` all pass. No service restart or live trade was needed.

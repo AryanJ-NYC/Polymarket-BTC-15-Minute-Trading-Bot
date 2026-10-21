@@ -243,7 +243,7 @@ def test_cancel_rejects_wrong_contract_before_write(venue):
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
-@pytest.mark.parametrize("failure", [404, 500, 503, "connection", "timeout"])
+@pytest.mark.parametrize("failure", [404, 409, 500, 503, "connection", "timeout"])
 def test_known_order_recovers_from_transient_reads_without_submission(venue, monkeypatch, failure):
     requests = []
     delays = []

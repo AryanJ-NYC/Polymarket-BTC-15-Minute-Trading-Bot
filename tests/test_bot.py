@@ -43,7 +43,7 @@ def test_live_partial_fill_is_actual_quantity_not_requested(venue, journal, monk
     assert row["orders"][0]["id"] == "bot-order-1"
 
 
-@pytest.mark.parametrize("failure", [404, 503, "timeout"])
+@pytest.mark.parametrize("failure", [404, 409, 503, "timeout"])
 def test_live_order_readback_recovers_without_another_submission(
     venue, journal, monkeypatch, failure
 ):
@@ -59,16 +59,17 @@ def test_live_order_readback_recovers_without_another_submission(
     assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == 1
 
 
+@pytest.mark.parametrize("failure", [404, 409])
 @pytest.mark.parametrize("after_cancel", [False, True])
 def test_pending_order_recovers_after_restart_without_duplicate_trade(
-    venue, tmp_path, monkeypatch, after_cancel
+    venue, tmp_path, monkeypatch, after_cancel, failure
 ):
     monkeypatch.setattr(client_module, "sleep", lambda seconds: None)
     venue.order_state = "ORDER_STATE_PARTIALLY_FILLED" if after_cancel else "ORDER_STATE_FILLED"
     venue.failures[("GET", "/v1/order/bot-order-1")] = ([None] if after_cancel else []) + [
-        404,
-        404,
-        404,
+        failure,
+        failure,
+        failure,
     ]
     path = tmp_path / "restart.sqlite"
     first = TradeJournal(path)
@@ -97,13 +98,14 @@ def test_pending_order_recovers_after_restart_without_duplicate_trade(
         resumed.close()
 
 
+@pytest.mark.parametrize("failure", [409, 503])
 @pytest.mark.parametrize("path", ["/v1/account/balances", "/v1/markets"])
 def test_transient_account_or_discovery_outage_keeps_runner_alive(
-    venue, journal, monkeypatch, path
+    venue, journal, monkeypatch, path, failure
 ):
     trader = TradingBot(venue.client, journal, live=True)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book: None)
-    venue.failures[("GET", path)] = [503]
+    venue.failures[("GET", path)] = [failure]
     trader.tick()
     assert journal.records() == []
     trader.tick()
@@ -111,15 +113,16 @@ def test_transient_account_or_discovery_outage_keeps_runner_alive(
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
+@pytest.mark.parametrize("failure", [409, 503])
 def test_settlement_read_outage_preserves_position_until_confirmed(
-    venue, journal, clock, monkeypatch
+    venue, journal, clock, monkeypatch, failure
 ):
     trader = TradingBot(venue.client, journal)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
     trader.tick()
     clock.current += timedelta(minutes=3)
     venue.settlement = 0
-    venue.failures[("GET", f"/v1/markets/{venue.market['slug']}/settlement")] = [503]
+    venue.failures[("GET", f"/v1/markets/{venue.market['slug']}/settlement")] = [failure]
     venue.client.discover_market = lambda: None
     trader.tick()
     assert journal.records()[0]["state"] == "open"
@@ -158,7 +161,8 @@ def test_pending_order_does_not_block_management_of_other_owned_position(
     assert creates[0]["intent"] == "ORDER_INTENT_SELL_LONG"
 
 
-def test_one_position_read_outage_does_not_skip_other_position_exit(venue, journal):
+@pytest.mark.parametrize("failure", [409, 503])
+def test_one_position_read_outage_does_not_skip_other_position_exit(venue, journal, failure):
     market = parse_market(venue.market)
     book = venue.client.book(market)
     for slug, cost in [(market.slug, "0.65"), ("other-btc-contract", "0.95")]:
@@ -169,14 +173,14 @@ def test_one_position_read_outage_does_not_skip_other_position_exit(venue, journ
         journal.finish_order(slug, Decimal("1"), Decimal(cost), Decimal("0.01"))
         venue.positions[slug] = {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}
     venue.fill_price = "0.63"
-    venue.failures[("GET", f"/v1/market/slug/{market.slug}")] = [503]
+    venue.failures[("GET", f"/v1/market/slug/{market.slug}")] = [failure]
     trader = TradingBot(venue.client, journal, live=True)
     trader.tick()
     assert Decimal(journal.get("other-btc-contract")["quantity"]) == Decimal("0.5")
     assert Decimal(journal.get(market.slug)["quantity"]) == Decimal("1")
 
 
-@pytest.mark.parametrize("failure", ["mismatch", 503, 429])
+@pytest.mark.parametrize("failure", ["mismatch", 409, 503, 429])
 def test_failed_preview_releases_reservation_without_creating_order(
     venue, journal, monkeypatch, failure
 ):
@@ -197,7 +201,9 @@ def test_failed_preview_releases_reservation_without_creating_order(
     assert len(journal.records()) == 1
 
 
-@pytest.mark.parametrize("reason", ["unknown_submission", "manual_position", "authentication"])
+@pytest.mark.parametrize(
+    "reason", ["unknown_submission", "create_conflict", "manual_position", "authentication"]
+)
 def test_cli_safety_stop_does_not_request_automatic_restart(venue, tmp_path, monkeypatch, reason):
     monkeypatch.setattr(bot.PolymarketClient, "connect", lambda path: venue.client)
     monkeypatch.setattr(bot, "ROOT", tmp_path)
@@ -205,13 +211,15 @@ def test_cli_safety_stop_does_not_request_automatic_restart(venue, tmp_path, mon
     monkeypatch.setattr("sys.argv", ["bot.py", "--live", "--once"])
     if reason == "unknown_submission":
         venue.fail_create = True
+    elif reason == "create_conflict":
+        venue.failures[("POST", "/v1/orders")] = [409]
     elif reason == "manual_position":
         venue.positions = {"manual": {"netPositionDecimal": "1"}}
     else:
         venue.failures[("GET", "/v1/account/balances")] = [401]
     assert bot.main() == 2
     assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == int(
-        reason == "unknown_submission"
+        reason in {"unknown_submission", "create_conflict"}
     )
 
 
