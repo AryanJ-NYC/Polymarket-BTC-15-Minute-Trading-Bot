@@ -28,10 +28,19 @@ def test_skipped_contract_gets_official_outcome_without_trade(venue, tmp_path, c
         trader = TradingBot(venue.client, journal)
         trader.tick()
         assert journal.records() == []
-        clock.current += timedelta(minutes=3)
-        elapsed[0] += 180
-        venue.settlement = 0
-        assert journal.pending_contracts() == [venue.market["slug"]]
+        old_slug = venue.market["slug"]
+        next_late_window(venue, clock)
+        elapsed[0] += 960
+        original = venue.handle
+
+        def settled_contract(request):
+            if request.url.path == f"/v1/markets/{old_slug}/settlement":
+                return httpx.Response(200, json={"slug": old_slug, "settlement": 0})
+            return original(request)
+
+        venue.sdk._http.close()
+        venue.sdk._http = httpx.Client(transport=httpx.MockTransport(settled_contract))
+        assert journal.pending_contracts() == [old_slug]
         trader.tick()
         assert journal.pending_contracts() == []
         assert journal.records() == []
@@ -299,7 +308,7 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
                 end=market.end - timedelta(minutes=15),
             )
             journal.record_opportunity(old, replace(book, slug=old.slug), "no_signal")
-        clock.current -= timedelta(seconds=70)
+        clock.current = market.start + timedelta(minutes=14, seconds=10)
         venue.timestamp = clock.current.isoformat()
         original = venue.handle
         requests = []
@@ -320,7 +329,8 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
         trader = TradingBot(venue.client, journal)
         for _ in range(12):
             trader.tick()
-            elapsed[0] += 31
+            next_late_window(venue, clock)
+            elapsed[0] += 900
         assert "history-10" in requests
         assert requests[:11] == [f"history-{i:02}" for i in range(11)]
         assert journal.pending_contracts(after_slug="history-09") == []
@@ -349,6 +359,101 @@ def test_model_uses_refreshed_bankroll_and_buying_power(
         assert row["settings"]["max_exposure_fraction"] == "0.10"
         assert row["settings"]["daily_loss_fraction"] == "0.10"
         assert "budget_usd" not in row["settings"]
+    finally:
+        journal.close()
+
+
+def test_optional_history_cannot_rate_limit_current_warmup_or_entry(venue, tmp_path, clock):
+    journal = TradeJournal(tmp_path / "history-warmup.sqlite")
+    try:
+        market = parse_market(venue.market)
+        book = venue.client.book(market)
+        old = replace(
+            market,
+            slug="old-rate-limited",
+            start=market.start - timedelta(minutes=15),
+            end=market.end - timedelta(minutes=15),
+        )
+        journal.record_opportunity(old, replace(book, slug=old.slug), "no_signal")
+        original = venue.handle
+        history_requests = []
+
+        def rate_limited_history(request):
+            if request.url.path == f"/v1/markets/{old.slug}/settlement":
+                history_requests.append(request.url.path)
+                return httpx.Response(429, headers={"Retry-After": "300"})
+            return original(request)
+
+        venue.sdk._http.close()
+        venue.sdk._http = httpx.Client(transport=httpx.MockTransport(rate_limited_history))
+        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.8))
+        warm_up(trader, venue, clock)
+        trader.tick()
+        assert history_requests == []
+        assert journal.get(market.slug)["state"] == "open"
+        assert any(m == "POST" and p == "/v1/orders" for m, p, _ in venue.calls)
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("header_kind", ["seconds", "http-date"])
+def test_post_entry_history_still_honors_shared_retry_after(
+    venue, tmp_path, clock, monkeypatch, header_kind
+):
+    from email.utils import format_datetime
+
+    journal = TradeJournal(tmp_path / "history-backoff.sqlite")
+    try:
+        market = parse_market(venue.market)
+        book = venue.client.book(market)
+        old = replace(
+            market,
+            slug="old-throttled",
+            start=market.start - timedelta(minutes=15),
+            end=market.end - timedelta(minutes=15),
+        )
+        journal.record_opportunity(old, replace(book, slug=old.slug), "no_signal")
+        clock.current = market.start + timedelta(minutes=14, seconds=10)
+        venue.timestamp = clock.current.isoformat()
+        header = (
+            "300"
+            if header_kind == "seconds"
+            else format_datetime(clock.current + timedelta(seconds=300))
+        )
+        original = venue.handle
+        history_requests = []
+
+        def throttled_history(request):
+            if request.url.path == f"/v1/markets/{old.slug}/settlement":
+                history_requests.append(request.url.path)
+                return httpx.Response(429, headers={"Retry-After": header})
+            return original(request)
+
+        venue.sdk._http.close()
+        venue.sdk._http = httpx.Client(transport=httpx.MockTransport(throttled_history))
+        elapsed = [100.0]
+        monkeypatch.setattr(bot.time, "monotonic", lambda: elapsed[0])
+        trader = TradingBot(venue.client, journal)
+        trader.tick()
+        assert len(history_requests) == 1
+        calls_after_429 = len(venue.calls)
+        clock.current += timedelta(seconds=299)
+        elapsed[0] += 299
+        trader.tick()
+        assert len(venue.calls) == calls_after_429
+        assert len(history_requests) == 1
+
+        clock.current += timedelta(seconds=2)
+        elapsed[0] += 2
+        venue.market["slug"] = "current-after-backoff"
+        venue.market["assetPriceTerms"].update(
+            windowStart=market.end.isoformat(),
+            windowEnd=(market.end + timedelta(minutes=15)).isoformat(),
+        )
+        venue.timestamp = clock.current.isoformat()
+        trader.tick()
+        assert venue.calls[-1][1] == "/v1/markets/current-after-backoff/book"
+        assert len(history_requests) == 1
     finally:
         journal.close()
 
@@ -384,4 +489,15 @@ def warm_up(trader, venue, clock):
         venue.timestamp = clock.current.isoformat()
         trader.tick()
         clock.current += timedelta(seconds=3)
+    venue.timestamp = clock.current.isoformat()
+
+
+def next_late_window(venue, clock):
+    market = parse_market(venue.market)
+    clock.current = market.end + timedelta(minutes=14, seconds=10)
+    venue.market["slug"] = "next-" + market.end.strftime("%Y%m%d%H%M")
+    venue.market["assetPriceTerms"].update(
+        windowStart=market.end.isoformat(),
+        windowEnd=(market.end + timedelta(minutes=15)).isoformat(),
+    )
     venue.timestamp = clock.current.isoformat()

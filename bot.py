@@ -233,8 +233,13 @@ class TradingBot:
                     self.market.slug,
                     self.market.end.strftime("%H:%M:%S"),
                 )
-        if (self.market is None or not self._in_entry_window()) and not any(
-            row["state"] == "open" for row in self.journal.records()
+        # Optional REST history shares the provider's rate limit. Leave the
+        # current contract's warmup and entry period free of historical reads.
+        if (
+            self.market is not None
+            and (datetime.now(timezone.utc) - self.market.start).total_seconds()
+            >= self.settings["entry_end_seconds"]
+            and not any(row["state"] == "open" for row in self.journal.records())
         ):
             self._capture_outcomes()
             if time.monotonic() < self.next_data_attempt:

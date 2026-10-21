@@ -114,3 +114,10 @@
   budget; retain cutoff clipping and model decision settings. Legacy $1 arithmetic
   fixtures explicitly use $50 bankroll. Combined suite:250 passed, plus Ruff,
   compileall and pip consistency. No live service/provider writes.
+- PR #14 review thread4342051376: optional historical settlement reads now start
+  only after minute14 on a known current contract while flat. Keep all warmup
+  and entry sampling free of optional history requests. Official US REST limits
+  are shared across endpoints, so preserve shared429/Retry-After handling rather
+  than isolate it by endpoint. A genuinely long backoff can still span later
+  windows. Regression reproduced a300s historical429 preventing warmup/entry;
+  scheduling fix, numeric/date backoff and rollover tests pass. Full suite:253.

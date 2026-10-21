@@ -127,3 +127,25 @@ at their explicitly configured $50 bankroll. Added model transport regressions
 verify refreshed bankroll and buying-power limits. Combined suite:250 passed;
 Ruff lint/format, compileall, pip check and whitespace pass. Earlier live snapshots
 and QA counts above are historical evidence, not new deployed verification.
+
+## PR review follow-up
+
+Addressed [review thread4342051376](https://github.com/AryanJ-NYC/Polymarket-BTC-15-Minute-Trading-Bot/pull/14#discussion_r4342051376).
+Optional historical reads now begin only after the current contract's minute14
+entry cutoff and only while flat. They do not start during that contract's
+warmup/entry, or when the current contract is unknown. The existing cursor and
+one-request/30-second cadence remain. Labels can wait for a later post-entry
+window.
+
+The [official API limit](https://docs.polymarket.us/api-reference/rate-limits)
+is shared across REST endpoints, so shared429 backoff remains. A genuinely long
+Retry-After from an earlier window can still span a future window; the fix does
+not bypass provider throttling. A failing300-second historical429 regression
+now warms20 distinct snapshots and completes the fake model entry. Numeric and
+HTTP-date header regressions verify no requests before expiry and current-book
+resumption afterward. Rollover fixtures preserve skipped-label capture and fair
+rotation across successive late windows.
+
+Full suite:253 passed. Ruff lint/format, compileall, pip consistency and whitespace
+pass; independent source review has no remaining findings. No provider, journal
+or live-service writes were performed. The live QA limitation above remains.

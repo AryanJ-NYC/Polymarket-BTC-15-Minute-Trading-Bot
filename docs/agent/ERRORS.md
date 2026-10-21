@@ -63,3 +63,10 @@
   exits under settlement429 and an unreachable eleventh resolved contract. Move
   optional reads after management, defer while open/in entry, request one per
   pass, and rotate the pending cursor even on missing results/errors.
+- PR #14 review caught historical429 shortly before entry suppressing all current
+  book sampling through shared next_data_attempt. A failing transport/clock case
+  reproduced the loss of warmup and model entry. Schedule optional reads only
+  after the current entry cutoff, while flat. Do not isolate backoff by REST
+  endpoint: official limits share the IP bucket. Preserve numeric/date Retry-After
+  and test resumption after expiry; delayed labels are preferable to optional
+  history reads during warmup/entry.
