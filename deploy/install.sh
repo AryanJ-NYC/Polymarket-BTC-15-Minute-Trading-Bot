@@ -8,6 +8,23 @@ source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 base=/opt/polymarket-us
 test -f "$base/app/REVISION"
 
+# Validate the selected model as the runtime user before changing installed units.
+# Fitting/selection is explicit; deployment never invents or silently replaces it.
+model_release="$base/current"
+if [ ! -e "$model_release" ]; then
+  model_release="$base/app"
+fi
+(
+  cd "$model_release"
+  runuser -u polymarket-us -- env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python - <<'PY'
+from pathlib import Path
+from probability_model import load_model
+
+model = load_model(Path("/var/lib/polymarket-us/model.json"))
+print(f"Selected deployment model: {model.tag}")
+PY
+)
+
 if ! getent passwd polymarket-build >/dev/null; then
   useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin polymarket-build
 fi

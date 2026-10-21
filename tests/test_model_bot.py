@@ -16,8 +16,8 @@ from probability_model import load_model
 
 @pytest.fixture(autouse=True)
 def fixed_bankroll(venue):
-    # The arithmetic fixtures use a $1 budget: 2% of a $50 cash bankroll.
-    venue.balance.update(currentBalance=50.0, buyingPower=50.0)
+    # The arithmetic fixtures use a $1 budget: 4% of a $25 cash bankroll.
+    venue.balance.update(currentBalance=25.0, buyingPower=25.0)
 
 
 def test_skipped_contract_gets_official_outcome_without_trade(
@@ -83,9 +83,11 @@ def test_model_enters_up_with_fee_bound_and_records_actual_partial_fill(
         (0.51, 100, "1", "0.50"),
         (0.52, 100, "2", "1"),
         (0.54, 100, "4", "2"),
-        (0.8, 100, "4", "2"),
+        (0.58, 100, "8", "4"),
+        (0.8, 100, "8", "4"),
         (0.52, 250, "5", "2.50"),
         (0.54, 250, "10", "5"),
+        (0.58, 250, "20", "10"),
     ],
 )
 @pytest.mark.parametrize("outcome", ["up", "down"])
@@ -118,14 +120,14 @@ def test_model_sizes_from_quarter_kelly_instead_of_fixed_bankroll_target(
         sizing = row["settings"]["prediction"]["candidates"][outcome]
         assert Decimal(sizing["target_usd"]) == pytest.approx(Decimal(target))
         assert Decimal(sizing["planned_spending"]) <= Decimal(sizing["target_usd"])
-        assert row["settings"]["sizing_policy"] == "quarter-kelly-v1"
+        assert row["settings"]["sizing_policy"] == "quarter-kelly-v2"
         assert row["settings"]["exit_policy"] == "settlement"
     finally:
         with_journal.close()
 
 
 @pytest.mark.parametrize("q", [Decimal("0"), Decimal("1")])
-def test_certain_model_probability_still_obeys_two_percent_cap(
+def test_certain_model_probability_still_obeys_four_percent_cap(
     venue, journal, tmp_path, clock, monkeypatch, books, stream_feed, q
 ):
     trader = TradingBot(venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8))
@@ -134,7 +136,7 @@ def test_certain_model_probability_still_obeys_two_percent_cap(
     trader.tick()
     row = journal.records()[0]
     sizing = row["settings"]["prediction"]["candidates"][row["outcome"]]
-    assert Decimal(sizing["entry_fraction"]) == Decimal("0.02")
+    assert Decimal(sizing["entry_fraction"]) == Decimal("0.04")
     assert Decimal(sizing["planned_spending"]) <= Decimal("0.99")
 
 
@@ -215,6 +217,7 @@ def test_kelly_pending_partial_fill_recovers_after_restart_without_second_create
 def test_kelly_budget_respects_remaining_daily_loss_room(
     venue, journal, tmp_path, clock, books, stream_feed
 ):
+    venue.balance.update(currentBalance=50.0, buyingPower=50.0)
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
     journal.reserve_entry(replace(plan, slug="earlier-loss"), market.end)
@@ -577,7 +580,7 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
         journal.close()
 
 
-@pytest.mark.parametrize("buying_power,expected_quantity", [(500.0, "14.96"), (0.4, "0.58")])
+@pytest.mark.parametrize("buying_power,expected_quantity", [(500.0, "29.95"), (0.4, "0.58")])
 def test_model_uses_refreshed_bankroll_and_buying_power(
     venue, tmp_path, clock, buying_power, expected_quantity, books, stream_feed
 ):
@@ -595,7 +598,7 @@ def test_model_uses_refreshed_bankroll_and_buying_power(
         row = journal.records()[0]
         candidate = row["settings"]["prediction"]["candidates"]["up"]
         assert Decimal(candidate["quantity"]) == Decimal(expected_quantity)
-        assert row["settings"]["entry_bankroll_fraction"] == "0.02"
+        assert row["settings"]["entry_bankroll_fraction"] == "0.04"
         assert row["settings"]["max_exposure_fraction"] == "0.10"
         assert row["settings"]["daily_loss_fraction"] == "0.10"
         assert "budget_usd" not in row["settings"]

@@ -197,7 +197,11 @@ def test_report_separates_kelly_from_same_model_and_shows_planned_and_actual(ven
         "sizing_policy": "quarter-kelly-v1",
         "prediction": {"candidates": {"up": {"planned_spending": "0.98"}}},
     }
-    for slug, settings in [("legacy", legacy), ("kelly", kelly)]:
+    for slug, settings in [
+        ("legacy", legacy),
+        ("kelly-2pct", kelly),
+        ("kelly-4pct", {**kelly, "sizing_policy": "quarter-kelly-v2"}),
+    ]:
         journal.reserve_entry(replace(plan, slug=slug), market.end, settings=settings)
         journal.finish_order(slug, Decimal("0.5"), Decimal("0.32"), Decimal("0.01"))
     before = journal.records()
@@ -210,7 +214,11 @@ def test_report_separates_kelly_from_same_model_and_shows_planned_and_actual(ven
     result = json.loads(
         subprocess.run([*command, "--json"], capture_output=True, text=True, check=True).stdout
     )
-    assert set(result["by_policy"]) == {"same-model", "same-model/quarter-kelly-v1"}
+    assert set(result["by_policy"]) == {
+        "same-model",
+        "same-model/quarter-kelly-v1",
+        "same-model/quarter-kelly-v2",
+    }
     report = subprocess.run(command, capture_output=True, text=True, check=True).stdout
     assert "planned spend: $0.98 | filled cost: $0.33" in report
     assert journal.records() == before

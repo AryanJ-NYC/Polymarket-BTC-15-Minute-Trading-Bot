@@ -81,10 +81,17 @@ def test_entry_budget_clamps_at_funded_ten_percent_exposure(venue, journal, fund
         journal.risk_check(Decimal(room) + Decimal("0.01"), Decimal("20"))
 
 
-def test_risk_check_enforces_entry_target_even_with_large_available_exposure(journal):
-    journal.risk_check(Decimal("2"), Decimal("100"))
-    with pytest.raises(ValueError, match="2%"):
-        journal.risk_check(Decimal("2.01"), Decimal("100"))
+@pytest.mark.parametrize("fraction,limit", [("0.02", "2"), ("0.04", "4")])
+def test_risk_check_enforces_entry_target_even_with_large_available_exposure(
+    journal, fraction, limit
+):
+    journal.risk_check(Decimal(limit), Decimal("100"), entry_fraction=Decimal(fraction))
+    with pytest.raises(ValueError, match=f"{limit}%"):
+        journal.risk_check(
+            Decimal(limit) + Decimal("0.01"),
+            Decimal("100"),
+            entry_fraction=Decimal(fraction),
+        )
 
 
 def test_daily_guard_keeps_full_original_cost_reserved_after_partial_exit(venue, journal):

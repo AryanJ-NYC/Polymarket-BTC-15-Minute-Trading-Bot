@@ -16,6 +16,7 @@ The [installer](../deploy/install.sh) is bound to Droplet ID `611323289`.
 | Application | `/opt/polymarket-us/current` symlink |
 | Credentials | `/etc/polymarket-us/.env.us` |
 | Persistent state | `/var/lib/polymarket-us`; application `logs/` points here |
+| Selected probability model | `/var/lib/polymarket-us/model.json`, explicitly fitted and retained across releases |
 | Trading service | `polymarket-us.service`, user `polymarket-us`, `Restart=on-failure`, 10-second delay |
 | Update controller | `/usr/local/lib/polymarket-us/update.py` |
 | Update timer | `polymarket-update.timer` |
@@ -42,11 +43,17 @@ ssh -i ~/.ssh/polymarket_us_digitalocean \
 
 The following commands are for the user to run on the Droplet. Starting this
 service enables **real-money orders**, subject to the bot's existing limits:
-at most 2% of current account bankroll including the fee reserve per entry,
+at most 4% of current account bankroll including the fee reserve per model entry,
 five open positions, 10% aggregate funded exposure, and its own daily loss budget
 of 10% of current bankroll. The daily/count guards may impose tighter limits.
 The budget is not an account-wide guarantee. Check the trading service itself;
 an active Droplet does not establish that trading is running.
+
+The repository's service command selects `--model /var/lib/polymarket-us/model.json`.
+Model entries use quarter Kelly and hold to official settlement. Older installed
+units without `--model` continue to use the baseline 2% target and price exits;
+merging an application change does not replace an installed unit. Inspect
+`systemctl show polymarket-us -p ExecStart` to establish the selected strategy.
 
 ```bash
 systemctl start polymarket-us
@@ -91,6 +98,30 @@ unprivileged service user, restricts writes to the state directory, keeps the
 credentials outside the code tree, and sends logs to the system journal. The
 firewall allows inbound SSH only; the bot needs no public HTTP endpoint.
 
+## Select the probability model
+
+Use the existing [fitting CLI](../README.md#probability-model-experiment) on a
+consistent snapshot of the live journal, on a machine with `requirements-model.txt`
+installed. It requires at least 20 earlier training contracts with both official
+outcomes and five later evaluation contracts. A failed fit leaves the output
+untouched. Keep collecting observations with the existing baseline when there is
+not enough data; do not install a unit pointing to a missing or synthetic model.
+Fitting does not establish that the model outperforms the baseline.
+
+Copy the selected JSON to `/var/lib/polymarket-us/model.json` and make it readable
+by `polymarket-us`. This persistent path keeps the exact model across application
+releases. The deployment installer validates it as that user before changing any
+installed units. Missing, unreadable or invalid artifacts abort installation;
+there is no automatic fitting, model replacement or baseline fallback.
+
+After the 4%-cap application revision is deployed and the model is present,
+pause the update timer as described below, wait for any update to finish and for
+the journal/account to be flat, then install the reviewed deployment files with
+`deploy/install.sh`. The installer reloads the unit and enables the timer but
+does not restart trading. Restart the trading service outside its entry window
+to apply the command, then inspect its process arguments and logs. Until that
+restart, an existing baseline process retains its original arguments.
+
 ## Automatic updates
 
 The root-owned `polymarket-update.timer` checks `main` every five minutes. For each
@@ -98,6 +129,7 @@ new commit it requires a successful **push** run of this repository's `ci.yml`
 workflow for that exact main SHA. Pull-request checks alone do not deploy it.
 There is no approval environment, deploy button, webhook, or GitHub SSH secret.
 The public source and public CI status need no GitHub token.
+GitHub Actions runs CI only; the systemd unit on this Droplet owns `--model`.
 
 A deployment waits for all of the following:
 

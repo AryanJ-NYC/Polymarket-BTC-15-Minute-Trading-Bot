@@ -88,7 +88,7 @@ def test_risk_rejection_is_captured_without_new_reservation(
     trader = TradingBot(venue.client, journal, books)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
 
-    def reject(cost, bankroll):
+    def reject(cost, bankroll, *, entry_fraction):
         raise ValueError("Daily loss budget")
 
     monkeypatch.setattr(journal, "risk_check", reject)

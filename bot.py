@@ -35,6 +35,7 @@ from execution.polymarket_client import (
 from execution.risk import (
     DAILY_LOSS_FRACTION,
     ENTRY_BANKROLL_FRACTION,
+    KELLY_MAX_BANKROLL_FRACTION,
     KELLY_MULTIPLIER,
     MAX_EXPOSURE_FRACTION,
     kelly_fraction,
@@ -216,7 +217,8 @@ class TradingBot:
         if model is not None:
             self.settings.update(
                 policy_version="btc-15m-logistic-kelly-v1",
-                sizing_policy="quarter-kelly-v1",
+                sizing_policy="quarter-kelly-v2",
+                entry_bankroll_fraction=str(KELLY_MAX_BANKROLL_FRACTION),
                 kelly_multiplier=str(KELLY_MULTIPLIER),
                 exit_policy="settlement",
                 model_tag=model.tag,
@@ -449,7 +451,10 @@ class TradingBot:
                 )
             return None, settings
         try:
-            budget, reason = self.journal.entry_budget(account.bankroll, account.buying_power)
+            entry_fraction = number(self.settings["entry_bankroll_fraction"])
+            budget, reason = self.journal.entry_budget(
+                account.bankroll, account.buying_power, entry_fraction=entry_fraction
+            )
         except (ValueError, RuntimeError) as exc:
             logger.info("Entry skipped: {}", exc)
             if capture:
@@ -461,7 +466,7 @@ class TradingBot:
             "Entry ceiling | bankroll=${} | maximum target=${} | budget=${} | exposure=${} | "
             "buying power=${} | limit={}",
             account.bankroll,
-            account.bankroll * ENTRY_BANKROLL_FRACTION,
+            account.bankroll * entry_fraction,
             budget,
             self.journal.exposure(),
             account.buying_power,
@@ -513,7 +518,7 @@ class TradingBot:
                 )
             return None, settings
         try:
-            self.journal.risk_check(plan.budget, account.bankroll)
+            self.journal.risk_check(plan.budget, account.bankroll, entry_fraction=entry_fraction)
         except (ValueError, RuntimeError):
             if capture:
                 self.journal.record_opportunity(

@@ -103,7 +103,8 @@ Temporary read failures retain known order IDs and recover automatically.
   is `1 - YES bid`; Up entry cost is `YES ask`. Prices must match the market tick.
 - Uses limit IOC orders at visible best prices, with fractional quantities
   rounded down to the market increment and visible depth. **Targets at most 2%
-  of current account bankroll per entry, including a conservative fee reserve,
+  of current account bankroll for baseline entries and 4% for model entries,
+  including a conservative fee reserve,
   with 10% aggregate funded exposure.** Never increases spend to meet minimum
   quantity. Maximum five open positions.
 - Rechecks eligible book generation, executable price/depth, freshness, and entry
@@ -132,8 +133,9 @@ Temporary read failures retain known order IDs and recover automatically.
 
 ### Bankroll sizing
 
-The shared Decimal fractions in `execution/risk.py` are `0.02` (2% per entry),
-`0.10` (10% aggregate exposure), and `0.10` (10% daily loss budget).
+The shared Decimal fractions in `execution/risk.py` are `0.02` (2% baseline entry target),
+`0.04` (4% model entry ceiling), `0.10` (10% aggregate exposure), and `0.10`
+(10% daily loss budget).
 All amounts below are USD:
 
 ```text
@@ -142,7 +144,8 @@ exposure = sum(entry cost including fees * remaining quantity / filled entry qua
            + still-unaccounted BUY reservations
 daily loss budget remaining = 0.10 * bankroll - realized losses today (UTC)
                               - original full entry cost of open trades
-entry budget = max(0, min(0.02 * bankroll, buyingPower,
+entry ceiling = 0.02 for baseline; 0.04 for model
+entry budget = max(0, min(entry ceiling * bankroll, buyingPower,
                           0.10 * bankroll - exposure, daily loss budget remaining))
 ```
 
@@ -165,7 +168,7 @@ or nonzero holdings awaiting settlement make bankroll unavailable and skip entry
 Zero equity or exhausted exposure room also skips entry. Existing position exits
 continue under their usual rules; a percentage breach does not force liquidation.
 
-$100 bankroll targets $2 with a $10 daily loss budget; $500 targets $10 with a
+Baseline at $100 bankroll targets $2 with a $10 daily loss budget; $500 targets $10 with a
 $50 daily loss budget, before tighter limits. The five-open-position guard and
 remaining exposure/daily capacity can limit entries further. The daily percentage
 uses the same current account snapshot as entry and exposure sizing, rather than
@@ -346,7 +349,8 @@ both `Q*(q - YES ask) - F` for Up and `Q*(YES bid - q) - F` for Down. F is the
 existing conservative rounded fee bound, counted once. `--extra-cost-usd` may
 subtract one additional nonnegative modeled dollar cost per entry. Only a
 strictly positive result may enter. Both policies use the current bankroll
-limits: at most 2% per entry, 10% funded exposure and 10% daily loss budget, with
+limits: at most 2% per baseline entry or 4% per model entry, 10% funded exposure
+and 10% daily loss budget, with
 existing depth and five-position checks. Slow account reads and order
 preview cannot extend the minute-14 cutoff.
 
@@ -371,7 +375,7 @@ executable outcome price (YES ask for Up, `1 - YES bid` for Down):
 ```text
 c = outcome price + market feeCoefficient / 4
 full Kelly = max(0, (q - c) / (1 - c))       # 0 < c < 1
-entry fraction = min(0.02, 0.25 * full Kelly)
+entry fraction = min(0.04, 0.25 * full Kelly)
 target = current authenticated bankroll * entry fraction
 exchange budget = max(0, min(target, affordable risk budget)
                          - modeled extra cost - fee rounding allowance)
@@ -386,16 +390,17 @@ nonpositive edge, invalid probability, and below-minimum budgets skip entry.
 No minimum order is funded by increasing the budget.
 
 With zero fees and a $0.50 outcome price, q=.50 yields no bet, q=.52 targets
-1% of bankroll, and q=.54 reaches the 2% ceiling. Those targets are $1/$2 at
-$100 bankroll and $2.50/$5 at $250. Fees, modeled extra costs, buying power,
+1% of bankroll, q=.54 targets 2%, and q=.58 reaches the 4% ceiling. Those
+targets are $1/$2/$4 at $100 bankroll and $2.50/$5/$10 at $250. Fees, modeled extra costs, buying power,
 10% exposure/daily limits, five positions, depth and increments can reduce them.
 Current account refreshes determine bankroll; preflight and post-preview checks
 reject orders whose refreshed probability no longer supports the planned stake.
 
-Saved settings identify `quarter-kelly-v1`, the .25 multiplier and settlement
+Saved settings identify `quarter-kelly-v2`, the 4% ceiling, .25 multiplier and settlement
 exit policy. Each candidate records its probability, conservative unit cost,
 bankroll-derived target, fraction, affordable budget, rounding reserve, limiting
 guard and planned spending. Actual partial fills remain accounted separately.
+Reporting keeps the prior 2%-cap `quarter-kelly-v1` cohort separate.
 
 Quarter Kelly is an experimental risk choice. The formula is a linear-cost
 approximation with a separate rounding reserve, not exact discrete log-utility

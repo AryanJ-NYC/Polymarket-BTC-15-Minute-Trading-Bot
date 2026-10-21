@@ -318,7 +318,13 @@ class TradeJournal:
                 exposure += pending_plan(row).budget
         return exposure
 
-    def entry_budget(self, bankroll: Decimal, buying_power: Decimal) -> tuple[Decimal, str]:
+    def entry_budget(
+        self,
+        bankroll: Decimal,
+        buying_power: Decimal,
+        *,
+        entry_fraction: Decimal = ENTRY_BANKROLL_FRACTION,
+    ) -> tuple[Decimal, str]:
         """Return affordable entry cost and the guard that limits it."""
         if (
             not bankroll.is_finite()
@@ -327,6 +333,8 @@ class TradeJournal:
             or buying_power < 0
         ):
             raise ValueError("Bankroll and buying power must be finite and nonnegative")
+        if not entry_fraction.is_finite() or not 0 < entry_fraction <= 1:
+            raise ValueError("Entry fraction must be finite and between zero and one")
         rows = self.records()
         if any(row["pending"] for row in rows):
             raise RuntimeError("An order is unresolved; reconcile it before any further trading")
@@ -336,8 +344,8 @@ class TradeJournal:
             return Decimal("0"), "5 open-position limit"
         budget, reason = min(
             (
-                bankroll * ENTRY_BANKROLL_FRACTION,
-                f"{ENTRY_BANKROLL_FRACTION.normalize():%} entry target",
+                bankroll * entry_fraction,
+                f"{entry_fraction.normalize():%} entry target",
             ),
             (buying_power, "buying power"),
             (
@@ -352,7 +360,13 @@ class TradeJournal:
         )
         return max(Decimal("0"), budget), reason
 
-    def risk_check(self, additional_cost: Decimal, bankroll: Decimal) -> None:
+    def risk_check(
+        self,
+        additional_cost: Decimal,
+        bankroll: Decimal,
+        *,
+        entry_fraction: Decimal = ENTRY_BANKROLL_FRACTION,
+    ) -> None:
         """Recheck a planned cost against bankroll and journal risk guards."""
         if (
             not additional_cost.is_finite()
@@ -361,7 +375,7 @@ class TradeJournal:
             or bankroll <= 0
         ):
             raise ValueError("Planned cost and bankroll must be finite and positive")
-        budget, reason = self.entry_budget(bankroll, additional_cost)
+        budget, reason = self.entry_budget(bankroll, additional_cost, entry_fraction=entry_fraction)
         if additional_cost > budget:
             raise ValueError(f"{reason} is exhausted or already at risk")
 

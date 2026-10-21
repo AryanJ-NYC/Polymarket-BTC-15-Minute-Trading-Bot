@@ -9,7 +9,7 @@ Type=simple
 User=polymarket-us
 Group=polymarket-us
 WorkingDirectory=/opt/polymarket-us/current
-ExecStart=/opt/polymarket-us/current/.venv/bin/python /opt/polymarket-us/current/bot.py --live --env-file /etc/polymarket-us/.env.us
+ExecStart=/opt/polymarket-us/current/.venv/bin/python /opt/polymarket-us/current/bot.py --live --env-file /etc/polymarket-us/.env.us --model /var/lib/polymarket-us/model.json
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
