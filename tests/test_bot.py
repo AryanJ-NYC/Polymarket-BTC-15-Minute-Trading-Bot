@@ -109,6 +109,118 @@ def test_realistic_stop_loss_uses_bid_and_fees(venue, journal, books):
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
+@pytest.mark.parametrize("outcome", ["up", "down"])
+@pytest.mark.parametrize("depth,top_quantity", [("0.99", "0.01"), ("0", "0.01"), ("0", "0.001")])
+def test_tiny_favorable_bid_does_not_make_the_whole_holding_profitable(
+    venue, journal, books, stream_feed, outcome, depth, top_quantity
+):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, books.book(market), outcome, Decimal("1"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("1"), Decimal("0.65"), Decimal("0.01"))
+    levels = [
+        {"px": {"value": price, "currency": "USD"}, "qty": quantity}
+        for price, quantity in (
+            [("0.90", top_quantity), ("0.63", depth)]
+            if outcome == "up"
+            else [("0.10", top_quantity), ("0.37", depth)]
+        )
+    ]
+    if outcome == "up":
+        stream_feed.publish(
+            bids=levels,
+            offers=[{"px": {"value": "0.92", "currency": "USD"}, "qty": "10"}],
+        )
+    else:
+        stream_feed.publish(
+            bids=[{"px": {"value": "0.08", "currency": "USD"}, "qty": "10"}],
+            offers=levels,
+        )
+
+    messages = []
+    sink = bot.logger.add(messages.append, format="{message}")
+    try:
+        TradingBot(venue.client, journal, books, one_trade=True).tick()
+    finally:
+        bot.logger.remove(sink)
+
+    # Full depth: $0.009 + $0.6237 - $0.02 fees = $0.6127, below $0.792 TP.
+    # Without deeper bids, only $0.009 is quoted; 0.99 shares remain unpriced.
+    row = journal.get(market.slug)
+    assert row["quantity"] == "1"
+    assert row["proceeds"] == "0"
+    assert len(row["orders"]) == 1
+    log = "".join(messages)
+    if depth == "0.99":
+        assert "sellable 1.00 | remainder 0.00 | net $0.6127" in log
+        assert "position return -7.17%" in log
+    elif top_quantity == "0.01":
+        assert "sellable 0.01 | remainder 0.99 | net $0.0090" in log
+        assert "slice (remainder unpriced) return 36.36%" in log
+    else:
+        assert "sellable 0 | remainder 1 | net $0.0000" in log
+        assert "position return" not in log
+
+
+@pytest.mark.parametrize("outcome", ["up", "down"])
+@pytest.mark.parametrize(
+    "best_price,depth_price,depth_quantity",
+    [("0.90", "0.40", "0.90"), ("0.90", "0.85", "0.90"), ("0.40", "0.30", "0")],
+)
+def test_depth_exit_keeps_top_level_ioc_and_accounts_only_actual_fill(
+    venue, journal, books, stream_feed, outcome, best_price, depth_price, depth_quantity
+):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, books.book(market), outcome, Decimal("1"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("1"), Decimal("0.65"), Decimal("0.01"))
+    venue.positions = {
+        market.slug: {
+            "netPositionDecimal": "1" if outcome == "up" else "-1",
+            "qtyAvailableDecimal": "1",
+            "expired": False,
+        }
+    }
+    prices = (
+        [best_price, depth_price]
+        if outcome == "up"
+        else [str(1 - Decimal(best_price)), str(1 - Decimal(depth_price))]
+    )
+    levels = [
+        {"px": {"value": price, "currency": "USD"}, "qty": quantity}
+        for price, quantity in zip(prices, ["0.10", depth_quantity])
+    ]
+    if outcome == "up":
+        stream_feed.publish(
+            bids=levels,
+            offers=[{"px": {"value": "0.92", "currency": "USD"}, "qty": "10"}],
+        )
+    else:
+        stream_feed.publish(
+            bids=[{"px": {"value": "0.08", "currency": "USD"}, "qty": "10"}],
+            offers=levels,
+        )
+    venue.fill_quantity = 0.05
+    venue.fill_price = prices[0]
+
+    TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
+
+    requests = [payload for method, path, payload in venue.calls if path == "/v1/orders"]
+    assert len(requests) == 1
+    assert requests[0]["quantity"] == 0.10
+    assert requests[0]["price"]["value"] == prices[0]
+    assert requests[0]["tif"] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+    assert requests[0]["intent"] == (
+        "ORDER_INTENT_SELL_LONG" if outcome == "up" else "ORDER_INTENT_SELL_SHORT"
+    )
+    row = journal.get(market.slug)
+    assert row["pending"] is None
+    assert row["state"] == "open"
+    assert row["quantity"] == "0.95"
+    # .05 * $.90 - $.01 = $.035; a shallow stop at $.40 collects $.010.
+    assert Decimal(row["proceeds"]) == Decimal("0.01" if best_price == "0.40" else "0.035")
+
+
 def test_journal_reopen_preserves_one_entry_and_pending_order(venue, tmp_path):
     path = tmp_path / "trades.sqlite"
     market = parse_market(venue.market)

@@ -254,6 +254,56 @@ def test_previously_recorded_small_fee_dispute_allows_entries_after_reopen(venue
         reopened.close()
 
 
+def test_partial_resolution_with_unreconciled_full_entry_basis_still_blocks_entries(venue, journal):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
+    plan = replace(plan, quantity=Decimal("10"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("10"), Decimal("6"), Decimal("0.10"))
+    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("4")))
+    journal.finish_order(market.slug, Decimal("4"), Decimal("2.80"), Decimal("0.04"))
+    journal.settle(
+        market.slug,
+        Decimal("1"),
+        resolution={
+            "beforePosition": {
+                "netPositionDecimal": "6",
+                "cost": {"value": "6.10", "currency": "USD"},
+                "fees": {"value": "0.10", "currency": "USD"},
+            }
+        },
+    )
+    assert journal.get(market.slug)["pnl"] is None
+    assert len(journal.get(market.slug)["accounting_issues"]) == 2
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.entry_budget(Decimal("100"), Decimal("100"))
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.exposure()
+
+
+def test_partial_resolution_does_not_round_retained_fraction_before_costs(venue, journal):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("3"), Decimal("0.60"), Decimal("0.03"))
+    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("2")))
+    journal.finish_order(market.slug, Decimal("2"), Decimal("0.50"), Decimal("0.02"))
+    journal.settle(
+        market.slug,
+        Decimal("1"),
+        resolution={
+            "beforePosition": {
+                "netPositionDecimal": "1",
+                "cost": {"value": "0.21", "currency": "USD"},
+                "fees": {"value": "0.01", "currency": "USD"},
+            }
+        },
+    )
+    row = journal.get(market.slug)
+    assert row["pnl"] == "0.85"
+    assert row["accounting_issues"] == []
+
+
 @pytest.mark.parametrize("fault", ["other_issue", "missing_fee", "missing_cost", "open_position"])
 def test_small_difference_does_not_waive_other_accounting_guards(venue, journal, fault):
     market = parse_market(venue.market)

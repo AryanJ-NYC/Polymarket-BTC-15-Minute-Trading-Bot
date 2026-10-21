@@ -135,6 +135,27 @@ class PolymarketClient:
         fee = estimate_fee(market.fee_coefficient, quantity, Decimal("0.5"))
         return _plan(market, book, outcome, "SELL", yes_price, quantity, fee)
 
+    def exit_value(
+        self, market: Market, book: Book, outcome: str, quantity: Decimal
+    ) -> tuple[Decimal, Decimal]:
+        """Return sellable quantity and net depth value for successive bounded IOCs."""
+        validate_book(market, book)
+        if outcome not in {"up", "down"} or not quantity.is_finite() or quantity <= ZERO:
+            raise ValueError("Expected Up/Down and a finite positive exit quantity")
+        remaining, net = quantity, ZERO
+        for yes_price, available in book.bids if outcome == "up" else book.asks:
+            if yes_price % market.tick:
+                raise ValueError("Book price is not aligned to the market tick")
+            sellable = _floor(min(remaining, available), market.increment)
+            if sellable == ZERO:
+                continue
+            price = yes_price if outcome == "up" else ONE - yes_price
+            net += sellable * price - estimate_fee(market.fee_coefficient, sellable, Decimal("0.5"))
+            remaining -= sellable
+            if remaining == ZERO:
+                break
+        return quantity - remaining, net
+
     def submit(self, plan: Plan, *, validate: Callable[[], None] | None = None) -> str:
         """Preview and submit exactly once, returning the exchange-assigned ID.
 

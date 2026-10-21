@@ -11,6 +11,7 @@ import pytest
 
 from execution.polymarket_client import parse_market
 from execution.trade_journal import TradeJournal
+from results_report import summarize
 
 
 def test_actual_partial_fill_settlement_and_read_only_report(venue, clock, tmp_path):
@@ -48,6 +49,101 @@ def test_actual_partial_fill_settlement_and_read_only_report(venue, clock, tmp_p
     assert result["average_loss"] == "-0.33"
     assert result["max_drawdown"] == "0.33"
     assert journal.get(market.slug) == row
+    journal.close()
+
+
+@pytest.mark.parametrize(
+    "outcome,yes_value,payout,proceeds,pnl,signed_quantity",
+    [
+        ("up", "1", "6", "8.76", "2.66", "6"),
+        ("down", "0", "6", "8.76", "2.66", "-6"),
+        ("up", "0", "0", "2.76", "-3.34", "6"),
+        ("down", "1", "0", "2.76", "-3.34", "-6"),
+    ],
+)
+def test_partial_sale_and_remaining_settlement_have_exact_report_totals(
+    venue, tmp_path, outcome, yes_value, payout, proceeds, pnl, signed_quantity
+):
+    path = tmp_path / "partial-settlement.sqlite"
+    journal = TradeJournal(path)
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), outcome, Decimal("10"))
+    plan = replace(plan, quantity=Decimal("10"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("10"), Decimal("6"), Decimal("0.10"))
+    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("3")))
+    journal.finish_order(market.slug, Decimal("3"), Decimal("2.10"), Decimal("0.03"))
+    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("1")))
+    journal.finish_order(market.slug, Decimal("1"), Decimal("0.70"), Decimal("0.01"))
+    resolution = {
+        "beforePosition": {
+            "netPositionDecimal": signed_quantity,
+            "cost": {"value": "3.66", "currency": "USD"},
+            "fees": {"value": "0.06", "currency": "USD"},
+        },
+        "afterPosition": {"netPositionDecimal": "0"},
+    }
+    journal.settle(market.slug, Decimal(yes_value), resolution=resolution)
+    row = journal.get(market.slug)
+    assert row["entry_cost"] == "6.10"
+    assert row["settlement_proceeds"] == payout
+    assert row["proceeds"] == proceeds
+    assert row["pnl"] == pnl
+    assert row["accounting_issues"] == []
+    # Re-reading settlement evidence cannot add the remaining payout again.
+    journal.settle(market.slug, Decimal(yes_value), resolution=resolution)
+    assert journal.get(market.slug)["proceeds"] == proceeds
+    assert journal.get(market.slug)["settlement_proceeds"] == payout
+    report = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).parents[1] / "results_report.py"),
+            "--journal",
+            str(path),
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    result = json.loads(report.stdout)
+    assert result["total_net_pnl"] == pnl
+    assert result["known_closed_count"] == 1
+    assert result["unresolved_closed_count"] == 0
+    journal.close()
+
+
+def test_unknown_partial_sale_fee_stays_unknown_after_remaining_settlement(venue, tmp_path):
+    journal = TradeJournal(tmp_path / "unknown-partial-settlement.sqlite")
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
+    plan = replace(plan, quantity=Decimal("10"))
+    journal.reserve_entry(plan, market.end)
+    journal.finish_order(market.slug, Decimal("10"), Decimal("6"), Decimal("0.10"))
+    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("4")))
+    journal.update(market.slug, order_id="unknown-exit-fee")
+    journal.finish_order(market.slug, Decimal("4"), Decimal("2.80"), None)
+    journal.settle(
+        market.slug,
+        Decimal("1"),
+        resolution={
+            "beforePosition": {
+                "netPositionDecimal": "6",
+                "cost": {"value": "3.66", "currency": "USD"},
+                "fees": {"value": "0.06", "currency": "USD"},
+            }
+        },
+    )
+    row = journal.get(market.slug)
+    assert row["settlement_proceeds"] == "6"
+    assert row["proceeds"] is row["pnl"] is None
+    assert row["accounting_issues"] == ["Unknown collected fee for order unknown-exit-fee"]
+    result = summarize(journal.records())
+    assert result["total_net_pnl"] is None
+    assert result["known_closed_count"] == 0
+    assert result["unresolved_closed_count"] == 1
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.entry_budget(Decimal("100"), Decimal("100"))
     journal.close()
 
 
