@@ -53,3 +53,20 @@
   workflow regression reproduced this; compare evidence before the closed-state
   return and clear exact P&L on discrepancy. Preserve the original order and
   provider resolution fields for later reconciliation.
+- Model cutoff regression: preview crossing entry expiry previously raised a
+  generic ValueError after reservation, leaving a false unknown submission even
+  though create was never called. Distinguish pre-create expiry with
+  OrderNotSubmitted and complete that attempt with zero fills; retain unknown
+  create outcomes unchanged. Controlled-clock HTTP regression proves no create.
+- Historical label collection initially ran before active exits and always
+  selected the same oldest ten missing outcomes. Regressions reproduced delayed
+  exits under settlement429 and an unreachable eleventh resolved contract. Move
+  optional reads after management, defer while open/in entry, request one per
+  pass, and rotate the pending cursor even on missing results/errors.
+- PR #14 review caught historical429 shortly before entry suppressing all current
+  book sampling through shared next_data_attempt. A failing transport/clock case
+  reproduced the loss of warmup and model entry. Schedule optional reads only
+  after the current entry cutoff, while flat. Do not isolate backoff by REST
+  endpoint: official limits share the IP bucket. Preserve numeric/date Retry-After
+  and test resumption after expiry; delayed labels are preferable to optional
+  history reads during warmup/entry.
