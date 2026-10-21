@@ -20,7 +20,7 @@ from reconcile_order import reconcile_order
 
 @pytest.mark.parametrize("collected_fee", ["0.0200", None, "0.0000"])
 def test_captured_fee_disagreement_survives_recovery_and_report(
-    venue, clock, tmp_path, captured_provider, collected_fee
+    venue, clock, tmp_path, captured_provider, collected_fee, books
 ):
     evidence, responses, calls = captured_provider
     slug, order_id = evidence["market_slug"], evidence["order_id"]
@@ -54,7 +54,7 @@ def test_captured_fee_disagreement_survives_recovery_and_report(
         )
         journal.reserve_entry(plan, end)
         journal.update(slug, order_id=order_id)
-        TradingBot(venue.client, journal, live=True, one_trade=True).tick()
+        TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
         row = journal.get(slug)
         assert row["state"] == "closed"
         assert row["orders"][0]["id"] == order_id

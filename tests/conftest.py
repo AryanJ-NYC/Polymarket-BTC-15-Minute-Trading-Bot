@@ -8,7 +8,10 @@ import pytest
 from polymarket_us import PolymarketUS
 
 import bot
+import core.strategy_brain.signal_processors.spike_detector as spike_module
+import core.strategy_brain.signal_processors.tick_velocity_processor as velocity_module
 import core.strategy_brain.strategies.btc_15min_strategy as strategy_module
+import execution.market_stream as stream_module
 import execution.polymarket_client as client_module
 import execution.trade_journal as journal_module
 from execution.polymarket_client import PolymarketClient
@@ -23,7 +26,15 @@ def clock(monkeypatch):
         def now(cls, tz=None):
             return cls.current.astimezone(tz) if tz else cls.current.replace(tzinfo=None)
 
-    for module in (bot, client_module, journal_module, strategy_module):
+    for module in (
+        bot,
+        client_module,
+        journal_module,
+        strategy_module,
+        stream_module,
+        spike_module,
+        velocity_module,
+    ):
         monkeypatch.setattr(module, "datetime", Clock)
     return Clock
 
@@ -53,6 +64,7 @@ def venue(market_row, clock):
     class Venue:
         def __init__(self):
             self.calls = []
+            self.on_request = None
             self.market = copy.deepcopy(market_row)
             self.markets = {}
             self.positions = {}
@@ -103,6 +115,10 @@ def venue(market_row, clock):
         def handle(self, request):
             payload = json.loads(request.content) if request.content else None
             self.calls.append((request.method, request.url.path, payload))
+            if self.on_request:
+                response = self.on_request(request)
+                if response is not None:
+                    return response
             path = request.url.path
             failures = self.failures.get((request.method, path), [])
             if failures:
@@ -190,3 +206,53 @@ def venue(market_row, clock):
     result = Venue()
     yield result
     result.client.close()
+
+
+@pytest.fixture
+def stream_feed(venue):
+    from stream_fakes import SocketFactory, snapshot, wait_for
+
+    class Feed:
+        def __init__(self):
+            self.factory = SocketFactory()
+            self.books = stream_module.MarketStream(self.factory)
+            self.books.set_markets([client_module.parse_market(venue.market)])
+            self.books.start()
+            self.socket = self.factory.ready()
+            self.last_timestamp = None
+
+        def publish(self, **changes):
+            before = self.books.health()["snapshots"]
+            timestamp = client_module.parse_time(venue.timestamp)
+            if self.last_timestamp is not None and timestamp <= self.last_timestamp:
+                timestamp = self.last_timestamp + timedelta(microseconds=1)
+                venue.timestamp = timestamp.isoformat()
+            self.last_timestamp = timestamp
+            levels = {
+                "bids": [{"px": {"value": venue.bid, "currency": "USD"}, "qty": "100"}],
+                "offers": [{"px": {"value": venue.ask, "currency": "USD"}, "qty": "40"}],
+                **changes,
+            }
+            self.socket.publish(snapshot(self.socket, venue.market, venue.timestamp, **levels))
+            wait_for(lambda: self.books.health()["snapshots"] > before)
+
+        def disconnect(self):
+            self.socket.disconnect()
+            wait_for(lambda: not self.books.health()["connected"])
+
+    feed = Feed()
+    feed.publish()
+    yield feed
+    feed.books.close()
+
+
+@pytest.fixture
+def books(stream_feed):
+    return stream_feed.books
+
+
+@pytest.fixture
+def journal(tmp_path):
+    result = journal_module.TradeJournal(tmp_path / "paper.sqlite")
+    yield result
+    result.close()

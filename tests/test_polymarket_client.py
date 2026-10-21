@@ -393,6 +393,131 @@ def test_resolution_activity_is_paginated_and_busted_trades_halt(venue):
     assert sum(path == "/v1/portfolio/activities" for _, path, _ in venue.calls) == 2
 
 
+@pytest.mark.parametrize("bad_number", ["not-a-number", None, "NaN", "Infinity"])
+def test_malformed_book_numbers_are_unavailable(venue, bad_number):
+    venue.bid = bad_number
+    with pytest.raises(ValueError):
+        venue.client.book(parse_market(venue.market))
+
+
+def test_entry_cutoff_is_rechecked_after_preview(venue, clock, monkeypatch):
+    from execution.polymarket_client import OrderPreflightError
+
+    market = parse_market(venue.market)
+    clock.current = market.start + timedelta(minutes=13, seconds=59)
+    venue.timestamp = clock.current.isoformat()
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    assert plan.expires_at == market.start + timedelta(minutes=14)
+    preview = venue.sdk.orders.preview
+
+    def delayed_preview(request):
+        result = preview(request)
+        clock.current += timedelta(seconds=2)
+        return result
+
+    monkeypatch.setattr(venue.sdk.orders, "preview", delayed_preview)
+    with pytest.raises(OrderPreflightError, match="expired during preview"):
+        venue.client.submit(plan)
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+
+
+def test_validation_rechecks_latest_quote_after_preview(venue):
+    from execution.polymarket_client import OrderPreflightError
+
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    validations = []
+
+    def validate():
+        validations.append(True)
+        if len(validations) == 2:
+            raise ValueError("Stream disconnected during preview")
+
+    with pytest.raises(OrderPreflightError, match="Order preflight failed"):
+        venue.client.submit(plan, validate=validate)
+    assert len(validations) == 2
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+
+
+def test_create_exception_remains_uncertain_and_is_never_preflight(venue):
+    from execution.polymarket_client import OrderPreflightError
+
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    venue.fail_create = True
+    with pytest.raises(Exception) as error:
+        venue.client.submit(plan)
+    assert not isinstance(error.value, OrderPreflightError)
+    assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == 1
+
+
+@pytest.mark.parametrize("response", [{}, {"marketData": None}, []])
+def test_malformed_rest_envelope_is_unavailable(venue, monkeypatch, response):
+    monkeypatch.setattr(venue.client, "_fresh_get", lambda _: response)
+    with pytest.raises(ValueError):
+        venue.client.book(parse_market(venue.market))
+
+
+def test_preview_errors_do_not_expose_authenticated_payload(venue, monkeypatch):
+    from execution.polymarket_client import OrderPreflightError
+
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+
+    def reject(_):
+        raise ValueError("private-key X-PM-Signature authenticated-provider-response")
+
+    monkeypatch.setattr(venue.sdk.orders, "preview", reject)
+    with pytest.raises(OrderPreflightError) as error:
+        venue.client.submit(plan)
+    assert "private-key" not in str(error.value)
+    assert "Signature" not in str(error.value)
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+
+
+@pytest.mark.parametrize(
+    "provider_age,accepted", [(35, True), (-5, True), (35.001, False), (-5.001, False)]
+)
+def test_shared_executable_quote_policy_preserves_provider_age_boundaries(
+    venue, clock, provider_age, accepted
+):
+    from execution.polymarket_client import validate_book
+
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+    book = replace(book, timestamp=clock.current - timedelta(seconds=provider_age))
+    if accepted:
+        validate_book(market, book)
+        assert venue.client.buy_plan(market, book, "up", Decimal("1")).quantity > 0
+    else:
+        with pytest.raises(ValueError, match="stale or in the future"):
+            validate_book(market, book)
+        with pytest.raises(ValueError, match="stale or in the future"):
+            venue.client.buy_plan(market, book, "up", Decimal("1"))
+
+
+@pytest.mark.parametrize(
+    "receipt_age,accepted", [(0, True), (35, True), (35.001, False), (-0.001, False)]
+)
+def test_shared_executable_quote_policy_preserves_monotonic_age_boundaries(
+    venue, monkeypatch, receipt_age, accepted
+):
+    import execution.polymarket_client as client_module
+    from execution.polymarket_client import validate_book
+
+    monkeypatch.setattr(client_module, "monotonic", lambda: 100.0)
+    market = parse_market(venue.market)
+    book = replace(venue.client.book(market), received_at=100.0 - receipt_age)
+    if accepted:
+        validate_book(market, book)
+        assert venue.client.sell_plan(market, book, "up", Decimal("1")).quantity > 0
+    else:
+        with pytest.raises(ValueError, match="receipt is stale"):
+            validate_book(market, book)
+        with pytest.raises(ValueError, match="receipt is stale"):
+            venue.client.sell_plan(market, book, "up", Decimal("1"))
+
+
 def test_resolution_preserves_provider_evidence_including_distinct_fee_fields(venue):
     resolution = {
         "marketSlug": venue.market["slug"],
@@ -437,3 +562,124 @@ def test_expired_nonzero_resolution_does_not_prove_position_closure(venue):
     ]
     with pytest.raises(RuntimeError, match="did not close"):
         venue.client.resolution(venue.market["slug"], Decimal("1.35"))
+
+
+@pytest.mark.parametrize("cash,quantity,equity", [("95", "10", "101.40"), ("5.70", "-1", "5.06")])
+def test_account_marks_signed_holdings_from_stream_without_rest_books(
+    venue, books, cash, quantity, equity
+):
+    venue.balance.update(currentBalance=cash, buyingPower="1")
+    venue.positions = {venue.market["slug"]: {"netPositionDecimal": quantity}}
+    venue.book_missing = True
+    market = parse_market(venue.market)
+    source_calls = []
+
+    def book_source(slug):
+        source_calls.append(slug)
+        return books.book(market)
+
+    account = venue.client.account(book_source=book_source)
+    assert source_calls == [market.slug]
+    assert account.bankroll == Decimal(equity)
+    assert account.positions == venue.positions
+    assert account.buying_power == 1
+    assert all(
+        path in {"/v1/account/balances", "/v1/portfolio/positions", "/v1/orders/open"}
+        for _, path, _ in venue.calls
+    )
+
+
+def test_unavailable_stream_valuation_preserves_account_reads_without_rest_fallback(venue):
+    venue.positions = {venue.market["slug"]: {"netPositionDecimal": "10"}}
+
+    def unavailable(slug):
+        raise ValueError("No current stream snapshot")
+
+    account = venue.client.account(book_source=unavailable)
+    assert account.bankroll is None
+    assert account.positions == venue.positions
+    assert account.orders == []
+    assert account.buying_power == 100
+    assert all(
+        path in {"/v1/account/balances", "/v1/portfolio/positions", "/v1/orders/open"}
+        for _, path, _ in venue.calls
+    )
+
+
+def test_wrong_contract_valuation_cannot_inflate_bankroll(venue):
+    market = parse_market(venue.market)
+    wrong = replace(venue.client.book(market), slug="other-contract")
+    venue.positions = {market.slug: {"netPositionDecimal": "10"}}
+    venue.calls.clear()
+    account = venue.client.account(book_source=lambda _: wrong)
+    assert account.bankroll is None
+    assert account.positions == venue.positions
+    assert all(
+        path in {"/v1/account/balances", "/v1/portfolio/positions", "/v1/orders/open"}
+        for _, path, _ in venue.calls
+    )
+
+
+@pytest.mark.parametrize("age_type", ["provider", "receipt"])
+def test_stale_source_marks_preserve_account_reads_without_metadata(venue, clock, age_type):
+    from time import monotonic
+
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+    if age_type == "provider":
+        book = replace(book, timestamp=clock.current - timedelta(seconds=36))
+    else:
+        book = replace(book, received_at=monotonic() - 36)
+    venue.positions = {market.slug: {"netPositionDecimal": "10"}}
+    venue.calls.clear()
+    account = venue.client.account(book_source=lambda slug: book)
+    assert account.bankroll is None
+    assert account.positions == venue.positions
+    assert account.buying_power == 100
+    assert all(
+        path in {"/v1/account/balances", "/v1/portfolio/positions", "/v1/orders/open"}
+        for _, path, _ in venue.calls
+    )
+
+
+def test_provider_preview_failure_preserves_recovery_cause_without_create_or_secrets(venue):
+    from execution.polymarket_client import OrderNotSubmitted, OrderPreflightError
+
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+
+    def reject_preview(request):
+        if request.url.path == "/v1/order/preview":
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "60", "X-Private": "private-header-value"},
+                json={"error": "private-response-value"},
+            )
+        return None
+
+    venue.on_request = reject_preview
+    with pytest.raises(OrderNotSubmitted) as error:
+        venue.client.submit(plan)
+    assert isinstance(error.value, OrderPreflightError)
+    assert error.value.cause.status_code == 429
+    assert error.value.cause.response.headers["Retry-After"] == "60"
+    assert "HTTP status 429" in str(error.value)
+    assert "private-header-value" not in str(error.value)
+    assert "private-response-value" not in str(error.value)
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+
+
+def test_unconfirmed_cancel_retains_known_order_as_pending(venue):
+    from execution.polymarket_client import OrderPending
+
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    venue.order_state = "ORDER_STATE_NEW"
+    order_id = venue.client.submit(plan)
+    venue.on_request = lambda request: (
+        httpx.Response(200, json={}) if request.url.path.endswith("/cancel") else None
+    )
+    with pytest.raises(OrderPending, match="not yet confirmed"):
+        venue.client.cancel(order_id, market.slug)
+    assert venue.order["state"] == "ORDER_STATE_NEW"
+    assert sum(path.endswith("/cancel") for _, path, _ in venue.calls) == 1

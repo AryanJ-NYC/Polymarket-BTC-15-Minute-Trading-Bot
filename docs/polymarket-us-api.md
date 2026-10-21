@@ -45,6 +45,14 @@ slug, open state, finite prices/quantities, a two-sided uncrossed book and quote
 age. Accept timestamps at most 35 seconds old or five seconds ahead; null or
 non-advancing timestamps must not manufacture strategy history.
 
+Paper and live trading use the SDK's authenticated full `marketData` WebSocket
+as their primary book source, sharing validation with REST. The receiver tracks
+provider time and monotonic receipt time separately; connection/subscription
+generations prevent an earlier socket's book from becoming executable again.
+REST books remain for diagnostics, the comparison recorder, and bounded
+existing-position fallback during outages. See [streaming operations](streaming.md)
+for sampling, subscription lifecycle, freshness, recovery, and measurement scope.
+
 Book and settlement GETs include a unique `_ts` query to avoid replayed cached
 responses and cached not-found results. Cache bypass never replaces timestamp
 validation. A book 404 means data is unavailable, rather than empty liquidity.

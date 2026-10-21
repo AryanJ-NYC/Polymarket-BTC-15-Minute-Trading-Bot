@@ -20,12 +20,14 @@ def fixed_bankroll(venue):
     venue.balance.update(currentBalance=50.0, buyingPower=50.0)
 
 
-def test_skipped_contract_gets_official_outcome_without_trade(venue, tmp_path, clock, monkeypatch):
+def test_skipped_contract_gets_official_outcome_without_trade(
+    venue, tmp_path, clock, monkeypatch, books, stream_feed
+):
     journal = TradeJournal(tmp_path / "observations.sqlite")
     try:
         elapsed = [0.0]
-        monkeypatch.setattr(bot.time, "monotonic", lambda: elapsed[0])
-        trader = TradingBot(venue.client, journal)
+        monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+        trader = TradingBot(venue.client, journal, books)
         trader.tick()
         assert journal.records() == []
         old_slug = venue.market["slug"]
@@ -49,12 +51,14 @@ def test_skipped_contract_gets_official_outcome_without_trade(venue, tmp_path, c
         journal.close()
 
 
-def test_model_enters_up_with_fee_bound_and_records_actual_partial_fill(venue, tmp_path, clock):
+def test_model_enters_up_with_fee_bound_and_records_actual_partial_fill(
+    venue, tmp_path, clock, books, stream_feed
+):
     model = saved_model(tmp_path, 0.8)
     journal = TradeJournal(tmp_path / "model.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, live=True, model=model)
-        warm_up(trader, venue, clock)
+        trader = TradingBot(venue.client, journal, books, live=True, model=model)
+        warm_up(trader, venue, clock, stream_feed)
         trader.tick()
         row = journal.records()[0]
         assert row["outcome"] == "up"
@@ -74,14 +78,17 @@ def test_model_enters_up_with_fee_bound_and_records_actual_partial_fill(venue, t
 
 
 def test_preview_crossing_cutoff_skips_without_unknown_submission(
-    venue, tmp_path, clock, monkeypatch
+    venue, tmp_path, clock, monkeypatch, books, stream_feed
 ):
     journal = TradeJournal(tmp_path / "cutoff.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.8))
-        warm_up(trader, venue, clock)
+        trader = TradingBot(
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+        )
+        warm_up(trader, venue, clock, stream_feed)
         clock.current += timedelta(seconds=50)
         venue.timestamp = clock.current.isoformat()
+        publish_book(stream_feed, venue, clock)
         original = venue.handle
 
         def delayed_preview(request):
@@ -109,7 +116,7 @@ def test_preview_crossing_cutoff_skips_without_unknown_submission(
     ],
 )
 def test_nonpositive_ev_never_submits(
-    venue, tmp_path, clock, q, extra_cost, coefficient, bid, ask, expected_ev
+    venue, tmp_path, clock, q, extra_cost, coefficient, bid, ask, expected_ev, books, stream_feed
 ):
     venue.market["feeCoefficient"] = coefficient
     venue.bid, venue.ask = bid, ask
@@ -118,11 +125,12 @@ def test_nonpositive_ev_never_submits(
         trader = TradingBot(
             venue.client,
             journal,
+            books,
             live=True,
             model=saved_model(tmp_path, q),
             extra_cost=Decimal(extra_cost),
         )
-        warm_up(trader, venue, clock)
+        warm_up(trader, venue, clock, stream_feed)
         trader.tick()
         observation = journal.opportunities()[-1]
         assert observation["decision"] == "nonpositive_edge"
@@ -135,11 +143,15 @@ def test_nonpositive_ev_never_submits(
         journal.close()
 
 
-def test_model_can_select_down_against_baseline_direction(venue, tmp_path, clock):
+def test_model_can_select_down_against_baseline_direction(
+    venue, tmp_path, clock, books, stream_feed
+):
     journal = TradeJournal(tmp_path / "down.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.2))
-        warm_up(trader, venue, clock)
+        trader = TradingBot(
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.2)
+        )
+        warm_up(trader, venue, clock, stream_feed)
         trader.tick()
         row = journal.records()[0]
         assert row["outcome"] == "down"
@@ -156,24 +168,25 @@ def test_model_can_select_down_against_baseline_direction(venue, tmp_path, clock
         journal.close()
 
 
-def test_refreshed_book_removes_apparent_edge(venue, tmp_path, clock):
+def test_refreshed_book_removes_apparent_edge(venue, tmp_path, clock, books, stream_feed):
     journal = TradeJournal(tmp_path / "refresh.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.8))
-        warm_up(trader, venue, clock)
-        original = venue.handle
-        books = 0
+        trader = TradingBot(
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+        )
+        warm_up(trader, venue, clock, stream_feed)
+        balances = 0
 
-        def changed_book(request):
-            nonlocal books
-            if request.url.path.endswith("/book"):
-                books += 1
-                if books == 2:
+        def changed_quote(request):
+            nonlocal balances
+            if request.url.path == "/v1/account/balances":
+                balances += 1
+                if balances == 2:
                     venue.bid, venue.ask = "0.79", "0.81"
-            return original(request)
+                    publish_book(stream_feed, venue, clock)
+            return None
 
-        venue.sdk._http.close()
-        venue.sdk._http = httpx.Client(transport=httpx.MockTransport(changed_book))
+        venue.on_request = changed_quote
         trader.tick()
         observation = journal.opportunities()[-1]
         assert observation["decision"] == "nonpositive_edge"
@@ -184,7 +197,9 @@ def test_refreshed_book_removes_apparent_edge(venue, tmp_path, clock):
         journal.close()
 
 
-def test_invalid_requested_model_never_connects_or_falls_back(tmp_path, monkeypatch):
+def test_invalid_requested_model_never_connects_or_falls_back(
+    tmp_path, monkeypatch, books, stream_feed
+):
     path = tmp_path / "invalid.json"
     path.write_text('{"invalid": true}')
     monkeypatch.setattr(bot, "ROOT", tmp_path)
@@ -199,13 +214,16 @@ def test_invalid_requested_model_never_connects_or_falls_back(tmp_path, monkeypa
     assert not (tmp_path / "logs").exists()
 
 
-def test_account_reads_crossing_cutoff_do_not_reserve(venue, tmp_path, clock):
+def test_account_reads_crossing_cutoff_do_not_reserve(venue, tmp_path, clock, books, stream_feed):
     journal = TradeJournal(tmp_path / "account-cutoff.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.8))
-        warm_up(trader, venue, clock)
+        trader = TradingBot(
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+        )
+        warm_up(trader, venue, clock, stream_feed)
         clock.current += timedelta(seconds=50)
         venue.timestamp = clock.current.isoformat()
+        publish_book(stream_feed, venue, clock)
         original = venue.handle
         balances = 0
 
@@ -228,24 +246,16 @@ def test_account_reads_crossing_cutoff_do_not_reserve(venue, tmp_path, clock):
         journal.close()
 
 
-def test_insufficient_executable_depth_skips_both_candidates(venue, tmp_path, clock):
+def test_insufficient_executable_depth_skips_both_candidates(
+    venue, tmp_path, clock, books, stream_feed
+):
     journal = TradeJournal(tmp_path / "depth.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.8))
-        warm_up(trader, venue, clock)
-        original = venue.handle
-
-        def thin_book(request):
-            response = original(request)
-            if request.url.path.endswith("/book"):
-                body = response.json()
-                body["marketData"]["bids"][0]["qty"] = "0.001"
-                body["marketData"]["offers"][0]["qty"] = "0.001"
-                return httpx.Response(200, json=body)
-            return response
-
-        venue.sdk._http.close()
-        venue.sdk._http = httpx.Client(transport=httpx.MockTransport(thin_book))
+        trader = TradingBot(
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+        )
+        warm_up(trader, venue, clock, stream_feed)
+        publish_book(stream_feed, venue, clock, quantity="0.001")
         trader.tick()
         assert journal.opportunities()[-1]["decision"] == "nonpositive_edge"
         assert journal.records() == []
@@ -254,7 +264,9 @@ def test_insufficient_executable_depth_skips_both_candidates(venue, tmp_path, cl
         journal.close()
 
 
-def test_historical_outcomes_never_precede_active_position_exit(venue, tmp_path, clock):
+def test_historical_outcomes_never_precede_active_position_exit(
+    venue, tmp_path, clock, books, stream_feed
+):
     journal = TradeJournal(tmp_path / "priority.sqlite")
     try:
         market = parse_market(venue.market)
@@ -286,7 +298,7 @@ def test_historical_outcomes_never_precede_active_position_exit(venue, tmp_path,
 
         venue.sdk._http.close()
         venue.sdk._http = httpx.Client(transport=httpx.MockTransport(historical_failure))
-        TradingBot(venue.client, journal, live=True).tick()
+        TradingBot(venue.client, journal, books, live=True).tick()
         assert journal.get(market.slug)["state"] == "closed"
         assert any(m == "POST" and p == "/v1/orders" for m, p, _ in venue.calls)
         assert not any(p == f"/v1/markets/{old.slug}/settlement" for _, p, _ in venue.calls)
@@ -295,7 +307,7 @@ def test_historical_outcomes_never_precede_active_position_exit(venue, tmp_path,
 
 
 def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
-    venue, tmp_path, clock, monkeypatch
+    venue, tmp_path, clock, monkeypatch, books, stream_feed
 ):
     journal = TradeJournal(tmp_path / "fair.sqlite")
     try:
@@ -311,6 +323,7 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
             journal.record_opportunity(old, replace(book, slug=old.slug), "no_signal")
         clock.current = market.start + timedelta(minutes=14, seconds=10)
         venue.timestamp = clock.current.isoformat()
+        publish_book(stream_feed, venue, clock)
         original = venue.handle
         requests = []
 
@@ -326,8 +339,8 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
         venue.sdk._http.close()
         venue.sdk._http = httpx.Client(transport=httpx.MockTransport(history))
         elapsed = [0.0]
-        monkeypatch.setattr(bot.time, "monotonic", lambda: elapsed[0])
-        trader = TradingBot(venue.client, journal)
+        monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+        trader = TradingBot(venue.client, journal, books)
         for _ in range(12):
             trader.tick()
             next_late_window(venue, clock)
@@ -342,12 +355,14 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
 
 @pytest.mark.parametrize("buying_power,expected_quantity", [(500.0, "14.98"), (0.4, "0.59")])
 def test_model_uses_refreshed_bankroll_and_buying_power(
-    venue, tmp_path, clock, buying_power, expected_quantity
+    venue, tmp_path, clock, buying_power, expected_quantity, books, stream_feed
 ):
     journal = TradeJournal(tmp_path / "bankroll-model.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.8))
-        warm_up(trader, venue, clock)
+        trader = TradingBot(
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+        )
+        warm_up(trader, venue, clock, stream_feed)
         venue.balance_snapshots = [
             {**venue.balance, "currentBalance": 0.0, "buyingPower": 0.0},
             {**venue.balance, "currentBalance": 500.0, "buyingPower": buying_power},
@@ -364,7 +379,9 @@ def test_model_uses_refreshed_bankroll_and_buying_power(
         journal.close()
 
 
-def test_optional_history_cannot_rate_limit_current_warmup_or_entry(venue, tmp_path, clock):
+def test_optional_history_cannot_rate_limit_current_warmup_or_entry(
+    venue, tmp_path, clock, books, stream_feed
+):
     journal = TradeJournal(tmp_path / "history-warmup.sqlite")
     try:
         market = parse_market(venue.market)
@@ -387,8 +404,10 @@ def test_optional_history_cannot_rate_limit_current_warmup_or_entry(venue, tmp_p
 
         venue.sdk._http.close()
         venue.sdk._http = httpx.Client(transport=httpx.MockTransport(rate_limited_history))
-        trader = TradingBot(venue.client, journal, live=True, model=saved_model(tmp_path, 0.8))
-        warm_up(trader, venue, clock)
+        trader = TradingBot(
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+        )
+        warm_up(trader, venue, clock, stream_feed)
         trader.tick()
         assert history_requests == []
         assert journal.get(market.slug)["state"] == "open"
@@ -399,7 +418,7 @@ def test_optional_history_cannot_rate_limit_current_warmup_or_entry(venue, tmp_p
 
 @pytest.mark.parametrize("header_kind", ["seconds", "http-date"])
 def test_post_entry_history_still_honors_shared_retry_after(
-    venue, tmp_path, clock, monkeypatch, header_kind
+    venue, tmp_path, clock, monkeypatch, header_kind, books, stream_feed
 ):
     from email.utils import format_datetime
 
@@ -416,6 +435,7 @@ def test_post_entry_history_still_honors_shared_retry_after(
         journal.record_opportunity(old, replace(book, slug=old.slug), "no_signal")
         clock.current = market.start + timedelta(minutes=14, seconds=10)
         venue.timestamp = clock.current.isoformat()
+        publish_book(stream_feed, venue, clock)
         header = (
             "300"
             if header_kind == "seconds"
@@ -433,8 +453,8 @@ def test_post_entry_history_still_honors_shared_retry_after(
         venue.sdk._http.close()
         venue.sdk._http = httpx.Client(transport=httpx.MockTransport(throttled_history))
         elapsed = [100.0]
-        monkeypatch.setattr(bot.time, "monotonic", lambda: elapsed[0])
-        trader = TradingBot(venue.client, journal)
+        monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+        trader = TradingBot(venue.client, journal, books)
         trader.tick()
         assert len(history_requests) == 1
         calls_after_429 = len(venue.calls)
@@ -453,7 +473,10 @@ def test_post_entry_history_still_honors_shared_retry_after(
         )
         venue.timestamp = clock.current.isoformat()
         trader.tick()
-        assert venue.calls[-1][1] == "/v1/markets/current-after-backoff/book"
+        assert books.health()["desired"] == ["current-after-backoff"]
+        assert not any(
+            path == "/v1/markets/current-after-backoff/book" for _, path, _ in venue.calls
+        )
         assert len(history_requests) == 1
     finally:
         journal.close()
@@ -484,13 +507,22 @@ def saved_model(tmp_path, q=0.5, **changes):
     return load_model(path)
 
 
-def warm_up(trader, venue, clock):
+def warm_up(trader, venue, clock, stream_feed):
+    from stream_fakes import wait_for
+
     clock.current -= timedelta(seconds=70)
+    stream_feed.books.set_markets([])
+    wait_for(lambda: not stream_feed.books.health()["subscriptions"])
+    count = len(stream_feed.socket.subscriptions)
+    stream_feed.books.set_markets([parse_market(venue.market)])
+    wait_for(lambda: len(stream_feed.socket.subscriptions) > count)
     for _ in range(20):
         venue.timestamp = clock.current.isoformat()
+        publish_book(stream_feed, venue, clock)
         trader.tick()
         clock.current += timedelta(seconds=3)
     venue.timestamp = clock.current.isoformat()
+    publish_book(stream_feed, venue, clock)
 
 
 def next_late_window(venue, clock):
@@ -502,3 +534,60 @@ def next_late_window(venue, clock):
         windowEnd=(market.end + timedelta(minutes=15)).isoformat(),
     )
     venue.timestamp = clock.current.isoformat()
+
+
+@pytest.fixture(autouse=True)
+def sampling_clock(clock, monkeypatch):
+    import core.strategy_brain.strategies.btc_15min_strategy as strategy_module
+
+    monkeypatch.setattr(strategy_module, "monotonic", lambda: clock.current.timestamp())
+
+
+def publish_book(stream_feed, venue, clock, *, quantity="100"):
+    from stream_fakes import snapshot, wait_for
+
+    # Distinct provider timestamps permit a new full snapshot inside one clock tick.
+    timestamp = clock.current
+    before = stream_feed.books.health()["snapshots"]
+    try:
+        prior = stream_feed.books.book(parse_market(venue.market))
+    except ValueError:
+        prior = None
+    if prior is not None and timestamp <= prior.timestamp:
+        timestamp = prior.timestamp + timedelta(microseconds=1)
+    message = snapshot(
+        stream_feed.socket,
+        venue.market,
+        timestamp.isoformat(),
+        bids=[{"px": {"value": venue.bid, "currency": "USD"}, "qty": quantity}],
+        offers=[{"px": {"value": venue.ask, "currency": "USD"}, "qty": quantity}],
+    )
+    stream_feed.socket.publish(message)
+    wait_for(lambda: stream_feed.books.health()["snapshots"] == before + 1)
+
+
+def test_preview_rejects_model_edge_lost_when_opposite_quote_changes(
+    venue, tmp_path, clock, books, stream_feed
+):
+    model = saved_model(tmp_path, 0.8, coefficients=[5.0, 0.0, 0.0], intercept=math.log(4) - 7)
+    journal = TradeJournal(tmp_path / "preview-edge.sqlite")
+    try:
+        trader = TradingBot(venue.client, journal, books, live=True, model=model)
+        warm_up(trader, venue, clock, stream_feed)
+
+        def changed_opposite_quote(request):
+            if request.url.path == "/v1/order/preview":
+                venue.bid = "0.59"  # Up ask/depth stay fixed; midpoint changes model q.
+                publish_book(stream_feed, venue, clock)
+            return None
+
+        venue.on_request = changed_opposite_quote
+        trader.tick()
+        row = journal.records()[0]
+        assert row["state"] == "unfilled"
+        assert row["pending"] is None
+        assert Decimal(row["settings"]["prediction"]["q_up"]) == pytest.approx(Decimal("0.8"))
+        assert any(path == "/v1/order/preview" for _, path, _ in venue.calls)
+        assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+    finally:
+        journal.close()
