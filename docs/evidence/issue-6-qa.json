@@ -1,0 +1,88 @@
+{
+  "scope": "Synthetic fixture CLI QA only; not a live model or profitability evidence",
+  "fit_report": {
+    "evaluation": {
+      "brier": 0.008894371480070011,
+      "contracts": 6,
+      "down_contracts": 3,
+      "first_window_start": "2026-10-01T06:00:00+00:00",
+      "last_window_end": "2026-10-01T07:30:00+00:00",
+      "log_loss": 0.09905816780197751,
+      "midpoint_brier": 0.0625,
+      "midpoint_log_loss": 0.2876820724517809,
+      "observations": 12,
+      "up_contracts": 3
+    },
+    "excluded_observations": 0,
+    "interpretation": "Held-out prediction quality only; this does not establish profitability.",
+    "model_tag": "sha256:0337d6cef1daa2142f695d93ad194d2a84e7783ef8c35d73457d61b9b95042b3",
+    "overlapping_contracts_excluded": 0,
+    "sklearn_version": "1.9.1",
+    "training": {
+      "brier": 0.008894371480070011,
+      "contracts": 24,
+      "down_contracts": 12,
+      "first_window_start": "2026-10-01T00:00:00+00:00",
+      "last_window_end": "2026-10-01T06:00:00+00:00",
+      "log_loss": 0.09905816780197751,
+      "midpoint_brier": 0.0625,
+      "midpoint_log_loss": 0.2876820724517809,
+      "observations": 48,
+      "up_contracts": 12
+    },
+    "training_end_at_or_before": "2026-10-01T06:00:00+00:00",
+    "unresolved_contracts": 0
+  },
+  "repeated_fit_identical": true,
+  "source_journal_unchanged": true,
+  "sample_predictions": [
+    {
+      "midpoint": "0.25",
+      "spread": "0.02",
+      "seconds_remaining": 90,
+      "q_up": "0.094309975506677"
+    },
+    {
+      "midpoint": "0.50",
+      "spread": "0.02",
+      "seconds_remaining": 90,
+      "q_up": "0.5"
+    },
+    {
+      "midpoint": "0.75",
+      "spread": "0.02",
+      "seconds_remaining": 90,
+      "q_up": "0.905690024493323"
+    }
+  ],
+  "ev_workflow_fixtures": [
+    {
+      "q_up": "0.8",
+      "outcome": "up",
+      "yes_price": "0.65",
+      "quantity": "1.49",
+      "fee_bound": "0.03",
+      "extra_cost": "0",
+      "ev_usd": "0.1935"
+    },
+    {
+      "q_up": "0.2",
+      "outcome": "down",
+      "yes_price": "0.63",
+      "quantity": "2.58",
+      "fee_bound": "0.04",
+      "extra_cost": "0",
+      "ev_usd": "1.0694"
+    }
+  ],
+  "live_source_read_only": {
+    "deployment_revision": "022cdc4c33ec5aa71294b2ecdd42f3fcf8a420d8",
+    "journal_tables": [
+      "trades"
+    ],
+    "opportunity_rows": 0,
+    "observed_contracts": 0,
+    "real_model_fit": "Blocked: no recorded opportunities",
+    "model_tagged_live_run": "Not run: real-money execution unavailable; no real-data model"
+  }
+}

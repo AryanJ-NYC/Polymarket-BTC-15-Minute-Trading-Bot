@@ -67,3 +67,19 @@
   historical GET evidence confirms one 1.35-share filled loss and one expired
   unfilled order, with a $0.0070 fee/cost discrepancy. Production journal/service
   untouched. New live-money QA is blocked; preserve that gate and leave #5 open.
+- Issue #6: one optional scikit-learn logistic fitter reads the journal; JSON
+  inference needs no scientific packages. Split whole contracts chronologically
+  (at least 20 train/5 held out), weight contracts equally and fit scaling only on
+  training. Tiny fixture metrics are not live prediction/profitability evidence.
+- Explicit `--model` selects fee-aware entries from refreshed quote, Decimal
+  quantity and conservative rounded fees. Persist full model/tag/q/candidate EV
+  with existing trade settings. Bad requested artifacts fail before connecting;
+  baseline collection is only the explicit no-model path. Keep existing caps.
+- Official contract labels also cover skipped opportunities, separate from
+  account settlement/payout evidence. Historical lookup runs while flat/outside
+  entry, after urgent management, one GET per 30 seconds with rotating pagination.
+- Issue #6 local verification:174 tests plus lint/format/compileall/pip pass and
+  independent review closure. Live run remains blocked: read-only deployed
+  022cdc4 journal has zero opportunity observations. No real-data artifact or
+  model financial comparison exists; keep issue open. Do not confuse selectable
+  model support or fixture execution with live activation or real fills.

@@ -30,6 +30,13 @@ class TradeJournal:
             "CREATE TABLE IF NOT EXISTS trades (slug TEXT PRIMARY KEY, data TEXT NOT NULL)"
         )
         self.db.execute("CREATE TABLE IF NOT EXISTS opportunities (data TEXT NOT NULL)")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS contract_outcomes (slug TEXT PRIMARY KEY, data TEXT NOT NULL)"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS opportunity_contract_window "
+            "ON opportunities(json_extract(data, '$.window_end'), json_extract(data, '$.slug'))"
+        )
         self.db.commit()
 
     def close(self) -> None:
@@ -86,6 +93,52 @@ class TradeJournal:
             json.loads(row[0])
             for row in self.db.execute("SELECT data FROM opportunities ORDER BY rowid")
         ]
+
+    def pending_contracts(self, *, after_slug: str = "") -> list[str]:
+        """Return a bounded batch of ended observed contracts awaiting official outcomes."""
+        return [
+            row[0]
+            for row in self.db.execute(
+                "SELECT DISTINCT json_extract(o.data, '$.slug') AS slug "
+                "FROM opportunities AS o "
+                "WHERE json_extract(o.data, '$.window_end') <= ? "
+                "AND json_extract(o.data, '$.slug') > ? "
+                "AND NOT EXISTS (SELECT 1 FROM contract_outcomes AS c "
+                "WHERE c.slug = json_extract(o.data, '$.slug')) "
+                "ORDER BY slug LIMIT 10",
+                (datetime.now(timezone.utc).isoformat(), after_slug),
+            )
+        ]
+
+    def record_contract_outcome(self, slug: str, yes_value: Decimal) -> None:
+        """Retain official outcomes for traded and skipped observations without rewriting them."""
+        yes_value = number(yes_value)
+        if not Decimal("0") <= yes_value <= Decimal("1"):
+            raise ValueError("Invalid official settlement value")
+        existing = self.db.execute(
+            "SELECT data FROM contract_outcomes WHERE slug = ?", (slug,)
+        ).fetchone()
+        if existing is not None:
+            if number(json.loads(existing[0])["yes_settlement_price"]) != yes_value:
+                raise ValueError("Conflicting official settlement outcome")
+            return
+        observation = self.db.execute(
+            "SELECT data FROM opportunities WHERE json_extract(data, '$.slug') = ? "
+            "ORDER BY rowid LIMIT 1",
+            (slug,),
+        ).fetchone()
+        if observation is None:
+            raise ValueError("Official outcome needs an existing contract observation")
+        opportunity = json.loads(observation[0])
+        data = {
+            "slug": slug,
+            "window_start": opportunity["window_start"],
+            "window_end": opportunity["window_end"],
+            "yes_settlement_price": str(yes_value),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self.db:
+            self.db.execute("INSERT INTO contract_outcomes VALUES (?, ?)", (slug, json.dumps(data)))
 
     def reserve_entry(self, plan: Plan, end: datetime, *, settings: dict | None = None) -> bool:
         """Commit before order placement; never submit the same market twice."""
