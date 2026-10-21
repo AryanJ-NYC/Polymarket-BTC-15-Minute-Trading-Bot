@@ -37,22 +37,19 @@ INTEGRATION:
   In _fetch_market_context(), add:
     metadata['tick_buffer'] = list(self._tick_buffer)
 """
-from decimal import Decimal
-from datetime import datetime, timezone, timedelta
-from collections import deque
-from typing import Optional, Dict, Any, List
-from loguru import logger
 
-import os
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
+
+from loguru import logger
 
 from core.strategy_brain.signal_processors.base_processor import (
     BaseSignalProcessor,
-    TradingSignal,
-    SignalType,
     SignalDirection,
     SignalStrength,
+    SignalType,
+    TradingSignal,
 )
 
 
@@ -65,9 +62,9 @@ class TickVelocityProcessor(BaseSignalProcessor):
 
     def __init__(
         self,
-        velocity_threshold_60s: float = 0.015,   # 1.5% move in 60s
-        velocity_threshold_30s: float = 0.010,   # 1.0% move in 30s
-        min_ticks: int = 5,                       # need at least 5 ticks in window
+        velocity_threshold_60s: float = 0.015,  # 1.5% move in 60s
+        velocity_threshold_30s: float = 0.010,  # 1.0% move in 30s
+        min_ticks: int = 5,  # need at least 5 ticks in window
         min_confidence: float = 0.55,
     ):
         super().__init__("TickVelocity")
@@ -92,17 +89,17 @@ class TickVelocityProcessor(BaseSignalProcessor):
         """Find the tick price closest to `seconds_ago` seconds before now."""
         target = now - timedelta(seconds=seconds_ago)
         best = None
-        best_diff = float('inf')
+        best_diff = float("inf")
 
         for tick in tick_buffer:
-            ts = tick['ts']
+            ts = tick["ts"]
             # Normalise timezone
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             diff = abs((ts - target).total_seconds())
             if diff < best_diff:
                 best_diff = diff
-                best = float(tick['price'])
+                best = float(tick["price"])
 
         # Only return if within ±15s of target
         if best_diff <= 15:
@@ -149,23 +146,23 @@ class TickVelocityProcessor(BaseSignalProcessor):
             acceleration = vel_30s - vel_first_30s  # positive = accelerating
 
         logger.info(
-            f"TickVelocity: curr={curr:.4f}, "
-            f"vel_60s={vel_60s*100:+.3f}% " if vel_60s else "vel_60s=N/A "
-            f"vel_30s={vel_30s*100:+.3f}% " if vel_30s else "vel_30s=N/A "
-            f"accel={acceleration*100:+.4f}%"
+            f"TickVelocity: curr={curr:.4f}, vel_60s={vel_60s * 100:+.3f}% "
+            if vel_60s
+            else f"vel_60s=N/A vel_30s={vel_30s * 100:+.3f}% "
+            if vel_30s
+            else f"vel_30s=N/A accel={acceleration * 100:+.4f}%"
         )
 
         # Use best available velocity for signal decision
         primary_vel = vel_30s if vel_30s is not None else vel_60s
         threshold = (
-            self.velocity_threshold_30s if vel_30s is not None
-            else self.velocity_threshold_60s
+            self.velocity_threshold_30s if vel_30s is not None else self.velocity_threshold_60s
         )
 
         if abs(primary_vel) < threshold:
             logger.debug(
-                f"TickVelocity: {primary_vel*100:+.3f}% below threshold "
-                f"{threshold*100:.1f}% — no signal"
+                f"TickVelocity: {primary_vel * 100:+.3f}% below threshold "
+                f"{threshold * 100:.1f}% — no signal"
             )
             return None
 
@@ -173,11 +170,11 @@ class TickVelocityProcessor(BaseSignalProcessor):
         abs_vel = abs(primary_vel)
 
         # Strength by velocity magnitude
-        if abs_vel >= 0.04:      # >4%
+        if abs_vel >= 0.04:  # >4%
             strength = SignalStrength.VERY_STRONG
-        elif abs_vel >= 0.025:   # >2.5%
+        elif abs_vel >= 0.025:  # >2.5%
             strength = SignalStrength.STRONG
-        elif abs_vel >= 0.015:   # >1.5%
+        elif abs_vel >= 0.015:  # >1.5%
             strength = SignalStrength.MODERATE
         else:
             strength = SignalStrength.WEAK
@@ -186,13 +183,12 @@ class TickVelocityProcessor(BaseSignalProcessor):
         confidence = min(0.82, 0.55 + (abs_vel / threshold - 1) * 0.12)
 
         # Acceleration bonus: if move is accelerating, higher confidence
-        accel_same_direction = (
-            (acceleration > 0 and primary_vel > 0) or
-            (acceleration < 0 and primary_vel < 0)
+        accel_same_direction = (acceleration > 0 and primary_vel > 0) or (
+            acceleration < 0 and primary_vel < 0
         )
         if accel_same_direction and abs(acceleration) > 0.005:
             confidence = min(0.88, confidence + 0.06)
-            logger.info(f"TickVelocity: acceleration bonus applied ({acceleration*100:+.4f}%)")
+            logger.info(f"TickVelocity: acceleration bonus applied ({acceleration * 100:+.4f}%)")
 
         # If 60s velocity conflicts with 30s velocity — reduce confidence
         if vel_60s is not None and vel_30s is not None:
@@ -218,14 +214,14 @@ class TickVelocityProcessor(BaseSignalProcessor):
                 "price_60s_ago": round(price_60s, 6) if price_60s else None,
                 "price_30s_ago": round(price_30s, 6) if price_30s else None,
                 "ticks_in_buffer": len(tick_buffer),
-            }
+            },
         )
 
         self._record_signal(signal)
 
         logger.info(
             f"Generated {direction.value.upper()} signal (TickVelocity): "
-            f"vel={primary_vel*100:+.3f}%, accel={acceleration*100:+.4f}%, "
+            f"vel={primary_vel * 100:+.3f}%, accel={acceleration * 100:+.4f}%, "
             f"confidence={confidence:.2%}, score={signal.score:.1f}"
         )
 

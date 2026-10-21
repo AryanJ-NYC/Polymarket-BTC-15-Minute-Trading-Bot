@@ -1,328 +1,158 @@
-# 🤖 Polymarket BTC 15-Minute Trading Bot
+# Polymarket US BTC 15-minute bot
 
-[![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/downloads/)
-[![NautilusTrader](https://img.shields.io/badge/nautilus-1.222.0-green.svg)](https://nautilustrader.io/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Polymarket](https://img.shields.io/badge/Polymarket-CLOB-purple)](https://polymarket.com)
-[![Redis](https://img.shields.io/badge/Redis-powered-red.svg)](https://redis.io/)
-[![Grafana](https://img.shields.io/badge/Grafana-dashboard-orange)](https://grafana.com/)
+A Python bot for **polymarket.us**, using the official US SDK. Paper trading is
+its default. The international Polygon CLOB, NautilusTrader, Redis controls, and
+order patches have been removed.
 
-A production-grade algorithmic trading bot for **Polymarket's 15-minute BTC price prediction markets**. Built with a 7-phase architecture combining multiple signal sources, professional risk management, and self-learning capabilities.
+## Setup
 
-
----
-
-## 📋 **Table of Contents**
-- [Features](#features)
-- [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Running the Bot](#running-the-bot)
-- [Monitoring](#monitoring)
-- [Trading Modes](#trading-modes)
-- [Project Structure](#project-structure)
-- [Testing](#testing)
-- [Contributing](#contributing)
-- [FAQ](#faq)
-- [License](#license)
-- [Disclaimer](#disclaimer)
-
----
-
-## ✨ **Features**
-
-| Feature | Description |
-|---------|-------------|
-| **7-Phase Architecture** | Modular, testable, production-ready design |
-| **Multi-Signal Intelligence** | Spike Detection, Sentiment Analysis, Price Divergence |
-| **Risk-First Design** | $1 max per trade, 30% stop loss, 20% take profit |
-| **Dual-Mode Operation** | Toggle between simulation and live without restart |
-| **Real-Time Monitoring** | Grafana dashboards + Prometheus metrics |
-| **Self-Learning** | Automatically optimizes signal weights based on performance |
-| **Auto-Recovery** | WebSocket auto-reconnection, rate limiting, data validation |
-| **Paper Trading** | Full P&L tracking in simulation mode |
-
----
-
-## 🏗️ **Architecture**
-
-### **7-Phase Overview**
-
-```mermaid
- flowchart LR
-    subgraph Input[INPUT]
-        D[External Data<br/>Coinbase, Binance, News, Solana]
-    end
-    
-    subgraph Process[PROCESSING]
-        I[Ingestion<br/>Unify & Validate]
-        N[Nautilus Core<br/>Trading Framework]
-        S[Signal Processors<br/>Spike, Sentiment, Divergence]
-        F[Fusion Engine<br/>Weighted Voting]
-    end
-    
-    subgraph Output[OUTPUT]
-        R[Risk Management<br/>$1 Max, Stop Loss]
-        E[Execution<br/>Polymarket Orders]
-        M[Monitoring<br/>Grafana Dashboard]
-        L[Learning<br/>Weight Optimization]
-    end
-    
-    D --> I --> N --> S --> F --> R --> E --> M --> L
-    L -.-> F
-```
-## Prerequisites
-- Python 3.14+ (Download)
-
-- Redis (Download) - for mode switching
-
-- Polymarket Account with API credentials
-- Git
-
-## 🚀 Quick Start
-
-## 1. Clone the Repository
+Requires Python 3.10+ on macOS or Linux and an approved Polymarket US account.
 
 ```bash
-git clone https://github.com/yourusername/polymarket-btc-15m-bot.git
-cd polymarket-btc-15m-bot
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
-## 2. Set Up Virtual Environment
+
+Create `.env.us` in the repository root:
+
+```dotenv
+POLYMARKET_KEY_ID=your-key-id
+POLYMARKET_SECRET=your-secret-key
+```
+
+Generate keys at [polymarket.us/developer](https://polymarket.us/developer).
+The loader also accepts the official SDK example names `POLYMARKET_SECRET_KEY`
+and `POLYMARKET_US_KEY_ID` / `POLYMARKET_US_SECRET_KEY`. Conflicting values fail
+validation. Credentials are read from this file, never from an international
+wallet configuration. Do not commit it. Protect it with `chmod 600 .env.us`.
+
+## Run
+
+Check authentication, positions, open orders, and the current BTC contract with
+read-only API requests:
 
 ```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
+python bot.py --check
+```
 
-# macOS / Linux
-python -m venv venv
-source venv/bin/activate
-```
-## 3. Install Dependencies
+Start paper trading, stop with Ctrl+C:
 
+```bash
+python bot.py
 ```
-bash
-pip install -r requirements.txt
-```
-## 4. Configure Environment Variables
-```
-bash
-cp .env.example .env
-Edit .env with your credentials:
 
-env
-# Polymarket API Credentials
-POLYMARKET_PK=your_private_key_here
-POLYMARKET_API_KEY=your_api_key_here
-POLYMARKET_API_SECRET=your_api_secret_here
-POLYMARKET_PASSPHRASE=your_passphrase_here
+Run until one new paper trade exits or settles, then stop automatically:
 
-# Redis Configuration
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_DB=2
+```bash
+python bot.py --one-trade
+```
 
-# Trading Parameters
-MAX_POSITION_SIZE=1.0
-STOP_LOSS_PCT=0.30
-TAKE_PROFIT_PCT=0.20
-SPIKE_THRESHOLD=0.15
-DIVERGENCE_THRESHOLD=0.05
-```
-## 5. Start Redis
-```
-bash
-# Windows (download from redis.io)
-redis-server
+This preserves the normal warmup and entry window. It can take more than one
+15-minute contract to find an eligible entry. After entry, no second position is
+opened while the first waits for exit or settlement. A restart resumes a single
+unfinished trade; it refuses to choose between multiple unfinished trades.
 
-# macOS
-brew install redis
-redis-server
+For a bounded smoke check, `python bot.py --duration 65`. For one observation,
+`python bot.py --once`. `python 15m_bot_runner.py` calls the same entry point;
+it does not restart failed processes automatically. `--env-file /path/to/.env.us`
+selects a credential file explicitly.
 
-# Linux
-sudo apt install redis-server
-redis-server
-```
-## 6. Run the Bot
-```
-bash
-# Test mode (trades every minute - for quick testing)
-python run_bot.py --test-mode
+**Real orders require an explicit flag:**
 
-# Live trading mode (REAL MONEY!)
-python 15m_bot_runner.py --live
+```bash
+python bot.py --live
 ```
-## ⚙️ Configuration Options
-Argument	Description	Default
---test-mode	Trade every minute for testing	False
---live	Enable live trading (real money)	False
---no-grafana	Disable Grafana metrics	False
-##View Paper Trades
-```
-bash
+
+A successful account check or paper run does not establish real-order execution.
+Keep live trading off until you are ready to monitor actual fills. Stopping the
+process leaves filled positions in the account; restart the same mode to resume
+management. An interrupted/unknown submission stops trading for reconciliation.
+
+## Strategy and limits
+
+- Discovers BTC, 15-minute, Up/Down contracts by their typed US asset terms,
+  paginating the public API. Uses `windowStart` / `windowEnd`, not slug guesses or
+  the later expiration timestamp.
+- Preserves the previous late-window entry policy: collect at least 20 distinct
+  book snapshots, enter only between minute 13 and minute 14, follow Up above a
+  YES midpoint of 0.60 or Down below 0.40, and require at least one signal and a
+  fusion result. Fusion is informational; the midpoint sets trade direction.
+  History resets for each contract. Starting late may skip the current window.
+- Reuses spike, tick velocity, order-flow, divergence, sentiment, and options
+  processors. Optional external context can be unavailable; no input is invented.
+- Uses authenticated REST order books every three seconds. Each request has a
+  unique query to avoid intermediary caches replaying a 30-second-old response.
+  The provider's timestamp must still advance to count as new history.
+  Null timestamps, books older
+  than 35 seconds, future timestamps, closed/crossed/empty books are rejected.
+  This is a REST polling strategy, not a low-latency streaming system.
+- Uses YES-denominated prices for both Up and Down US intents. Down entry cost
+  is `1 - YES bid`; Up entry cost is `YES ask`. Prices must match the market tick.
+- Uses limit IOC orders at visible best prices, with fractional quantities
+  rounded down to the market increment and visible depth. **At most $1 per new
+  trade, including a conservative fee reserve.** Never increases spend to meet
+  minimum quantity. Maximum five open positions and $10 total entry exposure.
+- Reserves a UTC daily $5 loss budget against recorded losses plus the full cost
+  of still-open positions and the next order. This is the bot's own ledger, not
+  a claim about account-wide daily P&L or strategy profitability.
+- Checks for 30% stop loss and 20% take profit using executable exit prices and
+  estimated fees. Exits can fill partially. Liquidity, stale books, outages, and
+  stopping the process can delay exits; these are not exchange-hosted stops.
+- Paper mode sends no order previews, submissions, or cancellations. It assumes
+  visible top-of-book liquidity fills at the quoted price and estimates fees.
+  P&L stays pending until an executable exit or actual exchange settlement.
+  It does not invent random wins or mark unresolved settlement as a loss.
+
+## State and recovery
+
+`logs/us-paper.sqlite` and `logs/us-live.sqlite` keep separate paper/live records.
+They are ignored by Git. One process can hold each journal. Each contract can
+have one entry attempt, committed before submitting to the exchange. Successful
+submissions record the exchange order ID, then verify terminal state and actual
+cumulative fills. Partial IOC fills are tracked at their actual quantity and fee.
+Only a known bot order can be canceled; the bot never cancels all account orders.
+
+Live startup checks exchange quantities against the journal and rejects unknown
+positions/open orders. Live settlement also requires paginated provider resolution
+activity with a matching pre-resolution quantity; missing evidence, mismatches,
+and busted trades in that history stop trading. Keep this bot's account activity
+exclusive, including while it is stopped with positions open. Quantity checks
+cannot attribute manual sell-and-rebuy trades that restore the same net holding.
+Detected discrepancies require reconciliation; local state is never replaced by
+an assumed settlement just because a provider position disappears.
+
+A known pending order ID is read and reconciled on restart. If a process dies or
+loses the response before saving an ID, it cannot know whether the order reached
+the exchange. It stops instead of submitting again. Inspect the matching order
+in Polymarket US and the saved request in the SQLite journal before resolving
+that record. Preserve a copy of the journal and provider order/fill evidence;
+never delete live state just to bypass this stop.
+
+View recorded paper positions/results:
+
+```bash
 python view_paper_trades.py
 ```
-## Trading Modes
-Switch Modes Without Restarting (Redis)
 
-# Switch to simulation mode (safe)
+## Development
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+ruff check .
+ruff format --check .
+python -m compileall -q bot.py execution core tests
 ```
-python redis_control.py sim -- not stable yet
-```
-# Switch to live trading mode (REAL MONEY!)
-```
-python redis_control.py live --not stable yet
-``` 
-## 📁 Project Structure
 
-```text
-polymarket-btc-15m-bot/
-├── core/                        # Core business logic
-│   ├── ingestion/               # Phase 2: Data ingestion
-│   │   ├── adapters/            # Unified adapter interface
-│   │   ├── managers/            # Rate limiter, WebSocket manager, etc.
-│   │   └── validators/          # Data validation & schema checks
-│   ├── nautilus_core/           # Phase 3: NautilusTrader integration
-│   │   ├── data_engine/         # Nautilus data engine wrapper
-│   │   ├── event_dispatcher/    # Event handling & dispatching
-│   │   ├── instruments/         # BTC/USDT instrument definitions
-│   │   └── providers/           # Custom live/historical data providers
-│   └── strategy_brain/          # Phase 4: Signal generation & processing
-│       ├── fusion_engine/       # Multi-signal combination logic
-│       ├── signal_processors/   # Individual detectors (spike, divergence, sentiment…)
-│       └── strategies/          # Main 15-minute BTC trading strategy
-│
-├── data_sources/                # Phase 1: External market & sentiment data
-│   ├── binance/                 # Binance WebSocket client
-│   ├── coinbase/                # Coinbase REST API client
-│   ├── news_social/             # Fear & Greed Index + social sentiment
-│   └── solana/                  # Solana RPC (optional / experimental)
-│
-├── execution/                   # Phase 5: Order placement & risk control
-│   ├── execution_engine.py      # Main order execution coordinator
-│   ├── polymarket_client.py     # Polymarket API wrapper & order logic
-│   └── risk_engine.py           # Position sizing, SL/TP, exposure limits
-│
-├── monitoring/                  # Phase 6: Performance tracking & metrics
-│   ├── grafana_exporter.py      # Prometheus metrics exporter
-│   └── performance_tracker.py   # Trade logging & statistics
-│
-├── feedback/                    # Phase 7: Future learning / optimization
-│   └── learning_engine.py       # Placeholder for ML feedback loop
-│
-├── grafana/                     # Grafana dashboard & configuration
-│   ├── dashboard.json           # Pre-built dashboard definition
-│   ├── grafana.ini              # Grafana server config (optional)
-│   └── import_dashboard.py      # Script to import dashboard automatically
-│
-├── scripts/                     # Development & testing utilities
-│   ├── test_data_sources.py
-│   ├── test_ingestion.py
-│   ├── test_nautilus.py
-│   ├── test_strategy.py
-│   └── test_execution.py
-│
-├── .env.example                 # Template for environment variables
-├── .gitignore
-├── patch_gamma_markets.py       # Temporary patch/fix for Polymarket API
-├── redis_control.py             # Switch trading mode (sim/live/test)
-├── requirements.txt             # Python dependencies
-├── run_bot.py                   # Main bot entry point
-├── view_paper_trades.py         # View simulation/paper trade history
-└── README.md                    # This file
-```
-Testing
-Run tests for each phase independently:
+Tests replace HTTP transport at the official SDK seam; they do not need your
+keys or submit real orders. They exercise YES/NO prices, fees and minimum sizes,
+preview/terminal readback, partial fills, restart safety, real paper accounting,
+loss budgets, and read-only defaults.
 
-# Test individual phases
-```
-python scripts/test_data_sources.py
-python scripts/test_ingestion.py
-python scripts/test_nautilus.py
-python scripts/test_strategy.py
-python scripts/test_execution.py
-```
-🤝 Contributing
-Contributions are welcome! Here's how you can help:
-
- - Fork the repository
-
- - Create a feature branch: git checkout -b feature
-
- -Commit your changes: git commit -m 'Added feature'
-
-- Push to the branch: git push origin feature/added-feature
-
-Open a Pull Request
-
-## Ideas for Contributions
-- Add derivatives data (funding rates, open interest)
-
-- Implement more signal processors
-
-- Add Telegram/Discord alerts
-
-- Create web UI for management
-
-
-- Support for ETH/SOL markets
-
-- Machine learning optimization
-
-## ❓ FAQ
-
-**Q: How much money do I need to start?**  
-**A:** The bot caps each trade at $1, so you can start with as little as $10–20.
-
-**Q: Is this profitable?**  
-**A:** Yes — in simulation testing it has shown good results (e.g. ~75% win rate in early runs).  
-However, **past performance does not guarantee future results**. Always test thoroughly in simulation mode first.
-
-**Q: Do I need programming experience?**  
-**A:** Basic Python knowledge is helpful (e.g. understanding how to run scripts and edit config files), but the bot is designed to run with just a few simple commands — no coding required for normal use.
-
-**Q: Can I run this 24/7?**  
-**A:** Yes! The bot is built for continuous operation and includes basic auto-recovery features in case of temporary connection issues.
-
-**Q: What's the difference between test mode and normal mode?**  
-**A:**  
-- **Test mode** — trades simulated every minute (great for quick testing and debugging)  
-- **Normal mode** — trades every 15 minutes (matches the intended 15-minute strategy timeframe)
-
- 
-## Disclaimer
-TRADING CRYPTOCURRENCIES CARRIES SIGNIFICANT RISK.
-
-This bot is for educational purposes
-
-Past performance does not guarantee future results
-
-Always understand the risks before trading with real money
-
-The developers are not responsible for any financial losses
-
-Start with simulation mode, then small amounts, then scale up
-
-## Acknowledgments
-NautilusTrader - Professional trading framework
-
-Polymarket - Prediction market platform
-
-
-All contributors and users of this project
-
-## Contact & Community
-GitHub Issues: For bugs and feature requests
-
-Twitter: @Kator07
-
-##Discord: Join our community
-- https://discord.gg/tafKjBnPEQ
-
-## ⭐ Show Your Support
-If you find this project useful, please star the GitHub repo! It helps others discover it.
-
-## contact me on telegram 
- [![Telegram](https://img.shields.io/badge/Telegram-%230088cc.svg?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/Bigg_O7)
-
+Source map: [bot.py](bot.py) owns the loop; [the exchange client](execution/polymarket_client.py)
+owns US API details; [the journal](execution/trade_journal.py) owns durable order
+and position state; [the strategy](core/strategy_brain/strategies/btc_15min_strategy.py)
+owns signals and entry timing. See [API evidence](docs/polymarket-us-api.md) and
+[verification](docs/verification.md) for provider details and tested limits.
+Agent notes: [decisions](docs/agent/MEMORY.md), [errors](docs/agent/ERRORS.md).

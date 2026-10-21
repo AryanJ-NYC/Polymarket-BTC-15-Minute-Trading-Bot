@@ -32,22 +32,20 @@ API USED (completely free, no auth required):
     - instrument_name (e.g. BTC-20FEB26-95000-P = Put, -C = Call)
     - days to expiry (parsed from instrument name)
 """
-import httpx
-from decimal import Decimal
-from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List, Tuple
-from loguru import logger
 
-import os
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Dict, Optional
+
+import httpx
+from loguru import logger
 
 from core.strategy_brain.signal_processors.base_processor import (
     BaseSignalProcessor,
-    TradingSignal,
-    SignalType,
     SignalDirection,
     SignalStrength,
+    SignalType,
+    TradingSignal,
 )
 
 DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
@@ -63,11 +61,11 @@ class DeribitPCRProcessor(BaseSignalProcessor):
 
     def __init__(
         self,
-        bullish_pcr_threshold: float = 1.20,   # PCR above this = contrarian bullish
-        bearish_pcr_threshold: float = 0.70,   # PCR below this = contrarian bearish
-        max_days_to_expiry: int = 2,            # only short-dated options
-        min_open_interest: float = 100.0,       # ignore tiny strikes (BTC notional)
-        cache_seconds: int = 300,               # refresh every 5 minutes
+        bullish_pcr_threshold: float = 1.20,  # PCR above this = contrarian bullish
+        bearish_pcr_threshold: float = 0.70,  # PCR below this = contrarian bearish
+        max_days_to_expiry: int = 2,  # only short-dated options
+        min_open_interest: float = 100.0,  # ignore tiny strikes (BTC notional)
+        cache_seconds: int = 300,  # refresh every 5 minutes
         min_confidence: float = 0.55,
     ):
         super().__init__("DeribitPCR")
@@ -103,7 +101,7 @@ class DeribitPCRProcessor(BaseSignalProcessor):
             parts = instrument_name.split("-")
             if len(parts) < 3:
                 return None
-            expiry_str = parts[1]   # e.g. "20FEB26"
+            expiry_str = parts[1]  # e.g. "20FEB26"
             expiry_dt = datetime.strptime(expiry_str, "%d%b%y").replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
             dte = (expiry_dt - now).days
@@ -159,11 +157,7 @@ class DeribitPCRProcessor(BaseSignalProcessor):
             overall_pcr = put_oi / call_oi if call_oi > 0 else 1.0
 
             # Short-dated PCR (more relevant for 15-min trading)
-            short_pcr = (
-                short_put_oi / short_call_oi
-                if short_call_oi > 0
-                else overall_pcr
-            )
+            short_pcr = short_put_oi / short_call_oi if short_call_oi > 0 else overall_pcr
 
             result = {
                 "overall_pcr": round(overall_pcr, 4),
@@ -201,17 +195,14 @@ class DeribitPCRProcessor(BaseSignalProcessor):
         # Check cache
         now = datetime.now(timezone.utc)
         cache_valid = (
-            self._cached_result is not None and
-            self._cache_time is not None and
-            (now - self._cache_time).total_seconds() < self.cache_seconds
+            self._cached_result is not None
+            and self._cache_time is not None
+            and (now - self._cache_time).total_seconds() < self.cache_seconds
         )
 
         if cache_valid:
             pcr_data = self._cached_result
-            logger.debug(
-                f"DeribitPCR: using cached data "
-                f"(PCR={pcr_data['short_pcr']:.3f})"
-            )
+            logger.debug(f"DeribitPCR: using cached data (PCR={pcr_data['short_pcr']:.3f})")
         else:
             try:
                 pcr_data = self._fetch_pcr()
@@ -250,8 +241,7 @@ class DeribitPCRProcessor(BaseSignalProcessor):
                 strength = SignalStrength.MODERATE
 
             logger.info(
-                f"DeribitPCR: HIGH PCR={pcr:.3f} "
-                f"(excessive puts = fear) → contrarian BULLISH"
+                f"DeribitPCR: HIGH PCR={pcr:.3f} (excessive puts = fear) → contrarian BULLISH"
             )
 
         elif pcr <= self.bearish_pcr_threshold:
@@ -268,8 +258,7 @@ class DeribitPCRProcessor(BaseSignalProcessor):
                 strength = SignalStrength.MODERATE
 
             logger.info(
-                f"DeribitPCR: LOW PCR={pcr:.3f} "
-                f"(excessive calls = greed) → contrarian BEARISH"
+                f"DeribitPCR: LOW PCR={pcr:.3f} (excessive calls = greed) → contrarian BEARISH"
             )
 
         else:
@@ -296,10 +285,11 @@ class DeribitPCRProcessor(BaseSignalProcessor):
                 "short_put_oi": pcr_data.get("short_put_oi"),
                 "short_call_oi": pcr_data.get("short_call_oi"),
                 "interpretation": (
-                    "excessive_puts_fear" if direction == SignalDirection.BULLISH
+                    "excessive_puts_fear"
+                    if direction == SignalDirection.BULLISH
                     else "excessive_calls_greed"
                 ),
-            }
+            },
         )
 
         self._record_signal(signal)

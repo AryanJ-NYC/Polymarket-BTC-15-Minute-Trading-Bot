@@ -1,484 +1,453 @@
-"""
-Polymarket Client - Production Implementation
-Real API integration with Polymarket CLOB
-"""
-import os
-import asyncio
-from decimal import Decimal
-from datetime import datetime
-from typing import Optional, Dict, Any, List
-from loguru import logger
+"""Polymarket US protocol, contract validation, and bounded IOC execution."""
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType as PolyOrderType
-from py_clob_client.order_builder.constants import BUY, SELL
-POLYMARKET_AVAILABLE = True
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
+from pathlib import Path
+from time import time_ns
+
+from dotenv import dotenv_values
+from polymarket_us import NotFoundError, PolymarketUS
 
 
 class PolymarketClient:
-    """
-    Production Polymarket API client.
-    
-    Features:
-    - Real order placement
-    - Live market data
-    - Position tracking
-    - Balance management
-    """
-    
-    def __init__(
-        self,
-        private_key: Optional[str] = None,
-        api_key: Optional[str] = None,
-        api_secret: Optional[str] = None,
-        api_passphrase: Optional[str] = None,
-        chain_id: int = 137,  # Polygon mainnet
-        testnet: bool = False,
+    def __init__(self, client: PolymarketUS):
+        self.client = client
+
+    @classmethod
+    def connect(cls, env_file: Path) -> PolymarketClient:
+        """Read only the explicitly selected US credential file."""
+        config = dotenv_values(env_file)
+        key_id = _credential(config, "POLYMARKET_US_KEY_ID", "POLYMARKET_KEY_ID")
+        secret = _credential(
+            config, "POLYMARKET_US_SECRET_KEY", "POLYMARKET_SECRET_KEY", "POLYMARKET_SECRET"
+        )
+        return cls(PolymarketUS(key_id=key_id, secret_key=secret, timeout=10, max_retries=0))
+
+    def close(self) -> None:
+        self.client.close()
+
+    def account(self) -> Account:
+        balances = self.client.account.balances()["balances"]
+        usd = [row for row in balances if row["currency"] == "USD"]
+        if len(usd) != 1:
+            raise ValueError("Expected exactly one USD account balance")
+        buying_power = number(usd[0]["buyingPower"])
+        positions = {}
+        cursor = None
+        for _ in range(100):
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            page = self.client.portfolio.positions(params)
+            positions.update(page["positions"])
+            if page.get("eof") is True:
+                break
+            next_cursor = page.get("nextCursor")
+            if not next_cursor or next_cursor == cursor:
+                raise ValueError("Incomplete positions pagination")
+            cursor = next_cursor
+        else:
+            raise ValueError("Positions pagination limit reached")
+        orders = self.client.orders.list()["orders"]
+        # Validate quantity fields rather than treating missing data as zero.
+        for position in positions.values():
+            position_quantity(position)
+        return Account(buying_power, positions, orders)
+
+    def discover_market(self) -> Market | None:
+        """Discover by typed asset terms and measurement windows, never slug guesses."""
+        now = datetime.now(timezone.utc)
+        params = {
+            "categories": ["crypto"],
+            "active": True,
+            "closed": False,
+            "endDateMin": now.isoformat(),
+            "endDateMax": (now + timedelta(hours=2)).isoformat(),
+            "limit": 100,
+        }
+        candidates = []
+        for offset in range(0, 2000, 100):
+            rows = self.client.markets.list({**params, "offset": offset})["markets"]
+            for row in rows:
+                terms = row.get("assetPriceTerms") or {}
+                if (
+                    terms.get("asset", {}).get("symbol") == "btc"
+                    and terms.get("horizon") == "15m"
+                    and terms.get("marketType") == "ASSET_PRICE_MARKET_TYPE_UP_DOWN"
+                ):
+                    market = parse_market(row)
+                    if market.start <= now < market.end:
+                        candidates.append(market)
+            if len(rows) < 100:
+                break
+        else:
+            raise ValueError("Market discovery pagination limit reached")
+        unique = {market.slug: market for market in candidates}
+        if len(unique) > 1:
+            raise ValueError("Multiple current BTC 15-minute contracts; refusing ambiguity")
+        return next(iter(unique.values()), None)
+
+    def market(self, slug: str) -> Market:
+        return parse_market(self.client.markets.retrieve_by_slug(slug)["market"])
+
+    def book(self, market: Market) -> Book:
+        # The authenticated route serves current contracts even when the public
+        # gateway returns a cached 404 for a newly opened measurement window.
+        # A unique query keeps intermediary caches from replaying a 30s-old book;
+        # the provider timestamp is still independently validated below.
+        data = self._fresh_get(f"/v1/markets/{market.slug}/book")["marketData"]
+        now = datetime.now(timezone.utc)
+        if data["marketSlug"] != market.slug or data["state"] != "MARKET_STATE_OPEN":
+            raise ValueError("Market book is not open or belongs to another contract")
+        timestamp = parse_time(data["transactTime"])
+        age = (now - timestamp).total_seconds()
+        # Public REST books are cached for up to 30 seconds by the exchange.
+        if not -5 <= age <= 35:
+            raise ValueError("Market book timestamp is stale or in the future")
+        bids = _levels(data["bids"], reverse=True)
+        asks = _levels(data["offers"], reverse=False)
+        if not bids or not asks or bids[0][0] >= asks[0][0]:
+            raise ValueError("Missing or crossed order book")
+        if not market.start <= now < market.end:
+            raise ValueError("Contract is outside its measurement window")
+        return Book(market.slug, bids, asks, timestamp)
+
+    def buy_plan(self, market: Market, book: Book, outcome: str, budget: Decimal) -> Plan:
+        _validate_book(market, book)
+        if outcome not in {"up", "down"} or not ZERO < budget <= Decimal("1"):
+            raise ValueError("Expected Up/Down and a budget of at most $1")
+        yes_price, available = book.asks[0] if outcome == "up" else book.bids[0]
+        price = yes_price if outcome == "up" else ONE - yes_price
+        # The maximum fee per share bounds cost even when a fill improves in price.
+        quantity = _floor(
+            min(available, budget / (price + market.fee_coefficient / 4)), market.increment
+        )
+        fee_bound = estimate_fee(market.fee_coefficient, quantity, Decimal("0.5"))
+        while quantity > ZERO and quantity * price + fee_bound > budget:
+            quantity -= market.increment
+            fee_bound = estimate_fee(market.fee_coefficient, quantity, Decimal("0.5"))
+        if quantity < market.increment:
+            raise ValueError("Budget or visible depth is below the minimum trade quantity")
+        return _plan(market, book, outcome, "BUY", yes_price, quantity, fee_bound)
+
+    def sell_plan(self, market: Market, book: Book, outcome: str, quantity: Decimal) -> Plan:
+        _validate_book(market, book)
+        if outcome not in {"up", "down"}:
+            raise ValueError("Expected Up or Down")
+        yes_price, available = book.bids[0] if outcome == "up" else book.asks[0]
+        quantity = _floor(min(quantity, available), market.increment)
+        if quantity < market.increment:
+            raise ValueError("Position or visible depth is below the minimum trade quantity")
+        fee = estimate_fee(market.fee_coefficient, quantity, Decimal("0.5"))
+        return _plan(market, book, outcome, "SELL", yes_price, quantity, fee)
+
+    def submit(self, plan: Plan) -> str:
+        """Preview and submit exactly once, returning the exchange-assigned ID.
+
+        The caller must durably reserve the attempt before entering this method.
+        Any exception after reservation is unresolved until reconciled, never retried.
+        """
+        if datetime.now(timezone.utc) >= plan.expires_at:
+            raise ValueError("Order plan has expired")
+        preview = self.client.orders.preview({"request": plan.request})["order"]
+        for field in ("marketSlug", "intent", "type", "tif"):
+            if preview.get(field) != plan.request[field]:
+                raise ValueError("Order preview changed the requested contract or order terms")
+        if (
+            number(preview["quantity"]) != plan.quantity
+            or amount(preview["price"]) != plan.yes_price
+        ):
+            raise ValueError("Order preview changed the requested price or quantity")
+        if datetime.now(timezone.utc) >= plan.expires_at:
+            raise ValueError("Order plan expired during preview")
+        result = self.client.orders.create(plan.request)
+        order_id = result["id"]
+        if not isinstance(order_id, str) or not order_id:
+            raise ValueError("Order response did not include an order ID")
+        return order_id
+
+    def order(self, order_id: str) -> dict:
+        order = self.client.orders.retrieve(order_id)["order"]
+        if order["id"] != order_id:
+            raise ValueError("Order readback ID mismatch")
+        return order
+
+    def cancel(self, order_id: str, slug: str) -> dict:
+        """Cancel only a known order and require independent terminal readback."""
+        order = self.order(order_id)
+        if order["marketSlug"] != slug:
+            raise ValueError("Cancellation contract mismatch")
+        if order["state"] not in TERMINAL_STATES:
+            self.client.orders.cancel(order_id, {"marketSlug": slug})
+            order = self.order(order_id)
+        if order["state"] not in TERMINAL_STATES:
+            raise ValueError("Cancellation is not confirmed; trading must stop")
+        return order
+
+    def settlement(self, slug: str) -> Decimal | None:
+        try:
+            result = self._fresh_get(f"/v1/markets/{slug}/settlement")
+        except NotFoundError:
+            return None
+        if result["slug"] != slug:
+            raise ValueError("Settlement contract mismatch")
+        value = number(result["settlement"])
+        if not ZERO <= value <= ONE:
+            raise ValueError("Invalid settlement value")
+        return value
+
+    def confirm_resolution(self, slug: str, expected_quantity: Decimal) -> bool:
+        """Require account activity proving ownership immediately before payout."""
+        cursor = None
+        resolutions = []
+        for _ in range(100):
+            params = {"marketSlug": slug, "limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            page = self.client.portfolio.activities(params)
+            for activity in page["activities"]:
+                if activity["type"] == "ACTIVITY_TYPE_TRADE":
+                    trade = activity["trade"]
+                    if trade["marketSlug"] != slug:
+                        raise ValueError("Activity contract mismatch")
+                    if trade["state"] == "TRADE_STATE_BUSTED":
+                        raise RuntimeError(
+                            "A bot-market trade was busted; reconcile the live journal"
+                        )
+                elif activity["type"] == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+                    resolution = activity["positionResolution"]
+                    if resolution["marketSlug"] != slug:
+                        raise ValueError("Resolution contract mismatch")
+                    resolutions.append(resolution)
+            if page.get("eof") is True:
+                break
+            next_cursor = page.get("nextCursor")
+            if not next_cursor or next_cursor == cursor:
+                raise ValueError("Incomplete settlement activity pagination")
+            cursor = next_cursor
+        else:
+            raise ValueError("Settlement activity pagination limit reached")
+        if not resolutions:
+            return False
+        if len(resolutions) != 1:
+            raise RuntimeError("Ambiguous account resolution history; reconcile the live journal")
+        before, after = resolutions[0]["beforePosition"], resolutions[0]["afterPosition"]
+        if position_quantity(before) != expected_quantity:
+            raise RuntimeError(
+                "Resolved quantity differs from bot ownership; reconcile the live journal"
+            )
+        if not after.get("expired") and position_quantity(after) != 0:
+            raise RuntimeError("Account resolution did not close the bot position")
+        return True
+
+    def _fresh_get(self, path: str) -> dict:
+        return self.client.get(path, query={"_ts": str(time_ns())}, authenticated=True)
+
+
+def parse_market(row: dict) -> Market:
+    terms = row["assetPriceTerms"]
+    if (
+        terms["asset"]["symbol"] != "btc"
+        or terms["horizon"] != "15m"
+        or terms["marketType"] != "ASSET_PRICE_MARKET_TYPE_UP_DOWN"
     ):
-        """
-        Initialize Polymarket client.
-        
-        Args:
-            private_key: Ethereum private key (without 0x prefix)
-            api_key: Polymarket API key
-            api_secret: Polymarket API secret
-            api_passphrase: Polymarket API passphrase
-            chain_id: 137 for Polygon mainnet, 80002 for Amoy testnet
-            testnet: Use testnet mode
-        """
-        # Load from environment if not provided
-        self.private_key = private_key or os.getenv("POLYMARKET_PK")
-        self.api_key = api_key or os.getenv("POLYMARKET_API_KEY")
-        self.api_secret = api_secret or os.getenv("POLYMARKET_API_SECRET")
-        self.api_passphrase = api_passphrase or os.getenv("POLYMARKET_PASSPHRASE")
-        
-        self.chain_id = chain_id
-        self.testnet = testnet
-        
-        # Client instance
-        self.client: Optional[ClobClient] = None
-        self._connected = False
-        
-        # Market cache
-        self._markets_cache: Dict[str, Any] = {}
-        
-        # Check if SDK available
-        if not POLYMARKET_AVAILABLE:
-            logger.error("Polymarket SDK not available. Install: pip install py-clob-client")
-            return
-        
-        # Validate credentials
-        if not self.private_key:
-            logger.error("POLYMARKET_PK not found in environment")
-        if not self.api_key:
-            logger.error("POLYMARKET_API_KEY not found in environment")
-        
-        mode = "TESTNET" if testnet else "MAINNET"
-        logger.info(f"Initialized Polymarket Client [{mode}] Chain ID: {chain_id}")
-    
-    async def connect(self) -> bool:
-        """
-        Connect to Polymarket API.
-        
-        Returns:
-            True if connected successfully
-        """
-        if not POLYMARKET_AVAILABLE:
-            logger.error("Cannot connect: SDK not installed")
-            return False
-        
-        if not self.private_key or not self.api_key:
-            logger.error("Cannot connect: Missing credentials")
-            return False
-        
-        try:
-            # Initialize CLOB client
-            self.client = ClobClient(
-                host="https://clob.polymarket.com" if not self.testnet else "https://clob-testnet.polymarket.com",
-                key=self.private_key,
-                chain_id=self.chain_id,
-                signature_type=1,  # EOA signature
-                funder=os.getenv("POLYMARKET_FUNDER"),  # Optional funder address
-            )
-            
-            # Set API credentials for authenticated endpoints
-            self.client.set_api_creds(
-                api_key=self.api_key,
-                api_secret=self.api_secret,
-                api_passphrase=self.api_passphrase,
-            )
-            
-            # Test connection
-            balance = await self._get_balance_internal()
-            
-            if balance is not None:
-                self._connected = True
-                logger.info(f"✓ Connected to Polymarket CLOB")
-                logger.info(f"  Balance: ${balance.get('USDC', 0):.2f} USDC")
-                return True
-            else:
-                logger.error("Failed to verify connection")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Failed to connect to Polymarket: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    async def disconnect(self) -> None:
-        """Disconnect from API."""
-        self._connected = False
-        self.client = None
-        logger.info("Disconnected from Polymarket")
-    
-    async def get_btc_market(self) -> Optional[Dict[str, Any]]:
-        """
-        Get BTC prediction market details.
-        
-        Returns:
-            Market information dict
-        """
-        if not self.client:
-            logger.error("Client not connected")
-            return None
-        
-        try:
-            # Search for BTC markets
-            # Note: You'll need to find the specific market ID for your BTC price prediction
-            # This is a placeholder - update with actual market ID
-            
-            # Example: Get market by condition ID
-            # markets = self.client.get_markets()
-            
-            # For now, return a mock structure
-            # TODO: Implement actual market search
-            logger.warning("BTC market lookup not fully implemented")
-            
-            return {
-                "condition_id": "BTC_PRICE_PREDICTION",  # Replace with real ID
-                "market_id": "btc_market",
-                "question": "Will BTC be above $65000?",
-                "end_date": "2026-03-01",
-            }
-            
-        except Exception as e:
-            logger.error(f"Error fetching BTC market: {e}")
-            return None
-    
-    async def get_market_price(self, token_id: str) -> Optional[Decimal]:
-        """
-        Get current market price for a token.
-        
-        Args:
-            token_id: Token ID (outcome token)
-            
-        Returns:
-            Current price (0-1 for binary markets)
-        """
-        if not self.client:
-            return None
-        
-        try:
-            # Get order book
-            book = self.client.get_order_book(token_id)
-            
-            if book and "bids" in book and len(book["bids"]) > 0:
-                # Best bid price
-                best_bid = Decimal(str(book["bids"][0]["price"]))
-                return best_bid
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error fetching market price: {e}")
-            return None
-    
-    async def get_orderbook(self, token_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get order book for token.
-        
-        Args:
-            token_id: Token ID
-            
-        Returns:
-            Order book with bids and asks
-        """
-        if not self.client:
-            return None
-        
-        try:
-            book = self.client.get_order_book(token_id)
-            
-            return {
-                "timestamp": datetime.now(),
-                "token_id": token_id,
-                "bids": [
-                    {
-                        "price": Decimal(str(bid["price"])),
-                        "size": Decimal(str(bid["size"])),
-                    }
-                    for bid in book.get("bids", [])
-                ],
-                "asks": [
-                    {
-                        "price": Decimal(str(ask["price"])),
-                        "size": Decimal(str(ask["size"])),
-                    }
-                    for ask in book.get("asks", [])
-                ],
-            }
-            
-        except Exception as e:
-            logger.error(f"Error fetching orderbook: {e}")
-            return None
-    
-    async def place_order(
-        self,
-        token_id: str,
-        side: str,  # "buy" or "sell"
-        size: Decimal,
-        price: Optional[Decimal] = None,
-        order_type: str = "GTC",  # GTC, FOK, GTD
-    ) -> Optional[str]:
-        """
-        Place order on market.
-        
-        Args:
-            token_id: Token ID to trade
-            side: "buy" or "sell"
-            size: Order size (number of outcome tokens)
-            price: Limit price (0-1 range), None for market order
-            order_type: Order type (GTC, FOK, GTD)
-            
-        Returns:
-            Order ID if successful
-        """
-        if not self.client:
-            logger.error("Client not connected")
-            return None
-        
-        try:
-            # Convert to Polymarket format
-            poly_side = BUY if side.lower() == "buy" else SELL
-            
-            # If no price specified, use market order (best available price)
-            if price is None:
-                # Get best price from orderbook
-                book = await self.get_orderbook(token_id)
-                if not book:
-                    logger.error("Cannot get market price")
-                    return None
-                
-                if side.lower() == "buy":
-                    price = book["asks"][0]["price"] if book["asks"] else Decimal("0.5")
-                else:
-                    price = book["bids"][0]["price"] if book["bids"] else Decimal("0.5")
-            
-            # Create order arguments
-            order_args = OrderArgs(
-                token_id=token_id,
-                price=float(price),
-                size=float(size),
-                side=poly_side,
-                fee_rate_bps=0,  # Fee in basis points
-            )
-            
-            # Build and sign order
-            signed_order = self.client.create_order(order_args)
-            
-            # Submit order
-            response = self.client.post_order(signed_order, order_type=order_type)
-            
-            if response and "orderID" in response:
-                order_id = response["orderID"]
-                
-                logger.info(
-                    f"Order placed: {order_id} "
-                    f"{side.upper()} {size} @ {price:.4f}"
-                )
-                
-                return order_id
-            else:
-                logger.error(f"Order placement failed: {response}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error placing order: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    async def cancel_order(self, order_id: str) -> bool:
-        """
-        Cancel order.
-        
-        Args:
-            order_id: Order ID to cancel
-            
-        Returns:
-            True if cancelled successfully
-        """
-        if not self.client:
-            return False
-        
-        try:
-            response = self.client.cancel_order(order_id)
-            
-            if response:
-                logger.info(f"Order cancelled: {order_id}")
-                return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error cancelling order: {e}")
-            return False
-    
-    async def get_open_orders(self) -> List[Dict[str, Any]]:
-        """
-        Get all open orders.
-        
-        Returns:
-            List of open orders
-        """
-        if not self.client:
-            return []
-        
-        try:
-            orders = self.client.get_orders()
-            
-            open_orders = []
-            for order in orders:
-                if order.get("status") == "live":
-                    open_orders.append({
-                        "order_id": order["id"],
-                        "token_id": order["token_id"],
-                        "side": order["side"],
-                        "price": Decimal(str(order["price"])),
-                        "size": Decimal(str(order["size"])),
-                        "filled": Decimal(str(order.get("size_matched", 0))),
-                        "timestamp": datetime.fromisoformat(order["created_at"]),
-                    })
-            
-            return open_orders
-            
-        except Exception as e:
-            logger.error(f"Error fetching open orders: {e}")
-            return []
-    
-    async def get_positions(self) -> List[Dict[str, Any]]:
-        """
-        Get current positions.
-        
-        Returns:
-            List of positions
-        """
-        if not self.client:
-            return []
-        
-        try:
-            # Get balance of outcome tokens
-            balances = self.client.get_balances()
-            
-            positions = []
-            for token_id, balance in balances.items():
-                if token_id != "USDC" and float(balance) > 0:
-                    positions.append({
-                        "token_id": token_id,
-                        "size": Decimal(str(balance)),
-                        "timestamp": datetime.now(),
-                    })
-            
-            return positions
-            
-        except Exception as e:
-            logger.error(f"Error fetching positions: {e}")
-            return []
-    
-    async def _get_balance_internal(self) -> Optional[Dict[str, Decimal]]:
-        """Internal method to get balance."""
-        if not self.client:
-            return None
-        
-        try:
-            balances = self.client.get_balances()
-            
-            return {
-                token: Decimal(str(amount))
-                for token, amount in balances.items()
-            }
-            
-        except Exception as e:
-            logger.error(f"Error fetching balance: {e}")
-            return None
-    
-    async def get_balance(self) -> Dict[str, Decimal]:
-        """
-        Get account balance.
-        
-        Returns:
-            Balance dict with USDC and token balances
-        """
-        return await self._get_balance_internal() or {}
-    
-    async def get_trades(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        Get recent trades.
-        
-        Args:
-            limit: Maximum trades to return
-            
-        Returns:
-            List of recent trades
-        """
-        if not self.client:
-            return []
-        
-        try:
-            trades = self.client.get_trades()
-            
-            recent_trades = []
-            for trade in trades[:limit]:
-                recent_trades.append({
-                    "trade_id": trade["id"],
-                    "order_id": trade["order_id"],
-                    "token_id": trade["asset_id"],
-                    "side": trade["side"],
-                    "price": Decimal(str(trade["price"])),
-                    "size": Decimal(str(trade["size"])),
-                    "timestamp": datetime.fromisoformat(trade["timestamp"]),
-                })
-            
-            return recent_trades
-            
-        except Exception as e:
-            logger.error(f"Error fetching trades: {e}")
-            return []
-    
+        raise ValueError("Not a BTC 15-minute Up/Down contract")
+    start, end = parse_time(terms["windowStart"]), parse_time(terms["windowEnd"])
+    if end - start != timedelta(minutes=15):
+        raise ValueError("Unexpected contract measurement window")
+    sides = row["marketSides"]
+    if len(sides) != 2 or {side["long"] for side in sides} != {True, False}:
+        raise ValueError("Expected exactly one Yes and one No instrument")
+    increment = number(row["minimumTradeQty"])
+    tick = number(row["orderPriceMinTickSize"])
+    coefficient = number(row["feeCoefficient"])
+    if increment <= ZERO or not ZERO < tick < ONE or not ZERO <= coefficient <= ONE:
+        raise ValueError("Invalid market quantity, tick, or fee terms")
+    return Market(
+        row["slug"],
+        start,
+        end,
+        increment,
+        tick,
+        coefficient,
+        row["active"] is True
+        and row["closed"] is False
+        and all(side["tradable"] is True for side in sides),
+    )
+
+
+def position_quantity(position: dict) -> Decimal:
+    return number(position["netPositionDecimal"])
+
+
+def order_fill(order: dict, plan: Plan) -> tuple[Decimal, Decimal, Decimal]:
+    """Return actual quantity, outcome-price notional, and exchange-collected fee."""
+    if order["marketSlug"] != plan.slug or order["intent"] != plan.request["intent"]:
+        raise ValueError("Filled order contract or intent mismatch")
+    quantity = number(order["cumQuantity"])
+    if not ZERO <= quantity <= plan.quantity:
+        raise ValueError("Invalid cumulative fill quantity")
+    if quantity == ZERO:
+        return ZERO, ZERO, ZERO
+    yes_price = amount(order["avgPx"])
+    price = yes_price if plan.outcome == "up" else ONE - yes_price
+    if not ZERO < price < ONE:
+        raise ValueError("Invalid fill price")
+    limit = plan.yes_price if plan.outcome == "up" else ONE - plan.yes_price
+    if (plan.action == "BUY" and price > limit) or (plan.action == "SELL" and price < limit):
+        raise ValueError("Fill violated the limit price")
+    fee = amount(order["commissionNotionalTotalCollected"])
+    if fee < ZERO:
+        raise ValueError("Unexpected negative taker fee")
+    return quantity, quantity * price, fee
+
+
+def number(value) -> Decimal:
+    result = Decimal(str(value))
+    if not result.is_finite():
+        raise ValueError("Expected a finite decimal")
+    return result
+
+
+def estimate_fee(coefficient: Decimal, quantity: Decimal, yes_price: Decimal) -> Decimal:
+    """US taker fee; p=0.5 gives the conservative per-order bound."""
+    return (coefficient * quantity * yes_price * (ONE - yes_price)).quantize(
+        CENT, rounding=ROUND_HALF_EVEN
+    )
+
+
+def amount(value: dict) -> Decimal:
+    if value["currency"] != "USD":
+        raise ValueError("Expected a USD amount")
+    return number(value["value"])
+
+
+def parse_time(value: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("Missing market timestamp")
+    result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if result.tzinfo is None:
+        raise ValueError("Expected a timezone-aware timestamp")
+    return result.astimezone(timezone.utc)
+
+
+def _credential(config: dict, *names: str) -> str:
+    values = {config[name].strip() for name in names if config.get(name)}
+    if len(values) != 1:
+        raise ValueError(f"Set one consistent credential using {' or '.join(names)}")
+    return values.pop()
+
+
+def _levels(rows: list[dict], *, reverse: bool) -> tuple:
+    levels = [(amount(row["px"]), number(row["qty"])) for row in rows]
+    if any(not ZERO < price < ONE or quantity < ZERO for price, quantity in levels):
+        raise ValueError("Invalid order book level")
+    return tuple(sorted((level for level in levels if level[1] > ZERO), reverse=reverse))
+
+
+def _validate_book(market: Market, book: Book) -> None:
+    now = datetime.now(timezone.utc)
+    if not market.tradable or book.slug != market.slug or not market.start <= now < market.end:
+        raise ValueError("Contract is not currently tradable")
+    if not -5 <= (now - book.timestamp).total_seconds() <= 35:
+        raise ValueError("Order book is stale")
+
+
+def _floor(value: Decimal, increment: Decimal) -> Decimal:
+    return (value / increment).to_integral_value(rounding=ROUND_DOWN) * increment
+
+
+def _plan(
+    market: Market,
+    book: Book,
+    outcome: str,
+    action: str,
+    yes_price: Decimal,
+    quantity: Decimal,
+    fee: Decimal,
+) -> Plan:
+    if yes_price % market.tick:
+        raise ValueError("Book price is not aligned to the market tick")
+    intent = f"ORDER_INTENT_{action}_{'LONG' if outcome == 'up' else 'SHORT'}"
+    request = {
+        "marketSlug": market.slug,
+        "intent": intent,
+        "type": "ORDER_TYPE_LIMIT",
+        "price": {"value": str(yes_price), "currency": "USD"},
+        "quantity": float(quantity),
+        "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+        "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+        "synchronousExecution": True,
+    }
+    price = yes_price if outcome == "up" else ONE - yes_price
+    expires = min(market.end, book.timestamp + timedelta(seconds=35))
+    return Plan(
+        market.slug, outcome, action, yes_price, quantity, quantity * price, fee, request, expires
+    )
+
+
+@dataclass(frozen=True)
+class Market:
+    slug: str
+    start: datetime
+    end: datetime
+    increment: Decimal
+    tick: Decimal
+    fee_coefficient: Decimal
+    tradable: bool
+
+
+@dataclass(frozen=True)
+class Book:
+    slug: str
+    bids: tuple[tuple[Decimal, Decimal], ...]
+    asks: tuple[tuple[Decimal, Decimal], ...]
+    timestamp: datetime
+
     @property
-    def is_connected(self) -> bool:
-        """Check if connected."""
-        return self._connected and self.client is not None
+    def mid(self) -> Decimal:
+        return (self.bids[0][0] + self.asks[0][0]) / 2
+
+    def signal_book(self) -> dict:
+        return {
+            "bids": [{"price": str(p), "size": str(q)} for p, q in self.bids],
+            "asks": [{"price": str(p), "size": str(q)} for p, q in self.asks],
+        }
 
 
-# Singleton instance
-_polymarket_client_instance = None
+@dataclass(frozen=True)
+class Plan:
+    slug: str
+    outcome: str
+    action: str
+    yes_price: Decimal
+    quantity: Decimal
+    notional: Decimal
+    fee_bound: Decimal
+    request: dict
+    expires_at: datetime
 
-def get_polymarket_client(
-    testnet: bool = False,
-    force_new: bool = False,
-) -> PolymarketClient:
-    """
-    Get singleton Polymarket client.
-    
-    Args:
-        testnet: Use testnet mode
-        force_new: Force creation of new instance
-    """
-    global _polymarket_client_instance
-    
-    if _polymarket_client_instance is None or force_new:
-        _polymarket_client_instance = PolymarketClient(testnet=testnet)
-    
-    return _polymarket_client_instance
+    @property
+    def budget(self) -> Decimal:
+        return self.notional + self.fee_bound
+
+
+@dataclass(frozen=True)
+class Account:
+    buying_power: Decimal
+    positions: dict
+    orders: list[dict]
+
+
+ZERO = Decimal("0")
+ONE = Decimal("1")
+CENT = Decimal("0.01")
+TERMINAL_STATES = {
+    "ORDER_STATE_FILLED",
+    "ORDER_STATE_CANCELED",
+    "ORDER_STATE_REJECTED",
+    "ORDER_STATE_EXPIRED",
+}

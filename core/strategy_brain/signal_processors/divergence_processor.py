@@ -26,22 +26,19 @@ KEY INSIGHT:
      → If poly_price < 0.35 and momentum is bullish → BULLISH (market over-priced Down)
      → If poly_price near 0.50, no strong edge → skip
 """
-from decimal import Decimal
+
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
+
 from loguru import logger
-
-import os
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
 
 from core.strategy_brain.signal_processors.base_processor import (
     BaseSignalProcessor,
-    TradingSignal,
-    SignalType,
     SignalDirection,
     SignalStrength,
+    SignalType,
+    TradingSignal,
 )
 
 
@@ -65,11 +62,11 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
 
     def __init__(
         self,
-        divergence_threshold: float = 0.05,   # kept for API compatibility (unused)
+        divergence_threshold: float = 0.05,  # kept for API compatibility (unused)
         min_confidence: float = 0.55,
-        momentum_threshold: float = 0.003,     # 0.3% spot move = meaningful momentum
+        momentum_threshold: float = 0.003,  # 0.3% spot move = meaningful momentum
         extreme_prob_threshold: float = 0.68,  # above this → fade to Down
-        low_prob_threshold: float = 0.32,      # below this → fade to Up
+        low_prob_threshold: float = 0.32,  # below this → fade to Up
     ):
         super().__init__("PriceDivergence")
 
@@ -90,7 +87,7 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
 
     def process(
         self,
-        current_price: Decimal,      # Polymarket UP probability (0.0–1.0)
+        current_price: Decimal,  # Polymarket UP probability (0.0–1.0)
         historical_prices: list,
         metadata: Dict[str, Any] = None,
     ) -> Optional[TradingSignal]:
@@ -109,8 +106,8 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
 
         poly_prob = float(current_price)  # e.g. 0.49 = 49% chance BTC goes Up
 
-        spot_price = metadata.get('spot_price')
-        poly_momentum = float(metadata.get('momentum', 0.0))
+        spot_price = metadata.get("spot_price")
+        poly_momentum = float(metadata.get("momentum", 0.0))
 
         # --- Update spot price history for momentum ---
         if spot_price is not None:
@@ -130,7 +127,7 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
 
         logger.info(
             f"PriceDivergence: poly_prob={poly_prob:.3f}, "
-            f"spot_momentum={spot_momentum:+.4f} ({spot_momentum*100:+.2f}%), "
+            f"spot_momentum={spot_momentum:+.4f} ({spot_momentum * 100:+.2f}%), "
             f"spot_price={'${:,.2f}'.format(spot_price) if spot_price else 'N/A'}"
         )
 
@@ -143,7 +140,9 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
             # is extreme and tends to revert. Fade to DOWN unless momentum
             # strongly confirms the move.
             if spot_momentum <= 0.001:  # momentum not strongly confirming Up
-                extremeness = (poly_prob - self.extreme_prob_threshold) / (1.0 - self.extreme_prob_threshold)
+                extremeness = (poly_prob - self.extreme_prob_threshold) / (
+                    1.0 - self.extreme_prob_threshold
+                )
                 confidence = min(0.80, self.min_confidence + extremeness * 0.25)
                 strength = SignalStrength.STRONG if extremeness > 0.5 else SignalStrength.MODERATE
 
@@ -160,7 +159,7 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
                         "poly_prob": poly_prob,
                         "spot_momentum": spot_momentum,
                         "extremeness": extremeness,
-                    }
+                    },
                 )
                 self._record_signal(signal)
                 logger.info(
@@ -190,12 +189,12 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
                         "poly_prob": poly_prob,
                         "spot_momentum": spot_momentum,
                         "extremeness": extremeness,
-                    }
+                    },
                 )
                 self._record_signal(signal)
                 logger.info(
                     f"Generated BULLISH fade signal: poly Down prob too high "
-                    f"({1-poly_prob:.0%}) with weak negative momentum → fade UP, "
+                    f"({1 - poly_prob:.0%}) with weak negative momentum → fade UP, "
                     f"confidence={confidence:.2%}"
                 )
                 return signal
@@ -210,7 +209,7 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
             # Strong spot momentum but Polymarket still near 50/50 → edge
             momentum_strength = abs(spot_momentum) / self.momentum_threshold  # multiplier
             confidence = min(0.78, 0.55 + min(momentum_strength - 1, 2) * 0.08)
-            
+
             if momentum_strength >= 3:
                 strength = SignalStrength.STRONG
             elif momentum_strength >= 2:
@@ -236,7 +235,7 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
                     "poly_prob": poly_prob,
                     "spot_momentum": spot_momentum,
                     "momentum_strength": momentum_strength,
-                }
+                },
             )
             self._record_signal(signal)
             logger.info(

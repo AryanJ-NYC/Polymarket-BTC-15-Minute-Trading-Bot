@@ -13,21 +13,19 @@ FIX: Original threshold was 15% deviation, designed for dollar prices.
        - Also detect VELOCITY (fast moves in the last 3 ticks)
        - Mean reversion logic is still correct: spike up → BEARISH, spike down → BULLISH
 """
-from decimal import Decimal
-from datetime import datetime
-from typing import Optional, Dict, Any
-from loguru import logger
-import os
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
+from datetime import datetime
+from decimal import Decimal
+from typing import Any, Dict, Optional
+
+from loguru import logger
 
 from core.strategy_brain.signal_processors.base_processor import (
     BaseSignalProcessor,
-    TradingSignal,
-    SignalType,
     SignalDirection,
     SignalStrength,
+    SignalType,
+    TradingSignal,
 )
 
 
@@ -49,10 +47,10 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
 
     def __init__(
         self,
-        spike_threshold: float = 0.05,    # FIXED: was 0.15, now 0.05 for probability prices
+        spike_threshold: float = 0.05,  # FIXED: was 0.15, now 0.05 for probability prices
         lookback_periods: int = 20,
-        min_confidence: float = 0.55,     # FIXED: was 0.60, slightly lower for more signals
-        velocity_threshold: float = 0.03, # 3% move in 3 ticks = velocity spike
+        min_confidence: float = 0.55,  # FIXED: was 0.60, slightly lower for more signals
+        velocity_threshold: float = 0.03,  # 3% move in 3 ticks = velocity spike
     ):
         super().__init__("SpikeDetection")
 
@@ -84,7 +82,7 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
             return None
 
         # --- Compute 20-period MA ---
-        recent = historical_prices[-self.lookback_periods:]
+        recent = historical_prices[-self.lookback_periods :]
         ma = sum(float(p) for p in recent) / len(recent)
         curr = float(current_price)
 
@@ -107,8 +105,7 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
         # =====================================================================
         if deviation_abs >= self.spike_threshold:
             logger.info(
-                f"MA deviation spike: {deviation:+.3%} from MA "
-                f"(${curr:.4f} vs MA={ma:.4f})"
+                f"MA deviation spike: {deviation:+.3%} from MA (${curr:.4f} vs MA={ma:.4f})"
             )
 
             # Fade the spike (mean reversion)
@@ -132,7 +129,8 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
 
             stop_distance = abs(Decimal(str(curr)) - Decimal(str(ma))) * Decimal("1.5")
             stop_loss = (
-                Decimal(str(curr)) + stop_distance if direction == SignalDirection.BEARISH
+                Decimal(str(curr)) + stop_distance
+                if direction == SignalDirection.BEARISH
                 else Decimal(str(curr)) - stop_distance
             )
 
@@ -152,7 +150,7 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
                     "moving_average": ma,
                     "velocity": velocity,
                     "spike_direction": "up" if deviation > 0 else "down",
-                }
+                },
             )
             self._record_signal(signal)
             logger.info(
@@ -167,9 +165,7 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
         # Only fires when price is NOT already at an MA extreme (no double-signal)
         # =====================================================================
         if abs(velocity) >= self.velocity_threshold and deviation_abs < self.spike_threshold * 0.6:
-            logger.info(
-                f"Velocity spike: {velocity:+.3%} in last 3 ticks"
-            )
+            logger.info(f"Velocity spike: {velocity:+.3%} in last 3 ticks")
 
             # Momentum continuation (short-term, lower confidence)
             direction = SignalDirection.BULLISH if velocity > 0 else SignalDirection.BEARISH
@@ -201,7 +197,7 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
                     "velocity_pct": velocity,
                     "moving_average": ma,
                     "deviation_pct": deviation,
-                }
+                },
             )
             self._record_signal(signal)
             logger.info(
