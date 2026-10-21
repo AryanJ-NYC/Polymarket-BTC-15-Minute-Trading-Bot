@@ -115,8 +115,10 @@ The stream lane runs the default `btc-15m-fusion-v1` policy with `model=None`
 read-only, recording each outcome, feature-sample count, calculation duration,
 and receipt-to-decision latency. It does not measure the optional probability
 model's inference or EV selection, account-based sizing, or order submission. Its
-optional context requests are known GET-only calls and use separate clients; the
-exchange request totals exclude those calls. The REST baseline lane only samples
+optional context comes from the independent [background refresher](context-refresh.md).
+Each decision retains one snapshot with source values, ages and availability;
+the summary reports context request counts separately from exchange HTTP totals.
+The REST baseline lane only samples
 quotes. The observer invokes no account, order, or journal operations. Shutdown
 first prevents any further HTTP requests, including additional discovery pages,
 then waits for the in-flight baseline read and its sample write to finish before
@@ -148,9 +150,9 @@ healthy bot polling books. Tests establish healthy bot request behavior separate
 Provider age assumes the local UTC clock is accurate; the harness does not measure
 NTP/provider clock offset. Local receipt timing uses the same monotonic clock as
 the receiver. Sampled recovery is an upper bound at the actual observation
-cadence; each recovery event records the preceding sample gap. Slow optional
-context reads can make that gap longer than three seconds.
-Stream receipt-to-decision latency includes sampling wait, optional context
-reads, and strategy computation. REST receipt-to-decision and provider network
+cadence; each recovery event records the preceding sample gap. Optional context
+HTTP requests run in the background and cannot delay the sampling loop.
+Stream receipt-to-decision latency includes sampling wait, the local context
+snapshot read, and strategy computation. REST receipt-to-decision and provider network
 latency remain explicitly unavailable in this observer. No result establishes
 profitability or live-order execution behavior.

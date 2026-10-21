@@ -17,6 +17,19 @@ import execution.trade_journal as journal_module
 from execution.polymarket_client import PolymarketClient
 
 
+@pytest.fixture(autouse=True)
+def context_http(monkeypatch):
+    # CLI lifecycle tests start the real refresher. Keep optional public feeds
+    # offline unless a test explicitly supplies its own controlled transport.
+    client = httpx.AsyncClient
+
+    def offline_client(**kwargs):
+        kwargs.setdefault("transport", httpx.MockTransport(lambda _: httpx.Response(503)))
+        return client(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", offline_client)
+
+
 @pytest.fixture
 def clock(monkeypatch):
     class Clock(datetime):
