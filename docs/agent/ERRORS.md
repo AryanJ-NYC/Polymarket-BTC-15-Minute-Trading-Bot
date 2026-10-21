@@ -34,3 +34,12 @@
   ID plus pending reservation. Read-only account counts were zero afterward;
   counts alone cannot establish the order outcome. Do not delete the journal or
   restart blindly. This incident remains unresolved; updater gates preserve it.
+
+- HTTP 404 after successful create escaped terminal order readback and stopped
+  management while the order had actually filled. Offline HTTP transport tests
+  reproduce it. Retry only known-ID reads, keep pending state across outages and
+  cancellation acknowledgments, and reconcile before any new entry. Never retry
+  create after a timeout or repair this by deleting journal rows.
+- Git fetch in the original checkout was denied when writing .git/FETCH_HEAD;
+  the narrowly elevated git fetch succeeded. Use an isolated managed worktree
+  based on current origin/main to preserve concurrent audit/research changes.

@@ -17,12 +17,16 @@ from polymarket_us import APIConnectionError, APIError, APITimeoutError
 
 from core.strategy_brain.strategies.btc_15min_strategy import BTCStrategy15Min
 from execution.polymarket_client import (
+    OrderNotSubmitted,
+    OrderPending,
     PolymarketClient,
+    api_error_summary,
     estimate_fee,
     number,
     order_fill,
     parse_time,
     position_quantity,
+    retryable_api_error,
 )
 from execution.trade_journal import TradeJournal, pending_plan
 
@@ -105,11 +109,13 @@ def main() -> int:
         if isinstance(exc, (ValueError, RuntimeError)) and type(exc).__module__ == "builtins":
             logger.error("Stopped: {}", exc)
         else:
-            logger.error(
-                "Stopped: {} (HTTP status {})",
-                type(exc).__name__,
-                getattr(exc, "status_code", "unavailable"),
-            )
+            logger.error("Stopped: {}", api_error_summary(exc))
+        # Status 2 is an operator/reconciliation stop, excluded from systemd
+        # restart. A supervisor must never turn unknown submissions into retries.
+        if isinstance(exc, (ValueError, RuntimeError)) or (
+            isinstance(exc, APIError) and not retryable_api_error(exc, missing=True)
+        ):
+            return 2
         return 1
     finally:
         for signum, handler in previous_handlers.items():
@@ -154,9 +160,28 @@ class TradingBot:
     def tick(self) -> None:
         if time.monotonic() < self.next_data_attempt:
             return
+        try:
+            self._tick()
+        except (APIError, APIConnectionError, APITimeoutError) as exc:
+            if any(row["pending"] and not row["order_id"] for row in self.journal.records()):
+                raise RuntimeError(
+                    "An order submission has an unknown outcome; reconcile before restarting. "
+                    + api_error_summary(exc)
+                ) from None
+            if not retryable_api_error(exc):
+                raise
+            self._wait_for_data(exc)
+
+    def _tick(self) -> None:
         self._reconcile()
-        self._manage_positions()
         if time.monotonic() < self.next_data_attempt:
+            return
+        unavailable = self._manage_positions()
+        if (
+            unavailable
+            or any(row["pending"] for row in self.journal.records())
+            or time.monotonic() < self.next_data_attempt
+        ):
             return
         if self.one_trade and self.trade_slug is not None:
             return
@@ -224,13 +249,36 @@ class TradingBot:
 
     def _execute(self, plan, market) -> None:
         if self.live:
-            order_id = self.exchange.submit(plan)
+            try:
+                order_id = self.exchange.submit(plan)
+            except OrderNotSubmitted as exc:
+                self.journal.finish_order(plan.slug, Decimal("0"), Decimal("0"), Decimal("0"))
+                logger.warning("Order not submitted for {}: {}", plan.slug, exc)
+                if isinstance(exc.cause, APIError):
+                    if getattr(exc.cause, "status_code", None) in {401, 403}:
+                        raise exc.cause from None
+                    self._wait_for_data(exc.cause)
+                return
+            except Exception as exc:
+                raise RuntimeError(
+                    "An order submission has an unknown outcome; reconcile before restarting. "
+                    + api_error_summary(exc)
+                ) from None
             self.journal.update(plan.slug, order_id=order_id)
-            order = self.exchange.cancel(order_id, plan.slug)
+            try:
+                order = self.exchange.cancel(order_id, plan.slug)
+            except (APIError, OrderPending) as exc:
+                if not isinstance(exc, OrderPending) and not retryable_api_error(exc, missing=True):
+                    raise
+                self._wait_for_order(order_id, exc)
+                return
             quantity, notional, fee = order_fill(order, plan)
         else:
             quantity, notional = plan.quantity, plan.notional
             fee = estimate_fee(market.fee_coefficient, quantity, plan.yes_price)
+        self._finish_order(plan, quantity, notional, fee)
+
+    def _finish_order(self, plan, quantity, notional, fee) -> None:
         self.journal.finish_order(plan.slug, quantity, notional, fee)
         logger.info(
             "{} {} {} | {} shares | notional ${:.4f} | fees ${:.2f}",
@@ -258,16 +306,34 @@ class TradingBot:
                     "and the reserved journal request before restarting; never retry it blindly."
                 )
             plan = pending_plan(row)
-            order = self.exchange.cancel(row["order_id"], row["slug"])
-            self.journal.finish_order(row["slug"], *order_fill(order, plan))
+            try:
+                order = self.exchange.cancel(row["order_id"], row["slug"])
+            except (APIError, OrderPending) as exc:
+                if not isinstance(exc, OrderPending) and not retryable_api_error(exc, missing=True):
+                    raise
+                self._wait_for_order(row["order_id"], exc)
+                if time.monotonic() < self.next_data_attempt:
+                    break
+                continue
+            self._finish_order(plan, *order_fill(order, plan))
 
     def _account_guard(self):
         account = self.exchange.account()
-        if account.orders:
-            raise RuntimeError("Account has open orders; reconcile them before starting this bot")
+        rows = self.journal.records()
+        pending = {row["order_id"]: row for row in rows if row["pending"] and row["order_id"]}
+        for order in account.orders:
+            row = pending.get(order["id"])
+            if (
+                row is None
+                or order["marketSlug"] != row["slug"]
+                or order["intent"] != row["pending"]["request"]["intent"]
+            ):
+                raise RuntimeError(
+                    "Account has open orders; reconcile them before starting this bot"
+                )
         expected = {
             row["slug"]: number(row["quantity"]) * (1 if row["outcome"] == "up" else -1)
-            for row in self.journal.records()
+            for row in rows
             if row["state"] == "open"
         }
         actual = {
@@ -280,66 +346,101 @@ class TradingBot:
             for slug, qty in expected.items()
             if not account.positions.get(slug, {}).get("expired")
         }
+        # While one known order awaits readback, other owned positions still
+        # need exits. Only that order's bounded fill range may differ; entries
+        # stay blocked until every pending order has been reconciled.
+        for row in pending.values():
+            plan = pending_plan(row)
+            sign = 1 if row["outcome"] == "up" else -1
+            before = number(row["quantity"]) * sign
+            after = before + plan.quantity * sign * (1 if plan.action == "BUY" else -1)
+            quantity = actual.pop(row["slug"], Decimal("0"))
+            # A settled contract may disappear while its order readback is
+            # delayed. Keep it unresolved without blocking other owned exits;
+            # terminal fill + provider resolution still gate its accounting.
+            ended = datetime.now(timezone.utc) >= parse_time(row["end"])
+            if not (ended and quantity == 0) and not min(before, after) <= quantity <= max(
+                before, after
+            ):
+                raise RuntimeError("Exchange pending position exceeds the reserved order quantity")
+            expected.pop(row["slug"], None)
         if expected != actual:
             raise RuntimeError(
                 "Exchange positions differ from the bot journal; reconcile before trading"
             )
         return account
 
-    def _manage_positions(self) -> None:
+    def _manage_positions(self) -> bool:
+        unavailable = False
         for row in self.journal.records():
-            if row["state"] != "open":
+            if row["state"] != "open" or row["pending"]:
                 continue
-            if datetime.now(timezone.utc) >= parse_time(row["end"]):
-                value = self.exchange.settlement(row["slug"])
-                if value is not None:
-                    if self.live:
-                        position = self.exchange.account().positions.get(row["slug"])
-                        if (
-                            position
-                            and not position.get("expired")
-                            and position_quantity(position) != 0
-                        ):
-                            continue
-                        signed_quantity = number(row["quantity"]) * (
-                            1 if row["outcome"] == "up" else -1
-                        )
-                        if not self.exchange.confirm_resolution(row["slug"], signed_quantity):
-                            raise RuntimeError(
-                                "Account settlement is unconfirmed; reconcile before trading"
-                            )
-                    self.journal.settle(row["slug"], value)
-                    logger.info("{} settled at YES {}", row["slug"], value)
-                continue
-            market = self.exchange.market(row["slug"])
             try:
-                book = self.exchange.book(market)
-                plan = self.exchange.sell_plan(
-                    market, book, row["outcome"], number(row["quantity"])
-                )
-            except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
-                if not _unavailable_book(exc):
+                unavailable = self._manage_position(row) or unavailable
+            except (APIError, APIConnectionError, APITimeoutError) as exc:
+                if not retryable_api_error(exc, missing=True):
                     raise
                 self._wait_for_data(exc)
-                if time.monotonic() < self.next_data_attempt:
-                    return
-                continue
-            # Include entry fees and previously realized exit proceeds in the return.
-            estimated_value = number(row["proceeds"]) + (
-                number(row["quantity"]) / plan.quantity * (plan.notional - plan.fee_bound)
-            )
-            change = estimated_value / number(row["entry_cost"]) - 1
-            if change <= Decimal("-0.30") or change >= Decimal("0.20"):
+                unavailable = True
+            if time.monotonic() < self.next_data_attempt:
+                break
+        return unavailable
+
+    def _manage_position(self, row: dict) -> bool:
+        if datetime.now(timezone.utc) >= parse_time(row["end"]):
+            value = self.exchange.settlement(row["slug"])
+            if value is not None:
                 if self.live:
-                    self._account_guard()
-                    position = self.exchange.account().positions[row["slug"]]
-                    available = abs(number(position["qtyAvailableDecimal"]))
-                    if available < plan.quantity:
+                    position = self.exchange.account().positions.get(row["slug"])
+                    if (
+                        position
+                        and not position.get("expired")
+                        and position_quantity(position) != 0
+                    ):
+                        return False
+                    signed_quantity = number(row["quantity"]) * (
+                        1 if row["outcome"] == "up" else -1
+                    )
+                    if not self.exchange.confirm_resolution(row["slug"], signed_quantity):
                         raise RuntimeError(
-                            "Bot position is not fully available for the requested exit"
+                            "Account settlement is unconfirmed; reconcile before trading"
                         )
-                self.journal.reserve_exit(plan)
-                self._execute(plan, market)
+                self.journal.settle(row["slug"], value)
+                logger.info("{} settled at YES {}", row["slug"], value)
+            return False
+        market = self.exchange.market(row["slug"])
+        try:
+            book = self.exchange.book(market)
+            plan = self.exchange.sell_plan(market, book, row["outcome"], number(row["quantity"]))
+        except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
+            if not _unavailable_book(exc):
+                raise
+            self._wait_for_data(exc)
+            return True
+        # Include entry fees and previously realized exit proceeds in the return.
+        estimated_value = number(row["proceeds"]) + (
+            number(row["quantity"]) / plan.quantity * (plan.notional - plan.fee_bound)
+        )
+        change = estimated_value / number(row["entry_cost"]) - 1
+        if change <= Decimal("-0.30") or change >= Decimal("0.20"):
+            if self.live:
+                self._account_guard()
+                position = self.exchange.account().positions[row["slug"]]
+                available = abs(number(position["qtyAvailableDecimal"]))
+                if available < plan.quantity:
+                    raise RuntimeError("Bot position is not fully available for the requested exit")
+            self.journal.reserve_exit(plan)
+            self._execute(plan, market)
+        return False
+
+    def _wait_for_order(self, order_id: str, exc: Exception) -> None:
+        logger.warning(
+            "Order {} remains pending; retrying reconciliation without resubmission: {}",
+            order_id,
+            str(exc) if isinstance(exc, OrderPending) else api_error_summary(exc),
+        )
+        if getattr(exc, "status_code", None) == 429:
+            self._wait_for_data(exc)
 
     def _wait_for_data(self, exc: Exception) -> None:
         if getattr(exc, "status_code", None) == 429:
@@ -357,7 +458,8 @@ class TradingBot:
             if not 0 <= delay < float("inf"):
                 delay = 30
             self.next_data_attempt = time.monotonic() + max(30, delay)
-        logger.warning("Waiting for usable market data ({})", type(exc).__name__)
+        detail = api_error_summary(exc) if isinstance(exc, APIError) else str(exc)
+        logger.warning("Waiting for exchange data: {}", detail)
 
 
 def _unavailable_book(exc: Exception) -> bool:

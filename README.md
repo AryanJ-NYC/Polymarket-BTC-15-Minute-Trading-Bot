@@ -67,7 +67,8 @@ python bot.py --live
 A successful account check or paper run does not establish real-order execution.
 Keep live trading off until you are ready to monitor actual fills. Stopping the
 process leaves filled positions in the account; restart the same mode to resume
-management. An interrupted/unknown submission stops trading for reconciliation.
+management. An unknown submission stops trading for reconciliation (exit status 2).
+Temporary read failures retain known order IDs and recover automatically.
 
 ## Strategy and limits
 
@@ -122,8 +123,20 @@ cannot attribute manual sell-and-rebuy trades that restore the same net holding.
 Detected discrepancies require reconciliation; local state is never replaced by
 an assumed settlement just because a provider position disappears.
 
-A known pending order ID is read and reconciled on restart. If a process dies or
-loses the response before saving an ID, it cannot know whether the order reached
+A known pending order ID is read and reconciled during the next tick and on
+restart. Each lookup allows three read attempts with one- and two-second delays
+for 404, timeouts, and server errors. Continued failures preserve the pending
+record, block new entries, and retry on later ticks. Other owned positions can
+still be managed; unknown account orders or out-of-range quantities stop trading.
+429 responses stop further requests until Retry-After (at least 30 seconds).
+Cancellation acknowledgments also require terminal readback before accounting.
+Preflight/preview failures proven to precede create release their reservation as
+unfilled; failures after create begins keep the reservation for reconciliation.
+BUY plans expire at minute 14 even when preview or account requests take time.
+Logs include the failed HTTP method/path and status without response bodies.
+
+If a process dies or loses the response before saving an ID, it cannot know
+whether the order reached
 the exchange. It stops instead of submitting again. Inspect the matching order
 in Polymarket US and the saved request in the SQLite journal before resolving
 that record. Preserve a copy of the journal and provider order/fill evidence;

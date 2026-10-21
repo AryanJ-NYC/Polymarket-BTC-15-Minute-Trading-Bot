@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
 from pathlib import Path
-from time import time_ns
+from time import sleep, time_ns
 
 from dotenv import dotenv_values
-from polymarket_us import NotFoundError, PolymarketUS
+from loguru import logger
+from polymarket_us import APIConnectionError, APIError, APITimeoutError, NotFoundError, PolymarketUS
 
 
 class PolymarketClient:
@@ -148,21 +149,25 @@ class PolymarketClient:
         """Preview and submit exactly once, returning the exchange-assigned ID.
 
         The caller must durably reserve the attempt before entering this method.
-        Any exception after reservation is unresolved until reconciled, never retried.
+        OrderNotSubmitted proves create was never called. Any other exception
+        is unresolved until reconciled, never retried.
         """
-        if datetime.now(timezone.utc) >= plan.expires_at:
-            raise ValueError("Order plan has expired")
-        preview = self.client.orders.preview({"request": plan.request})["order"]
-        for field in ("marketSlug", "intent", "type", "tif"):
-            if preview.get(field) != plan.request[field]:
-                raise ValueError("Order preview changed the requested contract or order terms")
-        if (
-            number(preview["quantity"]) != plan.quantity
-            or amount(preview["price"]) != plan.yes_price
-        ):
-            raise ValueError("Order preview changed the requested price or quantity")
-        if datetime.now(timezone.utc) >= plan.expires_at:
-            raise ValueError("Order plan expired during preview")
+        try:
+            if datetime.now(timezone.utc) >= plan.expires_at:
+                raise ValueError("Order plan has expired")
+            preview = self.client.orders.preview({"request": plan.request})["order"]
+            for field in ("marketSlug", "intent", "type", "tif"):
+                if preview.get(field) != plan.request[field]:
+                    raise ValueError("Order preview changed the requested contract or order terms")
+            if (
+                number(preview["quantity"]) != plan.quantity
+                or amount(preview["price"]) != plan.yes_price
+            ):
+                raise ValueError("Order preview changed the requested price or quantity")
+            if datetime.now(timezone.utc) >= plan.expires_at:
+                raise ValueError("Order plan expired during preview")
+        except Exception as exc:
+            raise OrderNotSubmitted(exc) from None
         result = self.client.orders.create(plan.request)
         order_id = result["id"]
         if not isinstance(order_id, str) or not order_id:
@@ -170,7 +175,19 @@ class PolymarketClient:
         return order_id
 
     def order(self, order_id: str) -> dict:
-        order = self.client.orders.retrieve(order_id)["order"]
+        # Only repeat reads of an already-known ID. Never enable SDK-wide retries:
+        # a lost create response cannot safely be replayed.
+        for attempt in range(3):
+            try:
+                order = self.client.orders.retrieve(order_id)["order"]
+                break
+            except (APIError, APIConnectionError, APITimeoutError) as exc:
+                if not retryable_api_error(exc, missing=True) or attempt == 2:
+                    raise
+                if getattr(exc, "status_code", None) == 429:
+                    raise  # The runner honors Retry-After without further requests.
+                logger.warning("Retrying order {} readback: {}", order_id, api_error_summary(exc))
+                sleep(2**attempt)
         if order["id"] != order_id:
             raise ValueError("Order readback ID mismatch")
         return order
@@ -184,7 +201,7 @@ class PolymarketClient:
             self.client.orders.cancel(order_id, {"marketSlug": slug})
             order = self.order(order_id)
         if order["state"] not in TERMINAL_STATES:
-            raise ValueError("Cancellation is not confirmed; trading must stop")
+            raise OrderPending(f"Order {order_id} cancellation is not yet confirmed")
         return order
 
     def settlement(self, slug: str) -> Decimal | None:
@@ -277,6 +294,21 @@ def parse_market(row: dict) -> Market:
         and row["closed"] is False
         and all(side["tradable"] is True for side in sides),
     )
+
+
+def retryable_api_error(exc: Exception, *, missing: bool = False) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    status = getattr(exc, "status_code", 0) or 0
+    return status in {408, 429} or status >= 500 or (missing and status == 404)
+
+
+def api_error_summary(exc: Exception) -> str:
+    """Log only request method/path and status, never bodies, headers, or keys."""
+    response = getattr(exc, "response", None)
+    request = response.request if response is not None else getattr(exc, "request", None)
+    operation = f"{request.method} {request.url.path}" if request is not None else "API request"
+    return f"{operation}: {type(exc).__name__} (HTTP status {getattr(exc, 'status_code', 'unavailable')})"
 
 
 def position_quantity(position: dict) -> Decimal:
@@ -384,6 +416,8 @@ def _plan(
     }
     price = yes_price if outcome == "up" else ONE - yes_price
     expires = min(market.end, book.timestamp + timedelta(seconds=35))
+    if action == "BUY":
+        expires = min(expires, market.start + timedelta(minutes=14))
     return Plan(
         market.slug, outcome, action, yes_price, quantity, quantity * price, fee, request, expires
     )
@@ -440,6 +474,19 @@ class Account:
     buying_power: Decimal
     positions: dict
     orders: list[dict]
+
+
+class OrderNotSubmitted(ValueError):
+    """The order failed preflight; no create request was attempted."""
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        message = str(cause) if type(cause) is ValueError else api_error_summary(cause)
+        super().__init__(message)
+
+
+class OrderPending(RuntimeError):
+    """A known order still needs terminal readback before recording its fill."""
 
 
 ZERO = Decimal("0")

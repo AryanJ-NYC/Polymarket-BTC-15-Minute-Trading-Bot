@@ -14,7 +14,7 @@ AryanJ-NYC), project **polymarket-us**.
 | Application / Python | `/opt/polymarket-us/current` symlink / `.venv/bin/python` (Python 3.12) |
 | Credentials | `/etc/polymarket-us/.env.us`, root-owned, mode 0640, service group read access |
 | Persistent state | `/var/lib/polymarket-us`, mode 0700; application `logs/` points here |
-| Service | `polymarket-us.service`, live configuration, `Restart=no`, disabled at boot |
+| Service | `polymarket-us.service`, live configuration, `Restart=on-failure`, 10-second delay, disabled at boot |
 
 No paid volumes, backups, databases, or other add-ons were enabled. A new
 dedicated Ed25519 key was created at `~/.ssh/polymarket_us_digitalocean` on the
@@ -23,12 +23,14 @@ selected SSH key for this Droplet. The private key stays on the Mac, mode 0600.
 
 ## Start and observe
 
-**Current incident:** the user started the service at 19:41 UTC. It failed at
-19:58:18 UTC with an API 404 after a signal. Read-only inspection found a reserved
-journal row with a pending request and an order ID; account reads reported no open
-orders or nonzero positions. Preserve the record and inspect the
-order's history before restarting. These counts do not resolve the unfinished
-order. The updater will not clear the reservation or revive the failed bot.
+**Incident follow-up (October 21):** a user-started run exited at 19:58:18 UTC
+with HTTP 404 during post-create readback/cancellation. Subsequent order reads
+confirmed a fill; account activity confirmed a zero-payout resolution. The user
+authorized restart with automatic recovery, which was applied at 20:14:39 UTC.
+At 20:14:41 UTC the existing runner reconciled its saved order ID, closed the
+settled journal row, and resumed LIVE observation. No journal record was deleted
+or manually rewritten. Restart policy is installed through a persistent systemd
+drop-in; the application recovery changes still require this PR's deployment.
 
 In DigitalOcean, open the Droplet link above, click **Web Console**, and connect
 as `root`. The server commands below work there. A copy of this guide is also
@@ -66,8 +68,10 @@ systemctl is-active polymarket-us
 
 Stopping does **not** close exchange positions. They remain unmanaged until the
 same journal and service resume. Do not run another copy locally or on another
-host against this account. The service uses `Restart=no` so fatal reconciliation
-stops remain available for inspection. It is not enabled at boot.
+host against this account. The service uses `Restart=on-failure` with a 10-second
+delay. The recovery release exits 2 for reconciliation/configuration/authentication
+stops, and `RestartPreventExitStatus=2` keeps those stopped for inspection. A manual
+`systemctl stop` remains stopped. The service is not enabled at boot.
 
 ## Read-only check and storage
 
@@ -126,8 +130,9 @@ reduce the first upgrade's interruption risk, but cannot eliminate it. Any faile
 post-stop check leaves the old release selected and the bot **stopped**, even if
 the cause is a newer main commit, a closed window, or a temporary read failure.
 The timer preserves that stop until the operator investigates and resumes it.
-A failed new startup also stays stopped; there is no blind rollback or retry of
-trading requests.
+The updater never rolls back or replays trading requests after a failed startup.
+The trading unit may restart ordinary failures; exit status 2 preserves a safety
+stop for operator reconciliation.
 
 Observe deployment separately from trading:
 

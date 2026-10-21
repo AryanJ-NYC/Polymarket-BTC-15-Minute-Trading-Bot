@@ -140,3 +140,29 @@ and rejects ambiguous multiple unfinished trades.
 Latest checks: **41 tests passed**, lint/format/whitespace checks passed. A scoped
 independent review confirmed the cap, restart behavior, signed/cache-busting reads,
 and continued validation. Actual real-money create/fill/cancel remains untested.
+
+## Order-readback recovery follow-up, 2026-10-21
+
+The user-started live run created and filled an order before a follow-up request
+returned HTTP 404 and exited. Subsequent authenticated order and scoped account
+activity reads confirmed its fill and later zero-payout resolution. This is real
+fill/resolution evidence; it does not prove controlled live cancellation or an
+economic edge. After the user explicitly requested immediate restart, systemd
+started the service at 20:14:39 UTC with on-failure/10-second restart policy. The
+existing runner reconciled the known ID and closed its settled journal row at
+20:14:41 UTC. No manual journal edits were performed.
+
+The recovery branch adds three-attempt known-ID GET retries, continued pending
+reconciliation across ticks/restarts, independent management of other owned
+positions, rate-limit backoff, preflight-vs-unknown submission handling, a final
+minute-14 BUY deadline and safe request-stage logs. Safety stops use exit 2 and
+are excluded from automatic restart. Full verification: **93 tests passed**;
+lint, formatting, compilation, dependency consistency and whitespace passed.
+See [independent review packet](agent/RECOVERY-REVIEW.md). The application changes
+are PR work; the immediate restart-policy change is already installed separately.
+
+The account position/resolution fee fields differed from the terminal order's
+collected commission in the incident. This patch retains terminal order-based
+accounting and does not claim an independently reconciled account-wide loss.
+Account-scoped journal ownership, broader strategy/paper correctness and economic
+validation remain outside this incident-recovery change.

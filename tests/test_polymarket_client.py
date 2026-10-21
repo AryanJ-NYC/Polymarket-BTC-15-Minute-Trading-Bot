@@ -105,6 +105,17 @@ def test_expired_plan_cannot_submit(venue, clock):
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
+def test_preview_cannot_push_buy_past_entry_cutoff(venue, clock):
+    market = parse_market(venue.market)
+    clock.current = market.start + timedelta(minutes=13, seconds=59)
+    venue.timestamp = clock.current.isoformat()
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    venue.preview_delay = 2
+    with pytest.raises(ValueError, match="expired during preview"):
+        venue.client.submit(plan)
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+
+
 def test_submit_cancel_and_partial_fill_readback(venue):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))

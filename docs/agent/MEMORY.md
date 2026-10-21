@@ -54,3 +54,14 @@
   pending order with an order ID; account reads reported no orders/nonzero
   positions. Preserve evidence and reconcile history before resuming; automation
   must not clear this record or restart the failed trading service.
+
+- Recovery follow-up, 2026-10-21: provider history confirmed the pending order
+  filled and later resolved at YES 0. User explicitly requested immediate start
+  with automatic restart; applied Restart=on-failure/10s at 20:14:39 UTC. The
+  existing runner reconciled the saved ID and closed the row at 20:14:41 UTC.
+- Recovery implementation preserves the submit interface: OrderNotSubmitted
+  proves preflight never reached create, while all other submit failures remain
+  ambiguous and cannot be replayed. Known order GETs retry three times; later
+  ticks/restarts resume pending IDs, block entries and manage other owned rows.
+  Unknown submissions/ownership/auth failures use exit 2, excluded from systemd
+  restarts. BUY deadline includes minute 14. No database migration is required.
