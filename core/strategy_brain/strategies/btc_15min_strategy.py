@@ -6,7 +6,6 @@ from collections import deque
 from datetime import datetime, timezone
 from time import monotonic
 
-import httpx
 from loguru import logger
 
 from core.strategy_brain.fusion_engine.signal_fusion import SignalFusionEngine
@@ -49,7 +48,7 @@ class BTCStrategy15Min:
             self.ticks.clear()
             self.last_sample = None
         # Sample the latest distinct snapshot at most every three seconds, with
-        # no catch-up after slow context reads. Transport frequency must not
+        # no catch-up after slow ticks. Transport frequency must not
         # shorten the 20-observation warmup or count-based feature horizons.
         now = monotonic()
         if (self.last_sample is None or now - self.last_sample >= 3) and (
@@ -58,7 +57,7 @@ class BTCStrategy15Min:
             self.ticks.append({"ts": book.timestamp, "price": book.mid})
             self.last_sample = now
 
-    def decide(self, market: Market, book: Book) -> str | None:
+    def decide(self, market: Market, book: Book, context: dict | None = None) -> str | None:
         self.observe(book)
         elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
         if not 780 <= elapsed < 840 or len(self.ticks) < 20:
@@ -75,20 +74,15 @@ class BTCStrategy15Min:
             "order_book": book.signal_book(),
             "momentum": float((prices[-1] - prices[-5]) / prices[-5]),
         }
-        # External context is optional; a failed source never invents an input.
-        with httpx.Client(timeout=5) as http:
-            try:
-                response = http.get("https://api.coinbase.com/v2/prices/BTC-USD/spot")
-                response.raise_for_status()
-                metadata["spot_price"] = float(response.json()["data"]["amount"])
-            except (httpx.HTTPError, KeyError, ValueError):
-                logger.warning("Coinbase context unavailable")
-            try:
-                response = http.get("https://api.alternative.me/fng/", params={"limit": 1})
-                response.raise_for_status()
-                metadata["sentiment_score"] = float(response.json()["data"][0]["value"])
-            except (httpx.HTTPError, KeyError, ValueError, IndexError):
-                logger.warning("Sentiment context unavailable")
+        # One caller-selected snapshot is the only source of optional context.
+        # Missing or expired inputs are omitted; processors never fetch them.
+        context = context or {}
+        if context.get("spot", {}).get("available"):
+            metadata["spot_price"] = context["spot"]["value"]
+        if context.get("sentiment", {}).get("available"):
+            metadata.update(context["sentiment"]["value"])
+        if context.get("options", {}).get("available"):
+            metadata["options"] = context["options"]["value"]
         signals = []
         for processor in self.processors:
             signal = processor.process(book.mid, prices, metadata)

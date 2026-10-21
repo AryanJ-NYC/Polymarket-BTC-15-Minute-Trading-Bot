@@ -14,7 +14,7 @@ from execution.trade_journal import TradeJournal
 
 def test_default_runner_is_read_only_even_when_it_paper_trades(venue, journal, monkeypatch, books):
     trader = TradingBot(venue.client, journal, books)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     row = journal.records()[0]
     assert row["state"] == "open"
@@ -28,7 +28,7 @@ def test_default_runner_is_read_only_even_when_it_paper_trades(venue, journal, m
 
 def test_live_partial_fill_is_actual_quantity_not_requested(venue, journal, monkeypatch, books):
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     row = journal.records()[0]
     assert Decimal(row["quantity"]) == Decimal("0.5")
@@ -38,7 +38,7 @@ def test_live_partial_fill_is_actual_quantity_not_requested(venue, journal, monk
 
 def test_ambiguous_submission_survives_restart_without_retry(venue, journal, monkeypatch, books):
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     venue.fail_create = True
     with pytest.raises(Exception):
         trader.tick()
@@ -56,7 +56,7 @@ def test_live_order_failure_cannot_enter_via_paper_default(
     venue.bid, venue.ask = "0.35", "0.37"
     stream_feed.publish()
     trader = TradingBot(venue.client, journal, books)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "down")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "down")
     trader.tick()
     assert journal.records()[0]["outcome"] == "down"
     assert all(method == "GET" for method, _, _ in venue.calls)
@@ -80,7 +80,7 @@ def test_paper_down_settles_from_actual_market_result(
     venue.bid, venue.ask = "0.35", "0.37"
     stream_feed.publish()
     trader = TradingBot(venue.client, journal, books)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "down")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "down")
     trader.tick()
     row = journal.records()[0]
     clock.current += timedelta(minutes=3)
@@ -407,7 +407,7 @@ def test_one_trade_manages_to_completion_without_second_entry(
     venue, journal, clock, monkeypatch, books
 ):
     trader = TradingBot(venue.client, journal, books, one_trade=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     assert not trader.finished
     assert len(journal.records()) == 1
@@ -448,7 +448,7 @@ def test_live_runner_sizes_from_account_with_daily_limit(
         venue.bid, venue.ask, venue.fill_price = "0.35", "0.37", "0.36"
     stream_feed.publish()
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: outcome)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: outcome)
     trader.tick()
     row = journal.records()[0]
     request = next(body for method, path, body in venue.calls if path == "/v1/orders")
@@ -475,7 +475,7 @@ def test_lower_second_account_snapshot_resizes_or_skips(
     # Small enough to remain a valid fake partial fill after a budget reduction.
     venue.fill_quantity = 0.1
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     if maximum == "0":
         assert journal.records() == []
@@ -499,7 +499,7 @@ def test_live_entry_refreshes_initially_unusable_account(
         dict(venue.balance),
     ]
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     assert journal.get(venue.market["slug"])["state"] == "open"
     assert sum(path == "/v1/account/balances" for _, path, _ in venue.calls) == 2
@@ -518,7 +518,7 @@ def test_later_credited_gain_loss_deposit_or_withdrawal_changes_entry(
         {**venue.balance, "currentBalance": cash, "buyingPower": cash},
     ]
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     request = next(body for method, path, body in venue.calls if path == "/v1/orders")
     quantity = Decimal(str(request["quantity"]))
@@ -532,7 +532,7 @@ def test_unavailable_or_zero_equity_never_reserves_an_entry(
 ):
     venue.balance["currentBalance"] = cash
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     assert journal.records() == []
     assert all(method == "GET" for method, _, _ in venue.calls)
@@ -611,7 +611,7 @@ def test_live_request_fits_remaining_exposure_after_partial_exits(
     before = books.health()["snapshots"]
     stream_feed.socket.publish(message)
     wait_for(lambda: books.health()["snapshots"] == before + 1)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     requests = [body for method, path, body in venue.calls if path == "/v1/orders"]
     if expected_quantity is None:
@@ -640,7 +640,7 @@ def test_live_entry_obeys_daily_percentage_after_realized_losses(
     journal.settle(plan.slug, Decimal("0"))
     venue.fill_quantity = 0.1
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     requests = [body for method, path, body in venue.calls if path == "/v1/orders"]
     if enters:
@@ -653,13 +653,13 @@ def test_live_entry_obeys_daily_percentage_after_realized_losses(
         assert journal.get(market.slug) is None
 
 
-def test_context_delay_resizes_from_fresh_account_and_latest_stream_quote(
+def test_decision_delay_resizes_from_fresh_account_and_latest_stream_quote(
     venue, journal, books, stream_feed, clock, monkeypatch
 ):
     venue.fill_quantity = 0.1
     trader = TradingBot(venue.client, journal, books, live=True)
 
-    def delayed_context(market, book):
+    def delayed_decision(market, book, context):
         clock.current += timedelta(seconds=3)
         venue.balance.update(currentBalance="20", buyingPower="20")
         venue.bid, venue.ask = "0.64", "0.66"
@@ -667,7 +667,7 @@ def test_context_delay_resizes_from_fresh_account_and_latest_stream_quote(
         stream_feed.publish()
         return "up"
 
-    monkeypatch.setattr(trader.strategy, "decide", delayed_context)
+    monkeypatch.setattr(trader.strategy, "decide", delayed_decision)
     trader.tick()
     request = next(body for _, path, body in venue.calls if path == "/v1/orders")
     assert request["price"]["value"] == "0.66"
@@ -707,7 +707,7 @@ def test_live_order_readback_recovers_without_another_submission(
     monkeypatch.setattr(client_module, "sleep", lambda seconds: None)
     venue.failures[("GET", "/v1/order/bot-order-1")] = [failure]
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     row = journal.records()[0]
     assert row["pending"] is None
@@ -732,7 +732,7 @@ def test_pending_order_recovers_after_restart_without_duplicate_trade(
     first = TradeJournal(path)
     try:
         trader = TradingBot(venue.client, first, books, live=True)
-        monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+        monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
         trader.tick()
         assert first.records()[0]["order_id"] == "bot-order-1"
         assert first.records()[0]["pending"] is not None
@@ -742,7 +742,7 @@ def test_pending_order_recovers_after_restart_without_duplicate_trade(
     try:
         venue.positions = {venue.market["slug"]: {"netPositionDecimal": "0.5", "expired": False}}
         trader = TradingBot(venue.client, resumed, books, live=True)
-        monkeypatch.setattr(trader.strategy, "decide", lambda market, book: None)
+        monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: None)
         trader.tick()
         row = resumed.records()[0]
         assert row["state"] == "open"
@@ -765,7 +765,7 @@ def test_transient_account_or_discovery_outage_keeps_runner_alive(
     elapsed = [100.0]
     monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: None)
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: None)
     venue.failures[("GET", path)] = [failure]
     trader.tick()
     assert journal.records() == []
@@ -784,7 +784,7 @@ def test_settlement_read_outage_preserves_position_until_confirmed(
     venue, journal, clock, monkeypatch, failure, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     clock.current += timedelta(minutes=3)
     venue.settlement = 0
@@ -868,7 +868,7 @@ def test_failed_preview_releases_reservation_without_creating_order(
     else:
         venue.failures[("POST", "/v1/order/preview")] = [failure]
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     row = journal.records()[0]
     assert row["state"] == "unfilled"
@@ -910,7 +910,7 @@ def test_pending_order_rate_limit_stops_requests_until_retry_after(
 ):
     monkeypatch.setattr(bot, "monotonic", lambda: 100.0)
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     venue.failures[("GET", "/v1/order/bot-order-1")] = [429]
     trader.tick()
     count = len(venue.calls)
@@ -946,7 +946,7 @@ def test_cancel_acknowledgment_waits_for_terminal_readback_without_stopping(
     venue, journal, monkeypatch, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     venue.order_state = "ORDER_STATE_PARTIALLY_FILLED"
     venue.cancel_ack_only = True
     trader.tick()
@@ -963,7 +963,7 @@ def test_recovered_filled_order_can_settle_after_readback_outage(
 ):
     monkeypatch.setattr(client_module, "sleep", lambda seconds: None)
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     venue.order_state = "ORDER_STATE_FILLED"
     venue.failures[("GET", "/v1/order/bot-order-1")] = [404, 404, 404]
     trader.tick()

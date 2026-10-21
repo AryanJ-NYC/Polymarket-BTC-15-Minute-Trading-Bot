@@ -16,6 +16,7 @@ from time import monotonic
 from loguru import logger
 from polymarket_us import APIConnectionError, APIError, APITimeoutError
 
+from core.strategy_brain.context import ContextRefresher
 from core.strategy_brain.strategies.btc_15min_strategy import BTCStrategy15Min
 from execution.market_stream import MarketStream, StreamUnavailable
 from execution.polymarket_client import (
@@ -69,6 +70,7 @@ def main() -> int:
     logger.add(sys.stderr, level="INFO", format="{time:HH:mm:ss} | {level} | {message}")
     exchange = None
     books = None
+    context = None
     journal = None
     shutdown = Event()
     previous_handlers = {}
@@ -99,9 +101,17 @@ def main() -> int:
             )
             return 0
         mode_name = "live" if args.live else "paper"
+        # Finish the current tick's durable order accounting before exiting.
+        # Install handlers before starting background resources so startup
+        # signals use the same bounded cleanup path as normal completion.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, lambda *_: shutdown.set())
         journal = TradeJournal(ROOT / "logs" / f"us-{mode_name}.sqlite")
         books = exchange.market_stream()
         books.start()
+        if model is None:
+            context = ContextRefresher()
+            context.start()
         bot = TradingBot(
             exchange,
             journal,
@@ -110,12 +120,8 @@ def main() -> int:
             one_trade=args.one_trade,
             model=model,
             extra_cost=extra_cost,
+            context=context,
         )
-        # Finish the current tick's durable order accounting before exiting.
-        # Raising KeyboardInterrupt inside submit/readback could leave an
-        # unnecessary unknown reservation during an automated deployment.
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            previous_handlers[signum] = signal.signal(signum, lambda *_: shutdown.set())
         logger.info("Starting {} mode; press Ctrl+C to stop", mode_name.upper())
         duration = args.duration or (15 if args.once else None)
         deadline = monotonic() + duration if duration else None
@@ -151,13 +157,17 @@ def main() -> int:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         try:
-            if books is not None:
-                books.close()
+            if context is not None:
+                context.close()
         finally:
-            if journal is not None:
-                journal.close()
-            if exchange is not None:
-                exchange.close()
+            try:
+                if books is not None:
+                    books.close()
+            finally:
+                if journal is not None:
+                    journal.close()
+                if exchange is not None:
+                    exchange.close()
 
 
 class TradingBot:
@@ -171,11 +181,13 @@ class TradingBot:
         one_trade: bool = False,
         model: ProbabilityModel | None = None,
         extra_cost: Decimal = Decimal("0"),
+        context: ContextRefresher | None = None,
     ):
         extra_cost = number(extra_cost)
         if extra_cost < 0 or (model is None and extra_cost != 0):
             raise ValueError("Extra cost must be nonnegative and requires a model")
         self.model = model
+        self.context = (context or ContextRefresher()) if model is None else None
         self.extra_cost = extra_cost
         self.exchange = exchange
         self.journal = journal
@@ -337,7 +349,9 @@ class TradingBot:
             return
         settings = self.settings
         if self.model is None:
-            outcome = self.strategy.decide(self.market, book)
+            snapshot = self.context.snapshot()
+            settings = {**settings, "context": snapshot}
+            outcome = self.strategy.decide(self.market, book, snapshot)
             if outcome is None:
                 if capture:
                     if len(self.strategy.ticks) < self.settings["minimum_snapshots"]:
@@ -361,7 +375,7 @@ class TradingBot:
                     self.market, book, "history_incomplete", settings=settings
                 )
                 return
-        # Context/account work may be slow; only current quotes and funds can size an entry.
+        # Account work may be slow; only current quotes and funds can size an entry.
         try:
             if not self._in_entry_window():
                 if capture:
@@ -391,7 +405,7 @@ class TradingBot:
                     )
                 return
             book = self.books.book(self.market)
-            plan, settings = self._entry_plan(book, outcome, account)
+            plan, settings = self._entry_plan(book, outcome, account, settings)
             if plan is None:
                 return
             if unavailable:
@@ -435,8 +449,7 @@ class TradingBot:
         elapsed = (datetime.now(timezone.utc) - self.market.start).total_seconds()
         return self.settings["entry_start_seconds"] <= elapsed < self.settings["entry_end_seconds"]
 
-    def _entry_plan(self, book, outcome, account):
-        settings = self.settings
+    def _entry_plan(self, book, outcome, account, settings):
         capture = self._in_entry_window()
         if account.bankroll is None:
             logger.info(
@@ -481,7 +494,7 @@ class TradingBot:
                 plan = self.exchange.buy_plan(self.market, book, outcome, budget)
             else:
                 plan, prediction = self._model_plan(book, budget)
-                settings = {**self.settings, "prediction": prediction}
+                settings = {**settings, "prediction": prediction}
                 if plan is None:
                     self.journal.record_opportunity(
                         self.market, book, "nonpositive_edge", settings=settings

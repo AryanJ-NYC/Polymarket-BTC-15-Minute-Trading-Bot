@@ -1,6 +1,6 @@
 """
 Deribit Put/Call Ratio Signal Processor
-Fetches real-time BTC options data from Deribit (free public API)
+Consumes refreshed BTC options data from Deribit (free public API)
 and uses the put/call ratio as a proxy for institutional sentiment.
 
 WHY THIS WORKS:
@@ -33,11 +33,11 @@ API USED (completely free, no auth required):
     - days to expiry (parsed from instrument name)
 """
 
+import math
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
-import httpx
 from loguru import logger
 
 from core.strategy_brain.signal_processors.base_processor import (
@@ -48,139 +48,20 @@ from core.strategy_brain.signal_processors.base_processor import (
     TradingSignal,
 )
 
-DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
-
 
 class DeribitPCRProcessor(BaseSignalProcessor):
-    """
-    Uses Deribit BTC options put/call ratio for contrarian signals.
-
-    Cached for 5 minutes — options data doesn't change tick-by-tick
-    and we don't want to hammer Deribit's API every 15 minutes.
-    """
+    """Generate the existing contrarian signal from a selected options snapshot."""
 
     def __init__(
         self,
-        bullish_pcr_threshold: float = 1.20,  # PCR above this = contrarian bullish
-        bearish_pcr_threshold: float = 0.70,  # PCR below this = contrarian bearish
-        max_days_to_expiry: int = 2,  # only short-dated options
-        min_open_interest: float = 100.0,  # ignore tiny strikes (BTC notional)
-        cache_seconds: int = 300,  # refresh every 5 minutes
+        bullish_pcr_threshold: float = 1.20,
+        bearish_pcr_threshold: float = 0.70,
         min_confidence: float = 0.55,
     ):
         super().__init__("DeribitPCR")
-
         self.bullish_pcr_threshold = bullish_pcr_threshold
         self.bearish_pcr_threshold = bearish_pcr_threshold
-        self.max_days_to_expiry = max_days_to_expiry
-        self.min_open_interest = min_open_interest
-        self.cache_seconds = cache_seconds
         self.min_confidence = min_confidence
-
-        # Cache
-        self._cached_result: Optional[Dict] = None
-        self._cache_time: Optional[datetime] = None
-
-        logger.info(
-            f"Initialized Deribit PCR Processor: "
-            f"bullish_pcr>{bullish_pcr_threshold}, "
-            f"bearish_pcr<{bearish_pcr_threshold}, "
-            f"max_dte={max_days_to_expiry}d"
-        )
-
-    def _get_client(self) -> httpx.Client:
-        """Return a synchronous httpx client (safe inside NautilusTrader's event loop)."""
-        return httpx.Client(timeout=8.0)
-
-    def _parse_dte(self, instrument_name: str) -> Optional[int]:
-        """
-        Parse days to expiry from Deribit instrument name.
-        Format: BTC-20FEB26-95000-P  (BTC-DDMMMYY-STRIKE-TYPE)
-        """
-        try:
-            parts = instrument_name.split("-")
-            if len(parts) < 3:
-                return None
-            expiry_str = parts[1]  # e.g. "20FEB26"
-            expiry_dt = datetime.strptime(expiry_str, "%d%b%y").replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            dte = (expiry_dt - now).days
-            return max(0, dte)
-        except Exception:
-            return None
-
-    def _fetch_pcr(self) -> Optional[Dict]:
-        """Fetch and compute PCR from Deribit synchronously."""
-        try:
-            with self._get_client() as client:
-                resp = client.get(
-                    DERIBIT_URL,
-                    params={"currency": "BTC", "kind": "option"},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-            summaries = data.get("result", [])
-            if not summaries:
-                logger.warning("Deribit returned empty options data")
-                return None
-
-            put_oi = 0.0
-            call_oi = 0.0
-            short_put_oi = 0.0
-            short_call_oi = 0.0
-
-            for item in summaries:
-                name = item.get("instrument_name", "")
-                oi = float(item.get("open_interest", 0))
-
-                if oi < self.min_open_interest:
-                    continue
-
-                is_put = name.endswith("-P")
-                is_call = name.endswith("-C")
-
-                if is_put:
-                    put_oi += oi
-                elif is_call:
-                    call_oi += oi
-
-                # Short-dated options
-                dte = self._parse_dte(name)
-                if dte is not None and dte <= self.max_days_to_expiry:
-                    if is_put:
-                        short_put_oi += oi
-                    elif is_call:
-                        short_call_oi += oi
-
-            # Overall PCR
-            overall_pcr = put_oi / call_oi if call_oi > 0 else 1.0
-
-            # Short-dated PCR (more relevant for 15-min trading)
-            short_pcr = short_put_oi / short_call_oi if short_call_oi > 0 else overall_pcr
-
-            result = {
-                "overall_pcr": round(overall_pcr, 4),
-                "short_pcr": round(short_pcr, 4),
-                "put_oi": round(put_oi, 2),
-                "call_oi": round(call_oi, 2),
-                "short_put_oi": round(short_put_oi, 2),
-                "short_call_oi": round(short_call_oi, 2),
-                "total_contracts": len(summaries),
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
-            }
-
-            logger.info(
-                f"Deribit: overall_PCR={overall_pcr:.3f}, "
-                f"short_PCR={short_pcr:.3f} "
-                f"(puts={short_put_oi:.0f} vs calls={short_call_oi:.0f} short-dated)"
-            )
-
-            return result
-
-        except Exception as e:
-            logger.warning(f"Deribit PCR fetch failed: {e}")
-            return None
 
     def process(
         self,
@@ -188,34 +69,19 @@ class DeribitPCRProcessor(BaseSignalProcessor):
         historical_prices: list,
         metadata: Dict[str, Any] = None,
     ) -> Optional[TradingSignal]:
-        """Synchronous wrapper — runs async fetch if cache is stale."""
-        if not self.is_enabled:
+        """Read the already selected optional input; never perform HTTP or wait."""
+        if not self.is_enabled or not metadata:
             return None
-
-        # Check cache
-        now = datetime.now(timezone.utc)
-        cache_valid = (
-            self._cached_result is not None
-            and self._cache_time is not None
-            and (now - self._cache_time).total_seconds() < self.cache_seconds
-        )
-
-        if cache_valid:
-            pcr_data = self._cached_result
-            logger.debug(f"DeribitPCR: using cached data (PCR={pcr_data['short_pcr']:.3f})")
-        else:
-            try:
-                pcr_data = self._fetch_pcr()
-            except Exception as e:
-                logger.warning(f"DeribitPCR fetch failed: {e}")
-                return None
-
-            if pcr_data is None:
-                return None
-
-            self._cached_result = pcr_data
-            self._cache_time = now
-
+        pcr_data = metadata.get("options")
+        if not isinstance(pcr_data, dict):
+            return None
+        try:
+            for key in ("overall_pcr", "short_pcr", "short_put_oi", "short_call_oi"):
+                if not isinstance(pcr_data[key], (int, float)):
+                    return None
+                _nonnegative_number(pcr_data[key])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
         return self._generate_signal(current_price, pcr_data)
 
     def _generate_signal(
@@ -300,3 +166,65 @@ class DeribitPCRProcessor(BaseSignalProcessor):
         )
 
         return signal
+
+
+def parse_options(
+    data: dict,
+    *,
+    max_days_to_expiry: int = 2,
+    min_open_interest: float = 100.0,
+    received_at: Optional[datetime] = None,
+) -> dict:
+    """Validate and aggregate provider summaries with the existing PCR calculations."""
+    summaries = data["result"]
+    if not isinstance(summaries, list) or not summaries:
+        raise ValueError("empty options")
+    now = received_at or datetime.now(timezone.utc)
+    put_oi = call_oi = short_put_oi = short_call_oi = 0.0
+    for item in summaries:
+        name = item["instrument_name"]
+        if not isinstance(name, str):
+            raise ValueError("invalid option instrument")
+        parts = name.split("-")
+        if len(parts) != 4 or parts[0] != "BTC" or parts[3] not in ("P", "C"):
+            raise ValueError("invalid option instrument")
+        if _nonnegative_number(parts[2]) <= 0:
+            raise ValueError("invalid option strike")
+        expiry = datetime.strptime(parts[1], "%d%b%y").replace(tzinfo=timezone.utc)
+        dte = max(0, (expiry - now).days)
+        oi = _nonnegative_number(item["open_interest"])
+        if oi < min_open_interest:
+            continue
+        if parts[3] == "P":
+            put_oi += oi
+            if dte <= max_days_to_expiry:
+                short_put_oi += oi
+        else:
+            call_oi += oi
+            if dte <= max_days_to_expiry:
+                short_call_oi += oi
+    for value in (put_oi, call_oi, short_put_oi, short_call_oi):
+        _nonnegative_number(value)
+    overall_pcr = put_oi / call_oi if call_oi > 0 else 1.0
+    short_pcr = short_put_oi / short_call_oi if short_call_oi > 0 else overall_pcr
+    _nonnegative_number(overall_pcr)
+    _nonnegative_number(short_pcr)
+    return {
+        "overall_pcr": round(overall_pcr, 4),
+        "short_pcr": round(short_pcr, 4),
+        "put_oi": round(put_oi, 2),
+        "call_oi": round(call_oi, 2),
+        "short_put_oi": round(short_put_oi, 2),
+        "short_call_oi": round(short_call_oi, 2),
+        "total_contracts": len(summaries),
+        "fetched_at": now.isoformat(),
+    }
+
+
+def _nonnegative_number(value: Any) -> float:
+    if isinstance(value, bool):
+        raise ValueError("invalid number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError("invalid number")
+    return result

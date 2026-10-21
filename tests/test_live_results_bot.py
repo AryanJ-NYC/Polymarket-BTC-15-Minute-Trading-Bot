@@ -27,7 +27,7 @@ def test_entry_persists_policy_and_observation_before_submission(
     venue, journal, monkeypatch, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     submit = venue.client.submit
 
     def checked_submit(plan, *, validate=None):
@@ -65,7 +65,7 @@ def test_skipped_then_accepted_opportunities_are_both_retained(
     clock.current += timedelta(seconds=3)
     venue.timestamp = clock.current.isoformat()
     stream_feed.publish()
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     assert [row["decision"] for row in journal.opportunities()] == [
         "history_incomplete",
@@ -86,7 +86,7 @@ def test_risk_rejection_is_captured_without_new_reservation(
     venue, journal, monkeypatch, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
 
     def reject(cost, bankroll):
         raise ValueError("Daily loss budget")
@@ -101,7 +101,7 @@ def test_insufficient_buying_power_is_captured_without_order(
     venue, journal, monkeypatch, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books, live=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     account = venue.client.account()
     monkeypatch.setattr(
         venue.client, "account", lambda **_: replace(account, buying_power=Decimal("0"))
@@ -112,12 +112,12 @@ def test_insufficient_buying_power_is_captured_without_order(
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
-def test_context_expiry_retains_skip_without_submitting(
+def test_decision_crossing_cutoff_retains_skip_without_submitting(
     venue, journal, clock, monkeypatch, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books)
 
-    def decide(market, book):
+    def decide(market, book, context):
         clock.current += timedelta(seconds=51)
         venue.timestamp = clock.current.isoformat()
         return "up"
@@ -166,7 +166,7 @@ def test_known_id_after_submit_recovers_on_later_tick_without_new_order(
     venue, journal, monkeypatch, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books, live=True, one_trade=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     cancel = venue.client.cancel
 
     def unavailable(*args):
@@ -194,7 +194,7 @@ def test_recovered_buy_over_budget_records_actual_fill_then_stops(
     venue, journal, monkeypatch, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books, live=True, one_trade=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     cancel = venue.client.cancel
 
     def unavailable(*args):
@@ -365,7 +365,7 @@ def test_live_missing_fee_remains_unknown_and_still_records_resolution(
     venue, journal, clock, monkeypatch, books, stream_feed
 ):
     trader = TradingBot(venue.client, journal, books, live=True, one_trade=True)
-    monkeypatch.setattr(trader.strategy, "decide", lambda market, book: "up")
+    monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     cancel = venue.client.cancel
 
     def missing_fee(*args):

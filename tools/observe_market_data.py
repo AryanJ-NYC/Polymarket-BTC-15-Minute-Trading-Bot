@@ -23,6 +23,7 @@ from pathlib import Path
 
 import httpx
 
+from core.strategy_brain.context import ContextRefresher
 from core.strategy_brain.strategies.btc_15min_strategy import BTCStrategy15Min
 from execution.market_stream import MarketStream
 from execution.polymarket_client import PolymarketClient
@@ -49,6 +50,7 @@ def main() -> int:
     exchange = None
     stream = None
     baseline = None
+    context = None
     transport = None
     started = time.monotonic()
     started_at = _utc()
@@ -73,6 +75,8 @@ def main() -> int:
         exchange.client._http = httpx.Client(transport=transport, timeout=10)
         baseline = RestBaseline(exchange, output / "rest.jsonl", shutdown)
         baseline.start()
+        context = ContextRefresher()
+        context.start()
         probe = ReconnectProbe(exchange.client.ws.markets)
         stream = MarketStream(probe)
         stream.start()
@@ -124,8 +128,9 @@ def main() -> int:
                     row.update(_book_sample(book))
                     row["available"] = True
                     decision_started = time.monotonic()
+                    row["context"] = context.snapshot()
                     strategy.observe(book)
-                    row["decision"] = strategy.decide(market, book)
+                    row["decision"] = strategy.decide(market, book, row["context"])
                     decision_finished = time.monotonic()
                     row["feature_samples"] = len(strategy.ticks)
                     row["decision_elapsed_ms"] = (decision_finished - decision_started) * 1000
@@ -169,6 +174,8 @@ def main() -> int:
         # Finish every in-flight baseline read before closing its transport or
         # reading final artifacts. A stream-close failure must not skip this.
         cleanup = []
+        if context is not None:
+            cleanup.append(context.close)
         if stream is not None:
             cleanup.append(stream.close)
         if baseline is not None:
@@ -197,6 +204,7 @@ def main() -> int:
         "contract_rollovers": max(0, len(subscriptions) - 1),
         "stream": _sample_summary(stream_rows),
         "rest_baseline": _sample_summary(rest_rows),
+        "context": _context_summary(stream_rows, context.snapshot() if context else {}),
         "http": transport.summary() if transport else {},
         "recovery_ms": _quantiles([row["duration_ms"] for row in recovery_rows]),
         "recovery_events": recovery_rows,
@@ -212,7 +220,6 @@ def main() -> int:
             "rest_receipt_to_decision": "comparison REST lane samples quotes only; actual strategy decision latency is measured on the stream lane",
             "model_ev_and_account_sizing": "observer uses model=None/default fusion; probability-model inference, EV selection, and account-based sizing are outside this run",
             "order_submission_latency": "read-only observer never submits orders",
-            "optional_context_request_volume": "known GET-only strategy context uses separate clients; SDK request trace counts exchange traffic only",
             "provider_network_latency": "provider clock offset and provider send time unavailable",
             "production_bot_request_volume": "observer counts its own traffic only; healthy bot REST behavior is verified separately in tests",
             "natural_reconnect_latency": "induced transport-close recovery is reported separately; inspect health traces for natural outages",
@@ -417,6 +424,29 @@ def _sample_summary(rows: list[dict]) -> dict:
     return result
 
 
+def _context_summary(rows: list[dict], final_snapshot: dict) -> dict:
+    snapshots = [row["context"] for row in rows if "context" in row]
+    sources = {}
+    for name, final in final_snapshot.items():
+        samples = [snapshot[name] for snapshot in snapshots]
+        available = [sample for sample in samples if sample["available"]]
+        sources[name] = {
+            "samples": len(samples),
+            "available_samples": len(available),
+            "unavailable_samples": len(samples) - len(available),
+            "age_seconds": _quantiles([sample["age_seconds"] for sample in available]),
+            "requests": final["requests"],
+            "failures": final["failures"],
+            "final_status": final["status"],
+            "final_error": final["error"],
+        }
+    return {
+        "decision_snapshots": len(snapshots),
+        "requests": sum(source["requests"] for source in sources.values()),
+        "sources": sources,
+    }
+
+
 def _quantiles(values: list[float]) -> dict:
     ordered = sorted(values)
     return {
@@ -491,6 +521,29 @@ def _report(summary: dict) -> str:
     lines += [
         "",
         f"HTTP: {json.dumps(summary['http'], sort_keys=True)}",
+        "",
+        "## Supporting context",
+        "",
+        f"Decision snapshots: {summary['context']['decision_snapshots']}; public GET request attempts: {summary['context']['requests']}.",
+        "Ages below are local monotonic seconds for available inputs at the selected decision snapshot.",
+        "",
+        "| Source | Available | Unavailable | Age n | Age p50 | Age p95 | Age p99 | Requests | Failures | Final status |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for source, value in summary["context"]["sources"].items():
+        age = value["age_seconds"]
+        cells = [
+            "unavailable" if age[f"p{p}"] is None else f"{age[f'p{p}']:.2f}" for p in (50, 95, 99)
+        ]
+        lines.append(
+            f"| {source} | {value['available_samples']} | {value['unavailable_samples']} | "
+            f"{age['samples']} | {' | '.join(cells)} | {value['requests']} | "
+            f"{value['failures']} | {value['final_status']} |"
+        )
+    lines += [
+        "",
+        "Public context request attempts include startup and shutdown; exchange HTTP totals are separate.",
+        "Per-decision context values, receipt/source timestamps, ages, availability, and health are retained in stream.jsonl.",
         "",
         f"Recovery: {json.dumps(summary['recovery_ms'], sort_keys=True)}",
         "",

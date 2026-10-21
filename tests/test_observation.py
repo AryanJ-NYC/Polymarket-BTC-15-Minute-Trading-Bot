@@ -205,3 +205,193 @@ def test_shutdown_finishes_slow_book_and_flushes_sample_before_worker_returns(ve
     assert len(rows) == 1
     assert rows[0]["available"] is True
     assert calls == [market]
+
+
+def test_context_summary_counts_decision_availability_and_all_request_attempts():
+    from tools.observe_market_data import _context_summary
+
+    first = _context_snapshot()
+    second = _context_snapshot()
+    second["spot"].update(available=False, age_seconds=16, value=None, status="expired")
+    final = _context_snapshot()
+    final["spot"].update(requests=4, failures=2, status="error", error="TimeoutException")
+    summary = _context_summary(
+        [{"context": first}, {"available": False}, {"context": second}], final
+    )
+
+    assert summary["decision_snapshots"] == 2
+    assert summary["requests"] == 6
+    spot = summary["sources"]["spot"]
+    assert spot["available_samples"] == 1
+    assert spot["unavailable_samples"] == 1
+    assert spot["age_seconds"] == {"samples": 1, "p50": 2.0, "p95": 2.0, "p99": 2.0}
+    assert spot["requests"] == 4
+    assert spot["failures"] == 2
+    assert spot["final_error"] == "TimeoutException"
+    assert summary["sources"]["options"]["age_seconds"] == {
+        "samples": 0,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+    }
+
+
+@pytest.mark.parametrize("stop_reason", ["duration", "signal", "failure"])
+def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
+    monkeypatch, tmp_path, stop_reason
+):
+    import itertools
+    import signal
+    import sys
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    import tools.observe_market_data as observer
+
+    events = []
+    selected = []
+    snapshots = []
+    handlers = {}
+    market = SimpleNamespace(slug="test-market")
+    book = SimpleNamespace(
+        timestamp=datetime.now(timezone.utc),
+        bids=[(Decimal("0.60"), Decimal("10"))],
+        asks=[(Decimal("0.61"), Decimal("10"))],
+        received_at=0.0,
+        generation=1,
+    )
+    sdk = SimpleNamespace(_http=httpx.Client(), ws=SimpleNamespace(markets=None))
+
+    class Exchange:
+        client = sdk
+
+        def close(self):
+            events.append("exchange_closed")
+            self.client._http.close()
+
+    class Baseline:
+        def __init__(self, *args):
+            pass
+
+        def start(self):
+            pass
+
+        def current_market(self):
+            return market
+
+        def join(self):
+            events.append("baseline_joined")
+
+        def is_alive(self):
+            return False
+
+    class Stream:
+        def __init__(self, *args):
+            pass
+
+        def start(self):
+            pass
+
+        def set_markets(self, markets):
+            assert markets == [market]
+
+        def health(self):
+            return {"connected": False}
+
+        def book(self, selected_market):
+            assert selected_market is market
+            return book
+
+        def close(self):
+            events.append("stream_closed")
+
+    class Context:
+        def start(self):
+            events.append("context_started")
+
+        def snapshot(self):
+            snapshot = _context_snapshot()
+            snapshots.append(snapshot)
+            return snapshot
+
+        def close(self):
+            events.append("context_closed")
+
+    class Strategy:
+        ticks = []
+
+        def observe(self, selected_book):
+            assert selected_book is book
+
+        def decide(self, selected_market, selected_book, context):
+            assert selected_market is market
+            assert selected_book is book
+            assert context is snapshots[-1]
+            selected.append(context)
+            if stop_reason == "signal":
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            if stop_reason == "failure":
+                raise RuntimeError("controlled decision failure")
+            return None
+
+    def install_handler(signum, handler):
+        previous = handlers.get(signum)
+        handlers[signum] = handler
+        return previous
+
+    output = tmp_path / "logs" / "observation"
+    monkeypatch.setattr(observer, "ROOT", tmp_path)
+    monkeypatch.setattr(observer, "SAMPLE_INTERVAL", 0)
+    monkeypatch.setattr(observer, "_source_manifest", lambda output: None)
+    monkeypatch.setattr(observer.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(observer.signal, "signal", install_handler)
+    monkeypatch.setattr(observer.PolymarketClient, "connect", lambda env: Exchange())
+    monkeypatch.setattr(observer, "RestBaseline", Baseline)
+    monkeypatch.setattr(observer, "MarketStream", Stream)
+    monkeypatch.setattr(observer, "ContextRefresher", Context)
+    monkeypatch.setattr(observer, "BTCStrategy15Min", Strategy)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["observe", "--duration", "5", "--env-file", "/unused", "--output", str(output)],
+    )
+    clock = itertools.count(0, 0.1)
+    assert observer.main() == (1 if stop_reason == "failure" else 0)
+
+    assert selected
+    assert len(snapshots) == len(selected) + 1  # Final counter snapshot after cleanup.
+    assert events == [
+        "context_started",
+        "context_closed",
+        "stream_closed",
+        "baseline_joined",
+        "exchange_closed",
+    ]
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["context"]["requests"] == 3
+    assert summary["read_only"]["account_calls"] == 0
+    assert summary["read_only"]["order_calls"] == 0
+    assert summary["read_only"]["journal_opened"] is False
+    if stop_reason != "failure":
+        rows = observer._read_rows(output / "stream.jsonl")
+        assert [row["context"] for row in rows] == selected
+        assert summary["context"]["decision_snapshots"] == len(selected)
+    assert "Supporting context" in (output / "report.md").read_text()
+
+
+def _context_snapshot():
+    return {
+        source: {
+            "value": 100000.0 if source == "spot" else None,
+            "available": source == "spot",
+            "age_seconds": 2.0 if source == "spot" else None,
+            "received_at": "2026-10-21T12:00:00+00:00" if source == "spot" else None,
+            "source_timestamp": None,
+            "status": "ok" if source == "spot" else "waiting",
+            "requests": 1,
+            "failures": 0,
+            "error": None,
+        }
+        for source in ("spot", "sentiment", "options")
+    }

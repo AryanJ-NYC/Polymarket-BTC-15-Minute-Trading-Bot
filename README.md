@@ -191,7 +191,19 @@ cumulative fills. Partial IOC fills are tracked at their actual quantity and fee
 Only a known bot order can be canceled; the bot never cancels all account orders.
 Transient known-order read failures retain the reserved ID for later reconciliation.
 Ctrl+C, SIGTERM, and duration expiry finish the current serial tick, then close
-the receiver/socket before releasing the journal and REST client.
+the supporting-context refresher and receiver/socket before releasing the journal
+and REST client. Context cancellation and HTTP cleanup have a two-second shutdown
+bound; this does not shorten the current tick's existing order-accounting work.
+
+The baseline policy reads optional BTC spot, Fear & Greed and Deribit options
+from one background refresher. Decisions never wait for these HTTP requests,
+including an empty options cache. Spot refreshes every 5 seconds and expires at
+15 seconds; daily sentiment refreshes hourly and expires at 36 hours; options
+refresh every 5 minutes and expire at 15 minutes. Expired or malformed inputs
+are omitted, leaving the existing signal engine to decide with the remaining
+inputs. The probability-model policy does not start or read this refresher.
+See [supporting-context freshness and diagnostics](docs/context-refresh.md) for
+timestamps, rate limits, shutdown and the read-only observation procedure.
 
 See [streaming operations and the read-only comparison recorder](docs/streaming.md)
 for health fields, outage recovery, sampling, and reproducible measurements.
