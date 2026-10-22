@@ -107,7 +107,7 @@ A deployment waits for all of the following:
   expired positions. An expired nonzero balance can therefore defer updates
   indefinitely until it is resolved; this gate is stricter than the bot's guard.
 - The clock is between minute 1 and minute 11 of the current UTC quarter hour.
-  The current strategy only enters in minutes 13–14.
+  Baseline entries span minutes 12–14:30; the quiet window leaves a startup margin.
 - The service is active or inactive; failed/activating/stopping states defer.
 
 Dependencies build before the bot stops, in a contained systemd unit as

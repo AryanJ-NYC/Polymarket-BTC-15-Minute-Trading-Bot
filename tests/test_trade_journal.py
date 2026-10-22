@@ -42,7 +42,7 @@ def test_exposure_tracks_funded_remaining_cost_and_buy_fees_after_partial_exit(v
     assert journal.exposure() == Decimal("0.66")
 
     exit_plan = replace(plan, action="SELL", quantity=Decimal("0.25"))
-    journal.reserve_exit(exit_plan)
+    journal.reserve_exit(exit_plan.slug, exit_plan)
     assert journal.exposure() == Decimal("0.66")
     journal.finish_order(market.slug, Decimal("0.25"), Decimal("0.01"), Decimal("0.01"))
     assert journal.exposure() == Decimal("0.495")
@@ -91,7 +91,7 @@ def test_daily_guard_keeps_full_original_cost_reserved_after_partial_exit(venue,
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
     _record_buy(journal, plan, Decimal("4.50"))
-    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("5")))
+    journal.reserve_exit(plan.slug, replace(plan, action="SELL", quantity=Decimal("5")))
     journal.finish_order(market.slug, Decimal("5"), Decimal("1"), Decimal("0"))
     assert journal.exposure() == Decimal("2.25")
     assert journal.entry_budget(Decimal("50"), Decimal("50")) == (
@@ -171,7 +171,7 @@ def test_exposure_uses_existing_durable_order_records_after_reopen(venue, tmp_pa
     path = tmp_path / "existing.sqlite"
     journal = TradeJournal(path)
     _record_buy(journal, plan, Decimal("3"))
-    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("6")))
+    journal.reserve_exit(plan.slug, replace(plan, action="SELL", quantity=Decimal("6")))
     journal.finish_order(market.slug, Decimal("6"), Decimal("0.60"), Decimal("0"))
     journal.close()
     reopened = TradeJournal(path)
@@ -278,7 +278,7 @@ def test_partial_resolution_with_unreconciled_full_entry_basis_still_blocks_entr
     plan = replace(plan, quantity=Decimal("10"))
     journal.reserve_entry(plan, market.end)
     journal.finish_order(market.slug, Decimal("10"), Decimal("6"), Decimal("0.10"))
-    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("4")))
+    journal.reserve_exit(plan.slug, replace(plan, action="SELL", quantity=Decimal("4")))
     journal.finish_order(market.slug, Decimal("4"), Decimal("2.80"), Decimal("0.04"))
     journal.settle(
         market.slug,
@@ -304,7 +304,7 @@ def test_partial_resolution_does_not_round_retained_fraction_before_costs(venue,
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
     journal.reserve_entry(plan, market.end)
     journal.finish_order(market.slug, Decimal("3"), Decimal("0.60"), Decimal("0.03"))
-    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("2")))
+    journal.reserve_exit(plan.slug, replace(plan, action="SELL", quantity=Decimal("2")))
     journal.finish_order(market.slug, Decimal("2"), Decimal("0.50"), Decimal("0.02"))
     journal.settle(
         market.slug,

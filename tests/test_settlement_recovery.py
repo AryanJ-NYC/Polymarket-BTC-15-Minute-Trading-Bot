@@ -10,6 +10,26 @@ from bot import TradingBot
 from execution.polymarket_client import parse_market
 
 
+def test_account_outage_while_settlement_pending_is_captured(
+    venue, journal, books, stream_feed, clock, awaiting_settlement
+):
+    current = parse_market(venue.market)
+    clock.current = current.start + timedelta(seconds=840)
+    venue.timestamp = clock.current.isoformat()
+    stream_feed.publish()
+    settlement_response = venue.on_request
+
+    def outage(request):
+        if request.url.path == "/v1/account/balances":
+            return httpx.Response(503)
+        return settlement_response(request)
+
+    venue.on_request = outage
+    TradingBot(venue.client, journal, books, live=True).tick()
+    assert journal.opportunities()[-1]["decision"] == "account_unavailable"
+    assert journal.opportunities()[-1]["settings"]["timing_preset"] == "later"
+
+
 @pytest.mark.parametrize("public_outcome", [True, False])
 def test_missing_resolution_pauses_new_entries_with_current_book(
     venue, journal, books, monkeypatch, awaiting_settlement, public_outcome

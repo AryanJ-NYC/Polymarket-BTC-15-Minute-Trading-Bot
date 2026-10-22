@@ -21,6 +21,7 @@ from execution.polymarket_client import Book, Market
 
 class BTCStrategy15Min:
     def __init__(self):
+        self.entry_window = (780, 840)
         self.slug = None
         self.ticks = deque(maxlen=200)
         self.last_sample = None
@@ -61,7 +62,7 @@ class BTCStrategy15Min:
     def decide(self, market: Market, book: Book, context: dict | None = None) -> str | None:
         self.observe(book)
         elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
-        if not 780 <= elapsed < 840 or len(self.ticks) < 20:
+        if not self.entry_window[0] <= elapsed < self.entry_window[1] or len(self.ticks) < 20:
             return None
         if book.mid > 0.60:
             outcome = "up"

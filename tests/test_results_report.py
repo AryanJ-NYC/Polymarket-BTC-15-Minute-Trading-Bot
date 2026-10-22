@@ -71,9 +71,9 @@ def test_partial_sale_and_remaining_settlement_have_exact_report_totals(
     plan = replace(plan, quantity=Decimal("10"))
     journal.reserve_entry(plan, market.end)
     journal.finish_order(market.slug, Decimal("10"), Decimal("6"), Decimal("0.10"))
-    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("3")))
+    journal.reserve_exit(plan.slug, replace(plan, action="SELL", quantity=Decimal("3")))
     journal.finish_order(market.slug, Decimal("3"), Decimal("2.10"), Decimal("0.03"))
-    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("1")))
+    journal.reserve_exit(plan.slug, replace(plan, action="SELL", quantity=Decimal("1")))
     journal.finish_order(market.slug, Decimal("1"), Decimal("0.70"), Decimal("0.01"))
     resolution = {
         "beforePosition": {
@@ -120,7 +120,7 @@ def test_unknown_partial_sale_fee_stays_unknown_after_remaining_settlement(venue
     plan = replace(plan, quantity=Decimal("10"))
     journal.reserve_entry(plan, market.end)
     journal.finish_order(market.slug, Decimal("10"), Decimal("6"), Decimal("0.10"))
-    journal.reserve_exit(replace(plan, action="SELL", quantity=Decimal("4")))
+    journal.reserve_exit(plan.slug, replace(plan, action="SELL", quantity=Decimal("4")))
     journal.update(market.slug, order_id="unknown-exit-fee")
     journal.finish_order(market.slug, Decimal("4"), Decimal("2.80"), None)
     journal.settle(
@@ -281,7 +281,10 @@ def test_zero_fill_exit_does_not_hide_resolution_fee_discrepancy(venue, tmp_path
     plan = venue.client.buy_plan(market, book, "up", Decimal("1"))
     journal.reserve_entry(plan, market.end)
     journal.finish_order(market.slug, Decimal("1.35"), Decimal("0.9585"), Decimal("0.02"))
-    journal.reserve_exit(venue.client.sell_plan(market, book, "up", Decimal("1.35")))
+    journal.reserve_exit(
+        venue.client.sell_plan(market, book, "up", Decimal("1.35")).slug,
+        venue.client.sell_plan(market, book, "up", Decimal("1.35")),
+    )
     journal.finish_order(market.slug, Decimal("0"), Decimal("0"), Decimal("0"))
     journal.settle(
         market.slug,

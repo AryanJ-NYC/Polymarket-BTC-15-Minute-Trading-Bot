@@ -39,7 +39,7 @@ from execution.polymarket_client import (
     validate_book,
 )
 from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
-from execution.trade_journal import TradeJournal, pending_plan
+from execution.trade_journal import TradeJournal, entry_key, pending_plan
 from probability_model import ProbabilityModel, load_model
 
 
@@ -200,13 +200,13 @@ class TradingBot:
         self.books = books
         self.live = live
         self.one_trade = one_trade
-        self.trade_slug = None
+        self.trade_id = None
         if one_trade:
             unfinished = [row for row in journal.records() if row["state"] in {"open", "reserved"}]
             if len(unfinished) > 1:
                 raise ValueError("A one-trade run cannot choose between multiple unfinished trades")
             if unfinished:
-                self.trade_slug = unfinished[0]["slug"]
+                self.trade_id = unfinished[0]["trade_id"]
         self.strategy = BTCStrategy15Min()
         self.settings = {
             "policy_version": BASELINE_POLICY_VERSION,
@@ -232,6 +232,13 @@ class TradingBot:
                 model=model.artifact,
                 extra_cost_usd=str(extra_cost),
             )
+        else:
+            self.settings.update(
+                timing_preset="current",
+                exit_policy="price-thresholds-v1",
+                sizing_policy="bankroll-percentage-v1",
+                extra_cost_usd="0",
+            )
         self.next_outcome_attempt = 0.0
         self.outcome_cursor = ""
         self.next_data_attempt = 0.0
@@ -244,9 +251,9 @@ class TradingBot:
 
     @property
     def finished(self) -> bool:
-        if not self.one_trade or self.trade_slug is None:
+        if not self.one_trade or self.trade_id is None:
             return False
-        return self.journal.get(self.trade_slug)["state"] in {"closed", "unfilled"}
+        return self.journal.get(self.trade_id)["state"] in {"closed", "unfilled"}
 
     def tick(self) -> None:
         try:
@@ -265,12 +272,16 @@ class TradingBot:
         # This is the sole owner of strategy, order, and journal mutations.
         # The receiver only publishes immutable books on its own thread.
         if monotonic() < self.next_data_attempt:
+            self._record_pause("exchange_backoff")
             return
         reconciled = self._reconcile()
         if monotonic() < self.next_data_attempt:
+            self._record_pause("exchange_backoff")
             return
         self._discover()
+        self._select_timing()
         if monotonic() < self.next_data_attempt:
+            self._record_pause("exchange_backoff")
             return
         self._sync_subscriptions()
         health = self.books.health()
@@ -287,9 +298,11 @@ class TradingBot:
             self.last_health = state
         unavailable = self._manage_positions()
         if monotonic() < self.next_data_attempt:
+            self._record_pause("exchange_backoff")
             return
         self._sync_subscriptions()
         if not reconciled or any(row["pending"] for row in self.journal.records()):
+            self._record_pause("reconciliation_pending")
             return
         if self.live and unavailable:
             try:
@@ -299,8 +312,9 @@ class TradingBot:
                     raise
                 self._wait_for_data(exc)
                 logger.warning("Entries paused: account read unavailable ({})", type(exc).__name__)
+                self._record_pause("account_unavailable")
                 return
-        if self.one_trade and self.trade_slug is not None:
+        if self.one_trade and self.trade_id is not None:
             return
         if (
             self.market is not None
@@ -354,7 +368,7 @@ class TradingBot:
             len(self.strategy.ticks),
             (datetime.now(timezone.utc) - book.timestamp).total_seconds(),
         )
-        if self.journal.get(self.market.slug):
+        if self.journal.entry_attempted(self.market.slug, self.settings.get("timing_preset")):
             if capture:
                 self.journal.record_opportunity(
                     self.market, book, "already_attempted", settings=self.settings
@@ -388,6 +402,17 @@ class TradingBot:
                     self.market, book, "history_incomplete", settings=settings
                 )
                 return
+        if outcome is not None and any(
+            row["slug"] == self.market.slug
+            and number(row["quantity"]) > 0
+            and row["outcome"] != outcome
+            for row in self.journal.records()
+        ):
+            if capture:
+                self.journal.record_opportunity(
+                    self.market, book, "opposite_position_conflict", outcome, settings
+                )
+            return
         # Account work may be slow; only current quotes and funds can size an entry.
         try:
             if not self._in_entry_window():
@@ -466,8 +491,23 @@ class TradingBot:
                 self.journal.record_opportunity(
                     self.market, book, "entry_reserved", outcome, settings
                 )
-            self.trade_slug = plan.slug
-            self._execute(plan, self.market, book, streamed=True)
+            self.trade_id = entry_key(plan.slug, settings.get("timing_preset"))
+            self._execute(plan, self.market, book, streamed=True, trade_id=self.trade_id)
+
+    def _record_pause(self, reason: str) -> None:
+        self._select_timing()
+        if self.market is not None and self._in_entry_window():
+            self.journal.record_opportunity(self.market, None, reason, settings=self.settings)
+
+    def _select_timing(self) -> None:
+        if self.market is None or self.model is not None:
+            return
+        elapsed = (datetime.now(timezone.utc) - self.market.start).total_seconds()
+        preset, start, end = next(
+            (window for window in TIMING_WINDOWS if elapsed < window[2]), TIMING_WINDOWS[-1]
+        )
+        self.settings.update(timing_preset=preset, entry_start_seconds=start, entry_end_seconds=end)
+        self.strategy.entry_window = (start, end)
 
     def _in_entry_window(self) -> bool:
         elapsed = (datetime.now(timezone.utc) - self.market.start).total_seconds()
@@ -515,7 +555,14 @@ class TradingBot:
             return None, settings
         try:
             if self.model is None:
-                plan = self.exchange.buy_plan(self.market, book, outcome, budget)
+                plan = self.exchange.buy_plan(
+                    self.market,
+                    book,
+                    outcome,
+                    budget,
+                    deadline=self.market.start
+                    + timedelta(seconds=self.settings["entry_end_seconds"]),
+                )
             else:
                 plan, prediction = self._model_plan(book, budget)
                 settings = {**settings, "prediction": prediction}
@@ -558,7 +605,14 @@ class TradingBot:
         candidates = []
         for outcome in ("up", "down"):
             try:
-                plan = self.exchange.buy_plan(self.market, book, outcome, budget)
+                plan = self.exchange.buy_plan(
+                    self.market,
+                    book,
+                    outcome,
+                    budget,
+                    deadline=self.market.start
+                    + timedelta(seconds=self.settings["entry_end_seconds"]),
+                )
             except ValueError:
                 prediction["candidates"][outcome] = {"skip": "insufficient_depth_or_invalid_plan"}
                 continue
@@ -602,14 +656,15 @@ class TradingBot:
             if value is not None:
                 self.journal.record_contract_outcome(slug, value)
 
-    def _execute(self, plan, market, book, *, streamed: bool) -> None:
+    def _execute(self, plan, market, book, *, streamed: bool, trade_id: str) -> None:
+
         def validate():
             self._validate_execution(plan, market, book, streamed=streamed)
 
         try:
             validate()
         except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
-            self.journal.finish_order(plan.slug, Decimal("0"), Decimal("0"), Decimal("0"))
+            self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
             if not _unavailable_book(exc):
                 raise
             detail = str(exc) if isinstance(exc, ValueError) else api_error_summary(exc)
@@ -623,7 +678,7 @@ class TradingBot:
             try:
                 order_id = self.exchange.submit(plan, validate=validate)
             except OrderNotSubmitted as exc:
-                self.journal.finish_order(plan.slug, Decimal("0"), Decimal("0"), Decimal("0"))
+                self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
                 logger.warning(
                     "Order not submitted for {}: {} | quote reason {}",
                     plan.slug,
@@ -636,7 +691,7 @@ class TradingBot:
                     self._wait_for_data(exc.cause)
                 return
             except OrderPreflightError as exc:
-                self.journal.finish_order(plan.slug, Decimal("0"), Decimal("0"), Decimal("0"))
+                self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
                 logger.info("Order preflight rejected: {}", exc)
                 return
             except Exception as exc:
@@ -644,7 +699,7 @@ class TradingBot:
                     "An order submission has an unknown outcome; reconcile before restarting. "
                     + api_error_summary(exc)
                 ) from None
-            self.journal.update(plan.slug, order_id=order_id)
+            self.journal.update(trade_id, order_id=order_id)
             try:
                 order = self.exchange.cancel(order_id, plan.slug)
             except (APIError, APIConnectionError, APITimeoutError, OrderPending) as exc:
@@ -656,10 +711,14 @@ class TradingBot:
         else:
             quantity, notional = plan.quantity, plan.notional
             fee = estimate_fee(market.fee_coefficient, quantity, plan.yes_price)
-        self._finish_order(plan, quantity, notional, fee)
+        self._finish_order(plan, quantity, notional, fee, trade_id=trade_id)
 
-    def _finish_order(self, plan, quantity, notional, fee) -> None:
-        self.journal.finish_order(plan.slug, quantity, notional, fee)
+    def _finish_order(
+        self, plan, quantity, notional, fee, *, trade_id: str, readback_delayed=False
+    ) -> None:
+        self.journal.finish_order(
+            trade_id, quantity, notional, fee, readback_delayed=readback_delayed
+        )
         logger.info(
             "{} {} {} | {} shares | notional ${:.4f} | fees {}",
             "LIVE" if self.live else "PAPER",
@@ -697,12 +756,14 @@ class TradingBot:
                 if monotonic() < self.next_data_attempt:
                     break
                 continue
-            self._finish_order(plan, *order_fill(order, plan))
+            self._finish_order(
+                plan, *order_fill(order, plan), trade_id=row["trade_id"], readback_delayed=True
+            )
 
         return complete
 
     def _discover(self) -> None:
-        if self.one_trade and self.trade_slug is not None:
+        if self.one_trade and self.trade_id is not None:
             self.market = None
             return
         if self.market is not None and datetime.now(timezone.utc) < self.market.end:
@@ -833,11 +894,12 @@ class TradingBot:
                 raise RuntimeError(
                     "Account has open orders; reconcile them before starting this bot"
                 )
-        expected = {
-            row["slug"]: number(row["quantity"]) * (1 if row["outcome"] == "up" else -1)
-            for row in rows
-            if row["state"] == "open"
-        }
+        expected = {}
+        for row in rows:
+            if row["state"] == "open":
+                expected[row["slug"]] = expected.get(row["slug"], Decimal("0")) + (
+                    number(row["quantity"]) * (1 if row["outcome"] == "up" else -1)
+                )
         actual = {
             slug: position_quantity(position)
             for slug, position in account.positions.items()
@@ -857,21 +919,29 @@ class TradingBot:
         # While one known order awaits readback, other owned positions still
         # need exits. Only that order's bounded fill range may differ; entries
         # stay blocked until every pending order has been reconciled.
-        for row in pending.values():
-            plan = pending_plan(row)
-            sign = 1 if row["outcome"] == "up" else -1
-            before = number(row["quantity"]) * sign
-            after = before + plan.quantity * sign * (1 if plan.action == "BUY" else -1)
-            quantity = actual.pop(row["slug"], Decimal("0"))
-            # A settled contract may disappear while its order readback is
-            # delayed. Keep it unresolved without blocking other owned exits;
-            # terminal fill + provider resolution still gate its accounting.
-            ended = datetime.now(timezone.utc) >= parse_time(row["end"])
-            if not (ended and quantity == 0) and not min(before, after) <= quantity <= max(
-                before, after
-            ):
+        for slug in {row["slug"] for row in pending.values()}:
+            owned = [row for row in rows if row["slug"] == slug]
+            before = sum(
+                (number(row["quantity"]) * (1 if row["outcome"] == "up" else -1) for row in owned),
+                Decimal("0"),
+            )
+            lower = upper = before
+            for row in pending.values():
+                if row["slug"] != slug:
+                    continue
+                plan = pending_plan(row)
+                delta = (
+                    plan.quantity
+                    * (1 if row["outcome"] == "up" else -1)
+                    * (1 if plan.action == "BUY" else -1)
+                )
+                lower += min(Decimal("0"), delta)
+                upper += max(Decimal("0"), delta)
+            quantity = actual.pop(slug, Decimal("0"))
+            ended = all(datetime.now(timezone.utc) >= parse_time(row["end"]) for row in owned)
+            if not (ended and quantity == 0) and not lower <= quantity <= upper:
                 raise RuntimeError("Exchange pending position exceeds the reserved order quantity")
-            expected.pop(row["slug"], None)
+            expected.pop(slug, None)
         if expected != actual:
             raise RuntimeError(
                 "Exchange positions differ from the bot journal; reconcile before trading"
@@ -969,39 +1039,51 @@ class TradingBot:
                         raise RuntimeError(
                             "Bot position is not fully available for the requested exit"
                         )
-                self.journal.reserve_exit(plan)
-                self._execute(plan, market, book, streamed=streamed)
+                self.journal.reserve_exit(row["trade_id"], plan)
+                self._execute(plan, market, book, streamed=streamed, trade_id=row["trade_id"])
 
         return unavailable
 
     def _settle_position(self, row) -> bool:
-        """Return readiness while retaining any unconfirmed owned payout."""
-        net_filled_quantity = sum(
-            number(order["quantity"]) * (1 if order["action"] == "BUY" else -1)
-            for order in row["orders"]
+        """Confirm the aggregate payout before settling its individual experiment trades."""
+        if self.journal.get(row["trade_id"]).get("settlement"):
+            return True
+        owned = [
+            trade
+            for trade in self.journal.records()
+            if trade["slug"] == row["slug"] and trade["state"] in {"open", "closed"}
+        ]
+        if any(trade["pending"] for trade in owned):
+            return False
+        signed_quantity = sum(
+            (
+                sum(
+                    (
+                        number(order["quantity"]) * (1 if order["action"] == "BUY" else -1)
+                        for order in trade["orders"]
+                    ),
+                    Decimal("0"),
+                )
+                * (1 if trade["outcome"] == "up" else -1)
+                for trade in owned
+            ),
+            Decimal("0"),
         )
         value = self.exchange.settlement(row["slug"])
         if value is None:
-            # Paper holdings remain charged against journal risk limits while waiting.
-            return not self.live or (row["state"] == "closed" and net_filled_quantity == 0)
+            return not self.live or not signed_quantity
         resolution = None
-        if self.live and (row["state"] == "open" or net_filled_quantity > 0):
-            if row["state"] == "open":
-                position = self.exchange.account(book_source=self._valuation_book).positions.get(
-                    row["slug"]
-                )
-                if position and not position.get("expired") and position_quantity(position) != 0:
-                    return False
-                quantity = number(row["quantity"])
-            else:
-                # Legacy settlement rows still need the holding's actual resolution evidence.
-                quantity = net_filled_quantity
-            signed_quantity = quantity * (1 if row["outcome"] == "up" else -1)
+        if self.live and signed_quantity:
+            position = self.exchange.account(book_source=self._valuation_book).positions.get(
+                row["slug"]
+            )
+            if position and not position.get("expired") and position_quantity(position) != 0:
+                return False
             resolution = self.exchange.resolution(row["slug"], signed_quantity)
             if resolution is None:
                 logger.warning("Waiting for matching account settlement evidence: {}", row["slug"])
                 return False
-        self.journal.settle(row["slug"], value, resolution=resolution)
+        self.journal.settle_market(row["slug"], value, resolution=resolution)
         logger.info("{} settled at YES {}", row["slug"], value)
         return True
 
@@ -1046,6 +1128,7 @@ def _unavailable_book(exc: Exception) -> bool:
     return isinstance(exc, ValueError) or retryable_api_error(exc, missing=True)
 
 
+TIMING_WINDOWS = (("earlier", 720, 780), ("current", 780, 840), ("later", 840, 870))
 ROOT = Path(__file__).resolve().parent
 
 
