@@ -204,8 +204,8 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
         )
         return None
 
-    def _spot_momentum(self, price: float, timestamp: str | None) -> float | None:
-        """Return the spot change over 30s (nearest observation within 5s)."""
+    def observe_spot(self, price: float, timestamp: str | None) -> datetime | None:
+        """Advance timestamped input history independently of entry eligibility."""
         if timestamp is None:
             return None
         observed = datetime.fromisoformat(timestamp)
@@ -215,6 +215,13 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
             self._spot_history.popleft()
         if not self._spot_history or observed > self._spot_history[-1][0]:
             self._spot_history.append((observed, float(price)))
+        return observed
+
+    def _spot_momentum(self, price: float, timestamp: str | None) -> float | None:
+        """Return the spot change over 30s (nearest observation within 5s)."""
+        observed = self.observe_spot(price, timestamp)
+        if observed is None:
+            return None
         target = observed - timedelta(seconds=30)
         previous_time, previous_price = min(
             self._spot_history, key=lambda item: abs(item[0] - target)

@@ -44,7 +44,7 @@ class BTCStrategy15Min:
         }.items():
             self.fusion.set_weight(name, weight)
 
-    def observe(self, book: Book) -> None:
+    def observe(self, book: Book, context: dict | None = None) -> None:
         if self.slug != book.slug:
             self.slug = book.slug
             self.ticks.clear()
@@ -59,8 +59,16 @@ class BTCStrategy15Min:
             self.ticks.append({"ts": book.timestamp, "price": book.mid})
             self.last_sample = now
 
+        spot = (context or {}).get("spot", {})
+        if spot.get("available"):
+            for processor in self.processors:
+                if isinstance(processor, PriceDivergenceProcessor):
+                    processor.observe_spot(
+                        spot["value"], spot.get("source_timestamp") or spot.get("received_at")
+                    )
+
     def decide(self, market: Market, book: Book, context: dict | None = None) -> str | None:
-        self.observe(book)
+        self.observe(book, context)
         elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
         if not self.entry_window[0] <= elapsed < self.entry_window[1] or len(self.ticks) < 20:
             return None

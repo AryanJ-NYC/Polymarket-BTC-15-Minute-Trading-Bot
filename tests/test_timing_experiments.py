@@ -536,7 +536,7 @@ def test_enrolled_model_comparison_keeps_its_pinned_single_baseline_window(
     assert row["settings"]["experiment"]["arm"] == "baseline"
     assert row["settings"]["entry_start_seconds"] == 780
     assert row["settings"]["entry_end_seconds"] == 840
-    assert "timing_preset" not in row["settings"]
+    assert row["settings"]["timing_preset"] == "current"
 
 
 @pytest.fixture

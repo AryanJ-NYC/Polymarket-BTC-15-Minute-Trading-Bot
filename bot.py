@@ -312,6 +312,11 @@ class TradingBot:
     def _settings_for_arm(self, arm: str) -> dict:
         uses_model = arm == "model" if self.simultaneous else self._uses_model
         settings = dict(self._model_settings if uses_model else self._baseline_settings)
+        # Record known runtime policy labels without changing an enrolled A/B definition.
+        settings.setdefault("timing_preset", "current")
+        settings.setdefault("exit_policy", "price-thresholds-v1")
+        settings.setdefault("sizing_policy", "bankroll-percentage-v1")
+        settings.setdefault("extra_cost_usd", "0")
         if self.experiment is None or self.market is None:
             return settings
         return {
@@ -458,7 +463,12 @@ class TradingBot:
                     )
                 logger.warning("Entries paused: account read unavailable ({})", type(exc).__name__)
                 return
-        self.strategy.observe(book)
+        context = (
+            self.context.snapshot()
+            if self.context is not None and (self.simultaneous or not self._uses_model)
+            else None
+        )
+        self.strategy.observe(book, context)
         self.observations += 1
         logger.info(
             "{} | YES {} / {} | {} sampled snapshots | quote age {:.3f}s",
@@ -480,7 +490,9 @@ class TradingBot:
             elif any(row["pending"] for row in self.journal.records()):
                 self._record_active_pause("reconciliation_pending", settings)
             else:
-                self._consider_entry(book, unavailable=unavailable, settings=settings)
+                self._consider_entry(
+                    book, unavailable=unavailable, settings=settings, context=context
+                )
 
     def _entry_arms(self) -> tuple[str, ...]:
         if not self.simultaneous:
@@ -488,14 +500,16 @@ class TradingBot:
         first = _experiment_arm(self.experiment["id"], self.market.slug)
         return (first, "model" if first == "baseline" else "baseline")
 
-    def _consider_entry(self, book, *, unavailable: bool, settings: dict) -> None:
+    def _consider_entry(
+        self, book, *, unavailable: bool, settings: dict, context: dict | None
+    ) -> None:
         if self.journal.entry_attempted(self.market.slug, settings.get("timing_preset")):
             self.journal.record_opportunity(
                 self.market, book, "already_attempted", settings=settings
             )
             return
         if "model_tag" not in settings:
-            snapshot = self.context.snapshot()
+            snapshot = context or {}
             settings = {**settings, "context": snapshot}
             outcome = self.strategy.decide(self.market, book, snapshot)
             if outcome is None:
@@ -1186,11 +1200,7 @@ class TradingBot:
         """Confirm the aggregate payout before settling its individual experiment trades."""
         if self.journal.get(row["trade_id"]).get("settlement"):
             return True
-        owned = [
-            trade
-            for trade in self.journal.records()
-            if trade["slug"] == row["slug"] and trade["state"] in {"open", "closed"}
-        ]
+        owned = [trade for trade in self.journal.records() if trade["slug"] == row["slug"]]
         if any(trade["pending"] for trade in owned):
             return False
         signed_quantity = sum(
