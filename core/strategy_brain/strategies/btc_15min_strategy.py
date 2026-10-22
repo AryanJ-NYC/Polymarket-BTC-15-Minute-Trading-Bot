@@ -68,7 +68,7 @@ class BTCStrategy15Min:
                     )
 
     def decide(self, market: Market, book: Book, context: dict | None = None) -> str | None:
-        self.observe(book, context)
+        self.observe(book)
         elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
         if not self.entry_window[0] <= elapsed < self.entry_window[1] or len(self.ticks) < 20:
             return None

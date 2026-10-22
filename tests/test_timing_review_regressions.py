@@ -51,6 +51,42 @@ def test_attempted_slot_keeps_real_spot_history_warm_for_next_window(
     assert signal.metadata["spot_momentum"] == pytest.approx(0.01)
 
 
+def test_assigned_ab_keeps_original_single_window_spot_warmup(
+    venue, journal, stream_feed, clock, monkeypatch, future_market, tmp_path
+):
+    clock.current = future_market.start
+    context = Context(spot_context(clock.current, 100000))
+    trader = bot.TradingBot(
+        venue.client,
+        journal,
+        stream_feed.books,
+        context=context,
+        model=saved_model(tmp_path, 0.8),
+        experiment_id="test-baseline",
+    )
+    trader.strategy.processors = [PriceDivergenceProcessor()]
+    clock.current = future_market.start + timedelta(seconds=720)
+    publish(venue, stream_feed, clock)
+    warm(trader.strategy, stream_feed.books.book(future_market), clock, monkeypatch)
+    monkeypatch.setattr(
+        "core.strategy_brain.strategies.btc_15min_strategy.monotonic",
+        lambda: clock.current.timestamp(),
+    )
+    for seconds in range(720, 781, 3):
+        clock.current = future_market.start + timedelta(seconds=seconds)
+        context.value = spot_context(clock.current, 100000 if seconds <= 750 else 101000)
+        publish(venue, stream_feed, clock)
+        trader.tick()
+    assert journal.records() == []
+    assert journal.opportunities()[-1]["decision"] == "no_signal"
+    clock.current += timedelta(seconds=30)
+    context.value = spot_context(clock.current, 102000)
+    publish(venue, stream_feed, clock)
+    trader.tick()
+    assert len(journal.records()) == 1
+    assert journal.records()[0]["settings"]["experiment"]["arm"] == "baseline"
+
+
 def test_pending_reserved_buy_defers_market_settlement_until_known_readback(
     venue, journal, stream_feed, clock, monkeypatch, future_market, actual_fills
 ):

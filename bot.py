@@ -468,7 +468,8 @@ class TradingBot:
             if self.context is not None and (self.simultaneous or not self._uses_model)
             else None
         )
-        self.strategy.observe(book, context)
+        # Keep the enrolled single-window A/B observation policy unchanged.
+        self.strategy.observe(book, context if self.model is None or self.simultaneous else None)
         self.observations += 1
         logger.info(
             "{} | YES {} / {} | {} sampled snapshots | quote age {:.3f}s",
