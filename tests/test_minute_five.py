@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -141,6 +142,52 @@ def test_final_preflight_rejection_is_terminal(
     publish(venue, stream_feed, clock)
     bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
     assert not actual_fills
+
+
+@pytest.mark.parametrize("stage", ["local_validation", "post_preview", "preview_rejected"])
+def test_rejected_reservation_is_released_before_diagnostic_write_failure(
+    venue, journal, stream_feed, clock, future_market, stage
+):
+    clock.current = future_market.start + timedelta(seconds=300)
+    venue.bid, venue.ask = "0.88", "0.90"
+    publish(venue, stream_feed, clock)
+    journal.db.execute(
+        "CREATE TRIGGER fail_rejection_diagnostic BEFORE INSERT ON opportunities "
+        "WHEN json_extract(NEW.data, '$.decision') IN "
+        "('submission_window_closed', 'submission_preflight_rejected') "
+        "BEGIN SELECT RAISE(FAIL, 'diagnostic write failure'); END"
+    )
+    if stage == "local_validation":
+        # Advance the real controlled clock just after the entry is reserved,
+        # before the runner performs its own last validation.
+        def advance_after_reservation(statement):
+            if statement.startswith("INSERT INTO opportunities") and "entry_reserved" in statement:
+                clock.current = future_market.start + timedelta(seconds=305)
+
+        journal.db.set_trace_callback(advance_after_reservation)
+    elif stage == "post_preview":
+        venue.preview_delay = 5
+    else:
+        venue.preview_mismatch = True
+
+    with pytest.raises(sqlite3.IntegrityError, match="diagnostic write failure"):
+        bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+    row = journal.get(future_market.slug + ":minute-five")
+    assert row["state"] == "unfilled"
+    assert row["pending"] is None
+    assert row["order_id"] is None
+
+    # Prove release was committed, and the one-shot decision still prevents
+    # another order after reopening the journal and restarting the runner.
+    path = Path(journal.db.execute("PRAGMA database_list").fetchone()[2])
+    journal.close()
+    journal.__init__(path)
+    clock.current = future_market.start + timedelta(seconds=304)
+    publish(venue, stream_feed, clock)
+    bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
+    assert journal.get(row["trade_id"]) == row
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
 
 
 @pytest.mark.parametrize("partial_exit", [False, True])

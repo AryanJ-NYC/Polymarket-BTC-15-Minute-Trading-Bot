@@ -881,8 +881,8 @@ class TradingBot:
         try:
             validate()
         except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
-            record_rejection(exc)
             self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
+            record_rejection(exc)
             if not _unavailable_book(exc):
                 raise
             detail = str(exc) if isinstance(exc, ValueError) else api_error_summary(exc)
@@ -896,8 +896,8 @@ class TradingBot:
             try:
                 order_id = self.exchange.submit(plan, validate=validate)
             except OrderNotSubmitted as exc:
-                record_rejection(exc.cause)
                 self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
+                record_rejection(exc.cause)
                 logger.warning(
                     "Order not submitted for {}: {} | quote reason {}",
                     plan.slug,
@@ -910,8 +910,8 @@ class TradingBot:
                     self._wait_for_data(exc.cause)
                 return
             except OrderPreflightError as exc:
-                record_rejection(exc)
                 self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
+                record_rejection(exc)
                 logger.info("Order preflight rejected: {}", exc)
                 return
             except Exception as exc:
