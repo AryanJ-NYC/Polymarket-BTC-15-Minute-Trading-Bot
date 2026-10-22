@@ -12,3 +12,7 @@ _Avoid_: Position, when referring to an individual experiment's trade.
 **Account position**: The provider-reported holding for one contract, shared by the account's experiment trades.
 
 **Conflict skip**: An observation where a proposed entry opposes an experiment trade still held in the same contract. It is not a fill or an executed trade result.
+
+**Same-contract comparison**: The three baseline timing experiments plus one model experiment at 13:00–14:00, admitted serially under the shared account limits. Saved priority alternates the overlapping policies; shared holdings and conflicts can affect coverage.
+
+**Assigned comparison**: The existing baseline/model comparison where each whole contract belongs to one arm. Its immutable identity and results remain separate from the same-contract comparison.

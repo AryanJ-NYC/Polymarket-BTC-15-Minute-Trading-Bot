@@ -582,8 +582,12 @@ def actual_fills(venue):
                 "qtyAvailableDecimal": str(abs(quantity)),
             }
             cash = Decimal(str(venue.balance["currentBalance"]))
+            buying = payload["intent"] in {"ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"}
+            outcome_price = Decimal(venue.fill_price)
+            if payload["intent"] in {"ORDER_INTENT_BUY_SHORT", "ORDER_INTENT_SELL_SHORT"}:
+                outcome_price = 1 - outcome_price
             venue.balance["currentBalance"] = str(
-                cash + filled * Decimal(venue.fill_price) * (-1 if positive else 1) - fee
+                cash + filled * outcome_price * (-1 if buying else 1) - fee
             )
             return httpx.Response(200, json={"id": order_id, "executions": []})
         if request.method == "GET" and request.url.path.startswith("/v1/order/experiment-order-"):

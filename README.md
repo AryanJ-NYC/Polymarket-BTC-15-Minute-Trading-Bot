@@ -381,6 +381,40 @@ expiry can leave holdings or results unresolved; preserve and inspect them using
 the existing recovery procedure. Running the experiment does not automatically
 select a permanent winning window or change stakes.
 
+### Include the model in every contract
+
+To evaluate all four experiments together, select the fixed same-contract comparison
+with the existing model and a **new** comparison ID:
+
+```bash
+python bot.py --live --model logs/candidate.json --experiment-id btc-four-comparison-1 --simultaneous
+```
+
+The three baseline timing entries run alongside one model entry at 13:00–14:00.
+Each slot has its own durable attempt and saved policy, including a `model-current`
+trade key. Model entries retain the existing 2% bankroll sizing, fee-aware EV gate,
+and +20%/-30% exits. There is no additional allowance: all four share the same
+10% exposure/daily-loss fractions and five-open-trade guard. Four eligible entries
+can fund roughly 8% of bankroll before exits; actual limits can block later slots.
+
+Registration pins `same-contract-v1`, all timing windows, baseline/model settings,
+model tag and the admission-order rule. New enrollment waits for a whole contract;
+restarts retain it. Existing assigned A/B comparisons keep their original behavior
+and records, and their IDs cannot be reused with this configuration.
+
+At 13:00, the same SHA-256 comparison-ID/NUL/contract rule chooses whether baseline
+or model is evaluated first. Each admission rereads funds and executable quotes;
+a pending first order pauses the second. Opportunities save `entry_priority`,
+which does not split settings cohorts. Earlier baseline holdings can still block
+an opposing model signal. Conflicts and shared capacity affect coverage, so these
+are correlated comparisons with execution interference, not independent samples
+or a clean randomized treatment estimate. Use the four `by_settings` cohorts and
+the new ID's `by_experiment` arm totals; prior assigned A/B results stay separate.
+
+The initial six-contract bounded comparison permits up to 24 attempts, subject to
+signals, conflicts and the existing limits. `--duration` still finishes the current
+tick and can leave pending holdings or results. Do not start a second runner.
+
 ## Probability model experiment
 
 Fit a regularized logistic model from the existing journal's observed midpoint,

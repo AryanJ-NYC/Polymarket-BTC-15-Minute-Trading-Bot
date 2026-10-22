@@ -476,9 +476,9 @@ class TradeJournal:
 def entry_key(slug: str, preset: str | None = None) -> str:
     # Keep historical/current keys readable by existing tools. The JSON slug
     # remains the exchange market identity; the SQLite key identifies a trade.
-    if preset not in {None, "earlier", "current", "later"}:
+    if preset not in {None, "earlier", "current", "later", "model-current"}:
         raise ValueError("Unknown timing experiment")
-    return f"{slug}:{preset}" if preset in {"earlier", "later"} else slug
+    return f"{slug}:{preset}" if preset in {"earlier", "later", "model-current"} else slug
 
 
 def pending_plan(row: dict) -> Plan:

@@ -366,8 +366,9 @@ def test_invalid_experiment_cli_fails_before_exchange_connection(monkeypatch, ex
     assert bot.main() == 2
 
 
+@pytest.mark.parametrize("simultaneous", [False, True])
 def test_experiment_cli_starts_and_closes_supporting_context_for_both_arms(
-    venue, books, clock, monkeypatch, tmp_path
+    venue, books, clock, monkeypatch, tmp_path, simultaneous
 ):
     contexts = []
 
@@ -405,6 +406,7 @@ def test_experiment_cli_starts_and_closes_supporting_context_for_both_arms(
             str(tmp_path / "model.json"),
             "--experiment-id",
             "test-model",
+            *(["--simultaneous"] if simultaneous else []),
         ],
     )
     assert bot.main() == 0

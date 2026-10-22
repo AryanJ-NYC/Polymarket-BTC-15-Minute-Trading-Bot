@@ -70,6 +70,11 @@ def main() -> int:
         help="Compare baseline and --model on assigned contracts under shared limits",
     )
     parser.add_argument(
+        "--simultaneous",
+        action="store_true",
+        help="Run three baseline timing entries and one model entry in each contract",
+    )
+    parser.add_argument(
         "--extra-cost-usd",
         default="0",
         help="Additional modeled cost per entry, charged once in EV",
@@ -87,7 +92,7 @@ def main() -> int:
     previous_handlers = {}
     try:
         model = load_model(args.model) if args.model is not None else None
-        _validate_experiment(args.experiment_id, model)
+        _validate_experiment(args.experiment_id, model, args.simultaneous)
         extra_cost = number(args.extra_cost_usd)
         if extra_cost < 0 or (model is None and extra_cost != 0):
             raise ValueError("Extra cost must be nonnegative and requires --model")
@@ -135,6 +140,7 @@ def main() -> int:
             extra_cost=extra_cost,
             context=context,
             experiment_id=args.experiment_id,
+            simultaneous=args.simultaneous,
         )
         logger.info("Starting {} mode; press Ctrl+C to stop", mode_name.upper())
         duration = args.duration or (15 if args.once else None)
@@ -197,12 +203,14 @@ class TradingBot:
         extra_cost: Decimal = Decimal("0"),
         context: ContextRefresher | None = None,
         experiment_id: str | None = None,
+        simultaneous: bool = False,
     ):
-        _validate_experiment(experiment_id, model)
+        _validate_experiment(experiment_id, model, simultaneous)
         extra_cost = number(extra_cost)
         if extra_cost < 0 or (model is None and extra_cost != 0):
             raise ValueError("Extra cost must be nonnegative and requires a model")
         self.model = model
+        self.simultaneous = simultaneous
         self.experiment = None
         self.market = None
         self.context = (
@@ -247,28 +255,46 @@ class TradingBot:
                 model=model.artifact,
                 extra_cost_usd=str(extra_cost),
             )
-        if model is None:
+        if model is None or simultaneous:
             self._baseline_settings.update(
                 timing_preset="current",
                 exit_policy="price-thresholds-v1",
                 sizing_policy="bankroll-percentage-v1",
                 extra_cost_usd="0",
             )
+        if simultaneous:
+            self._model_settings.update(
+                timing_preset="model-current",
+                exit_policy="price-thresholds-v1",
+                sizing_policy="bankroll-percentage-v1",
+            )
         if experiment_id is not None:
             self.experiment = journal.start_experiment(
                 experiment_id,
                 {
-                    "assignment_version": "sha256-contract-v1",
+                    "assignment_version": "same-contract-v1"
+                    if simultaneous
+                    else "sha256-contract-v1",
                     "model_tag": model.tag,
                     "extra_cost_usd": str(extra_cost),
                     "baseline_settings": self._baseline_settings,
+                    **(
+                        {
+                            "baseline_windows": TIMING_WINDOWS,
+                            "model_settings": self._model_settings,
+                            "entry_order": "sha256-contract-v1",
+                        }
+                        if simultaneous
+                        else {}
+                    ),
                 },
             )
             logger.info(
-                "Experiment {} | model {} | whole contracts from {} | shared bankroll limits",
+                "Experiment {} | model {} | whole contracts from {} | shared bankroll limits | simultaneous={}",
                 experiment_id,
                 model.tag,
                 self.experiment["eligible_from"],
+                simultaneous,
             )
         self.next_outcome_attempt = 0.0
         self.outcome_cursor = ""
@@ -281,23 +307,34 @@ class TradingBot:
 
     @property
     def settings(self) -> dict:
-        settings = self._model_settings if self._uses_model else self._baseline_settings
+        return self._settings_for_arm("baseline")
+
+    def _settings_for_arm(self, arm: str) -> dict:
+        uses_model = arm == "model" if self.simultaneous else self._uses_model
+        settings = dict(self._model_settings if uses_model else self._baseline_settings)
         if self.experiment is None or self.market is None:
             return settings
         return {
             **settings,
             "experiment": {
                 "id": self.experiment["id"],
-                "arm": "model" if self._uses_model else "baseline",
+                "arm": "model" if uses_model else "baseline",
                 "assignment_version": self.experiment["configuration"]["assignment_version"],
                 "model_tag": self.model.tag,
                 "eligible_from": self.experiment["eligible_from"],
             },
+            **(
+                {"entry_priority": _experiment_arm(self.experiment["id"], self.market.slug)}
+                if self.simultaneous
+                else {}
+            ),
         }
 
     @property
     def _uses_model(self) -> bool:
         if self.model is None:
+            return False
+        if self.simultaneous:
             return False
         if self.experiment is None:
             return True
@@ -390,19 +427,20 @@ class TradingBot:
             self.experiment["eligible_from"]
         ):
             return
-        capture = self._in_entry_window()
+        admissions = [self._settings_for_arm(arm) for arm in self._entry_arms()]
+        admissions = [settings for settings in admissions if self._in_entry_window(settings)]
         book = None
         try:
             book = self.books.book(self.market)
             if book.entry_reason:
                 raise QuoteUnavailable(book.entry_reason)
         except QuoteUnavailable as exc:
-            if capture:
+            for settings in admissions:
                 self.journal.record_opportunity(
                     self.market,
                     book,
                     "book_unavailable",
-                    settings=self.settings,
+                    settings=settings,
                     quote_reason=quote_reason(exc),
                 )
             logger.info("Entries paused: {} | stream {}", exc, self.books.health())
@@ -414,9 +452,9 @@ class TradingBot:
                 if not _unavailable_book(exc):
                     raise
                 self._wait_for_data(exc)
-                if capture:
+                for settings in admissions:
                     self.journal.record_opportunity(
-                        self.market, book, "account_unavailable", settings=self.settings
+                        self.market, book, "account_unavailable", settings=settings
                     )
                 logger.warning("Entries paused: account read unavailable ({})", type(exc).__name__)
                 return
@@ -430,81 +468,81 @@ class TradingBot:
             len(self.strategy.ticks),
             (datetime.now(timezone.utc) - book.timestamp).total_seconds(),
         )
-        if self.journal.entry_attempted(self.market.slug, self.settings.get("timing_preset")):
-            if capture:
+        for settings in admissions:
+            if self.one_trade and self.trade_id is not None:
+                break
+            if not self._in_entry_window(settings):
                 self.journal.record_opportunity(
-                    self.market, book, "already_attempted", settings=self.settings
+                    self.market, book, "entry_window_closed", settings=settings
                 )
+            elif monotonic() < self.next_data_attempt:
+                self._record_active_pause("exchange_backoff", settings)
+            elif any(row["pending"] for row in self.journal.records()):
+                self._record_active_pause("reconciliation_pending", settings)
+            else:
+                self._consider_entry(book, unavailable=unavailable, settings=settings)
+
+    def _entry_arms(self) -> tuple[str, ...]:
+        if not self.simultaneous:
+            return ("baseline",)
+        first = _experiment_arm(self.experiment["id"], self.market.slug)
+        return (first, "model" if first == "baseline" else "baseline")
+
+    def _consider_entry(self, book, *, unavailable: bool, settings: dict) -> None:
+        if self.journal.entry_attempted(self.market.slug, settings.get("timing_preset")):
+            self.journal.record_opportunity(
+                self.market, book, "already_attempted", settings=settings
+            )
             return
-        settings = self.settings
-        if not self._uses_model:
+        if "model_tag" not in settings:
             snapshot = self.context.snapshot()
             settings = {**settings, "context": snapshot}
             outcome = self.strategy.decide(self.market, book, snapshot)
             if outcome is None:
-                if capture:
-                    if len(self.strategy.ticks) < self.settings["minimum_snapshots"]:
-                        reason = "history_incomplete"
-                    elif (
-                        number(self.settings["down_midpoint"])
-                        <= book.mid
-                        <= number(self.settings["up_midpoint"])
-                    ):
-                        reason = "neutral_price"
-                    else:
-                        reason = "no_signal"
-                    self.journal.record_opportunity(self.market, book, reason, settings=settings)
+                if len(self.strategy.ticks) < settings["minimum_snapshots"]:
+                    reason = "history_incomplete"
+                elif (
+                    number(settings["down_midpoint"]) <= book.mid <= number(settings["up_midpoint"])
+                ):
+                    reason = "neutral_price"
+                else:
+                    reason = "no_signal"
+                self.journal.record_opportunity(self.market, book, reason, settings=settings)
                 return
         else:
             outcome = None
-            if not capture:
-                return
-            if len(self.strategy.ticks) < self.settings["minimum_snapshots"]:
+            if len(self.strategy.ticks) < settings["minimum_snapshots"]:
                 self.journal.record_opportunity(
                     self.market, book, "history_incomplete", settings=settings
                 )
                 return
-        if outcome is not None and any(
-            row["slug"] == self.market.slug
-            and number(row["quantity"]) > 0
-            and row["outcome"] != outcome
-            for row in self.journal.records()
-        ):
-            if capture:
-                self.journal.record_opportunity(
-                    self.market, book, "opposite_position_conflict", outcome, settings
-                )
-            return
         # Account work may be slow; only current quotes and funds can size an entry.
         try:
-            if not self._in_entry_window():
-                if capture:
-                    self.journal.record_opportunity(
-                        self.market, book, "entry_window_closed", outcome, settings
-                    )
+            if not self._in_entry_window(settings):
+                self.journal.record_opportunity(
+                    self.market, book, "entry_window_closed", outcome, settings
+                )
                 return
             book = self.books.book(self.market)
             if book.entry_reason:
                 raise QuoteUnavailable(book.entry_reason)
-            if not self._uses_model and (
-                (outcome == "up" and book.mid <= number(self.settings["up_midpoint"]))
-                or (outcome == "down" and book.mid >= number(self.settings["down_midpoint"]))
+            if "model_tag" not in settings and (
+                (outcome == "up" and book.mid <= number(settings["up_midpoint"]))
+                or (outcome == "down" and book.mid >= number(settings["down_midpoint"]))
             ):
-                if capture:
-                    self.journal.record_opportunity(
-                        self.market, book, "price_changed", outcome, settings
-                    )
+                self.journal.record_opportunity(
+                    self.market, book, "price_changed", outcome, settings
+                )
                 return
             account = (
                 self._account_guard()
                 if self.live
                 else self.exchange.account(book_source=self._valuation_book)
             )
-            if not self._in_entry_window():
-                if capture:
-                    self.journal.record_opportunity(
-                        self.market, book, "entry_window_closed", outcome, settings
-                    )
+            if not self._in_entry_window(settings):
+                self.journal.record_opportunity(
+                    self.market, book, "entry_window_closed", outcome, settings
+                )
                 return
             book = self.books.book(self.market)
             if book.entry_reason:
@@ -512,11 +550,20 @@ class TradingBot:
             plan, settings = self._entry_plan(book, outcome, account, settings)
             if plan is None:
                 return
+            if any(
+                row["slug"] == self.market.slug
+                and number(row["quantity"]) > 0
+                and row["outcome"] != plan.outcome
+                for row in self.journal.records()
+            ):
+                self.journal.record_opportunity(
+                    self.market, book, "opposite_position_conflict", plan.outcome, settings
+                )
+                return
             if unavailable:
-                if capture:
-                    self.journal.record_opportunity(
-                        self.market, book, "position_monitoring_unavailable", plan.outcome, settings
-                    )
+                self.journal.record_opportunity(
+                    self.market, book, "position_monitoring_unavailable", plan.outcome, settings
+                )
                 logger.info("Entries paused until owned positions can be reconciled and monitored")
                 return
             outcome = plan.outcome
@@ -524,24 +571,23 @@ class TradingBot:
                 plan,
                 expires_at=min(
                     plan.expires_at,
-                    self.market.start + timedelta(seconds=self.settings["entry_end_seconds"]),
+                    self.market.start + timedelta(seconds=settings["entry_end_seconds"]),
                 ),
             )
-            self._validate_execution(plan, self.market, book, streamed=True)
+            self._validate_execution(plan, self.market, book, streamed=True, settings=settings)
         except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
             if not _unavailable_book(exc):
                 raise
             if isinstance(exc, (APIError, APIConnectionError, APITimeoutError)):
                 self._wait_for_data(exc)
-            if capture:
-                self.journal.record_opportunity(
-                    self.market,
-                    book,
-                    "plan_rejected",
-                    outcome,
-                    settings,
-                    quote_reason=quote_reason(exc),
-                )
+            self.journal.record_opportunity(
+                self.market,
+                book,
+                "plan_rejected",
+                outcome,
+                settings,
+                quote_reason=quote_reason(exc),
+            )
             logger.info(
                 "Entry skipped: executable quote or account unavailable ({}, reason {})",
                 type(exc).__name__,
@@ -549,51 +595,59 @@ class TradingBot:
             )
             return
         if self.journal.reserve_entry(plan, self.market.end, settings=settings):
-            if capture:
-                self.journal.record_opportunity(
-                    self.market, book, "entry_reserved", outcome, settings
-                )
+            self.journal.record_opportunity(self.market, book, "entry_reserved", outcome, settings)
             self.trade_id = entry_key(plan.slug, settings.get("timing_preset"))
-            self._execute(plan, self.market, book, streamed=True, trade_id=self.trade_id)
+            self._execute(
+                plan, self.market, book, streamed=True, trade_id=self.trade_id, settings=settings
+            )
 
     def _record_pause(self, reason: str) -> None:
+        self._select_timing()
+        if self.market is None:
+            return
+        for arm in self._entry_arms():
+            self._record_active_pause(reason, self._settings_for_arm(arm))
+
+    def _record_active_pause(self, reason: str, settings: dict) -> None:
         if self.experiment is not None:
             self._record_experiment_pause(
                 {
                     "exchange_backoff": "data_backoff",
                     "reconciliation_pending": "pending_reconciliation",
-                }.get(reason, reason)
+                }.get(reason, reason),
+                settings,
             )
-            return
-        self._select_timing()
-        if self.market is not None and self._in_entry_window():
-            self.journal.record_opportunity(self.market, None, reason, settings=self.settings)
+        elif self.market is not None and self._in_entry_window(settings):
+            self.journal.record_opportunity(self.market, None, reason, settings=settings)
 
     def _select_timing(self) -> None:
-        if self.market is None or self.model is not None:
+        if self.market is None or (self.model is not None and not self.simultaneous):
             return
         elapsed = (datetime.now(timezone.utc) - self.market.start).total_seconds()
         preset, start, end = next(
             (window for window in TIMING_WINDOWS if elapsed < window[2]), TIMING_WINDOWS[-1]
         )
-        self.settings.update(timing_preset=preset, entry_start_seconds=start, entry_end_seconds=end)
+        self._baseline_settings.update(
+            timing_preset=preset, entry_start_seconds=start, entry_end_seconds=end
+        )
         self.strategy.entry_window = (start, end)
 
-    def _in_entry_window(self) -> bool:
+    def _in_entry_window(self, settings: dict | None = None) -> bool:
+        settings = self.settings if settings is None else settings
         elapsed = (datetime.now(timezone.utc) - self.market.start).total_seconds()
-        return self.settings["entry_start_seconds"] <= elapsed < self.settings["entry_end_seconds"]
+        return settings["entry_start_seconds"] <= elapsed < settings["entry_end_seconds"]
 
-    def _record_experiment_pause(self, decision: str) -> None:
+    def _record_experiment_pause(self, decision: str, settings: dict) -> None:
         if (
             self.experiment is not None
             and self.market is not None
             and self.market.start >= parse_time(self.experiment["eligible_from"])
-            and self._in_entry_window()
+            and self._in_entry_window(settings)
         ):
-            self.journal.record_opportunity(self.market, None, decision, settings=self.settings)
+            self.journal.record_opportunity(self.market, None, decision, settings=settings)
 
     def _entry_plan(self, book, outcome, account, settings):
-        capture = self._in_entry_window()
+        capture = self._in_entry_window(settings)
         if account.bankroll is None:
             logger.info(
                 "Entry skipped: bankroll unavailable; cash or position valuation is invalid"
@@ -633,17 +687,16 @@ class TradingBot:
                 )
             return None, settings
         try:
-            if not self._uses_model:
+            if "model_tag" not in settings:
                 plan = self.exchange.buy_plan(
                     self.market,
                     book,
                     outcome,
                     budget,
-                    deadline=self.market.start
-                    + timedelta(seconds=self.settings["entry_end_seconds"]),
+                    deadline=self.market.start + timedelta(seconds=settings["entry_end_seconds"]),
                 )
             else:
-                plan, prediction = self._model_plan(book, budget)
+                plan, prediction = self._model_plan(book, budget, settings)
                 settings = {**settings, "prediction": prediction}
                 if plan is None:
                     self.journal.record_opportunity(
@@ -668,7 +721,7 @@ class TradingBot:
             return None, settings
         return plan, settings
 
-    def _model_plan(self, book, budget):
+    def _model_plan(self, book, budget, settings):
         seconds_remaining = (self.market.end - datetime.now(timezone.utc)).total_seconds()
         q = self.model.predict(
             midpoint=book.mid,
@@ -689,8 +742,7 @@ class TradingBot:
                     book,
                     outcome,
                     budget,
-                    deadline=self.market.start
-                    + timedelta(seconds=self.settings["entry_end_seconds"]),
+                    deadline=self.market.start + timedelta(seconds=settings["entry_end_seconds"]),
                 )
             except ValueError:
                 prediction["candidates"][outcome] = {"skip": "insufficient_depth_or_invalid_plan"}
@@ -735,10 +787,12 @@ class TradingBot:
             if value is not None:
                 self.journal.record_contract_outcome(slug, value)
 
-    def _execute(self, plan, market, book, *, streamed: bool, trade_id: str) -> None:
+    def _execute(
+        self, plan, market, book, *, streamed: bool, trade_id: str, settings: dict | None
+    ) -> None:
 
         def validate():
-            self._validate_execution(plan, market, book, streamed=streamed)
+            self._validate_execution(plan, market, book, streamed=streamed, settings=settings)
 
         try:
             validate()
@@ -903,7 +957,9 @@ class TradingBot:
             markets[self.market.slug] = self.market
         self.books.set_markets(list(markets.values()))
 
-    def _validate_execution(self, plan, market, book, *, streamed: bool) -> None:
+    def _validate_execution(
+        self, plan, market, book, *, streamed: bool, settings: dict | None
+    ) -> None:
         if datetime.now(timezone.utc) >= plan.expires_at:
             raise ValueError("Order plan has expired")
         latest = self.books.book(market) if streamed else self.exchange.book(market)
@@ -911,20 +967,16 @@ class TradingBot:
         if streamed and latest.generation != book.generation:
             raise ValueError("Order book connection/subscription generation changed")
         if plan.action == "BUY":
+            if settings is None:
+                raise ValueError("Entry settings are required")
             if latest.entry_reason:
                 raise QuoteUnavailable(latest.entry_reason)
             elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
-            if (
-                not self.settings["entry_start_seconds"]
-                <= elapsed
-                < self.settings["entry_end_seconds"]
-            ):
+            if not settings["entry_start_seconds"] <= elapsed < settings["entry_end_seconds"]:
                 raise ValueError("Entry deadline elapsed")
-            if not self._uses_model:
-                if (
-                    plan.outcome == "up" and latest.mid <= number(self.settings["up_midpoint"])
-                ) or (
-                    plan.outcome == "down" and latest.mid >= number(self.settings["down_midpoint"])
+            if "model_tag" not in settings:
+                if (plan.outcome == "up" and latest.mid <= number(settings["up_midpoint"])) or (
+                    plan.outcome == "down" and latest.mid >= number(settings["down_midpoint"])
                 ):
                     raise ValueError("Entry direction is no longer eligible")
             else:
@@ -1119,7 +1171,14 @@ class TradingBot:
                             "Bot position is not fully available for the requested exit"
                         )
                 self.journal.reserve_exit(row["trade_id"], plan)
-                self._execute(plan, market, book, streamed=streamed, trade_id=row["trade_id"])
+                self._execute(
+                    plan,
+                    market,
+                    book,
+                    streamed=streamed,
+                    trade_id=row["trade_id"],
+                    settings=row.get("settings"),
+                )
 
         return unavailable
 
@@ -1207,7 +1266,11 @@ def _unavailable_book(exc: Exception) -> bool:
     return isinstance(exc, ValueError) or retryable_api_error(exc, missing=True)
 
 
-def _validate_experiment(experiment_id: str | None, model: ProbabilityModel | None) -> None:
+def _validate_experiment(
+    experiment_id: str | None, model: ProbabilityModel | None, simultaneous: bool = False
+) -> None:
+    if simultaneous and (experiment_id is None or model is None):
+        raise ValueError("--simultaneous requires --model and --experiment-id")
     if experiment_id is None:
         return
     if not isinstance(experiment_id, str) or not re.fullmatch(

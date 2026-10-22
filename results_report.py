@@ -119,9 +119,14 @@ def _experiment_report(rows, opportunities, definitions):
                 raise ValueError("Invalid experiment identity or arm in journal record")
             identity, arm = experiment["id"], experiment["arm"]
             key = (identity, row["slug"])
-            if key in assignments and assignments[key] != arm:
+            assignment = (arm, experiment.get("assignment_version"))
+            if (
+                key in assignments
+                and assignments[key][0] != arm
+                and not (assignments[key][1] == assignment[1] == "same-contract-v1")
+            ):
                 raise ValueError("Conflicting experiment arm for contract")
-            assignments[key] = arm
+            assignments[key] = assignment
             group = grouped.setdefault(identity, {"definition": None, "baseline": {}, "model": {}})
             group[arm].setdefault(kind, []).append(row)
     return {
@@ -130,6 +135,7 @@ def _experiment_report(rows, opportunities, definitions):
             "by_arm": {
                 arm: {
                     **_summarize(group[arm].get("trades", [])),
+                    **_coverage(group[arm].get("trades", []), group[arm].get("opportunities", [])),
                     "entry_attempt_count": len(group[arm].get("trades", [])),
                     "unfilled_count": sum(
                         row["state"] == "unfilled" for row in group[arm].get("trades", [])
@@ -155,6 +161,18 @@ def _opportunity_report(opportunities):
         "opportunity_count": len(opportunities),
         "opportunity_decisions": dict(sorted(decisions.items())),
         "quote_rejection_reasons": dict(sorted(quote_reasons.items())),
+        "entry_priority_contract_counts": {
+            priority: len(
+                {
+                    row["slug"]
+                    for row in opportunities
+                    if (row.get("settings") or {}).get("entry_priority") == priority
+                }
+            )
+            for priority in ("baseline", "model")
+        }
+        if any((row.get("settings") or {}).get("entry_priority") for row in opportunities)
+        else {},
     }
 
 

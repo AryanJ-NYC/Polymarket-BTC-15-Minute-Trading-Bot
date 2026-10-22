@@ -117,6 +117,15 @@ ExecStart=
 ExecStart=/opt/polymarket-us/current/.venv/bin/python /opt/polymarket-us/current/bot.py --live --env-file /etc/polymarket-us/.env.us --model /var/lib/polymarket-us/models/candidate.json --experiment-id btc-model-comparison-1
 ```
 
+For all three baseline timing slots plus one model slot in each contract, use a
+new comparison ID and append `--simultaneous` to that same ExecStart command.
+This selects the fixed same-contract comparison; the existing A/B ID cannot be
+reused. Preserve its records and candidate file. Keep the flat maintenance,
+backup and single-service procedure above. A bounded initial comparison also
+adds `--duration SECONDS` and temporarily disables automatic restart so a restart
+cannot reset its bound; record the exact full contracts and inspect any remaining
+holdings at expiry. Preserve a copy of the previous drop-in before replacing it.
+
 Reload systemd and start the same service. Verify its exact command, deployed
 revision, registered experiment definition, model tag and arm-tagged journal
 decisions. New experiment enrollment waits for the next whole contract; existing

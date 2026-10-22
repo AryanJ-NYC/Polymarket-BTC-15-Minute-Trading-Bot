@@ -476,7 +476,6 @@ def test_preview_revalidation_uses_current_policy_window_and_direction(
         venue.bid, venue.ask, venue.fill_price = "0.35", "0.37", "0.36"
         stream_feed.publish()
     trader = TradingBot(venue.client, journal, books, live=True)
-    trader.settings.update(up_midpoint="0.63", down_midpoint="0.37")
     if policy == "entry_end":
         clock.current += timedelta(seconds=49)
         venue.timestamp = clock.current.isoformat()
@@ -489,9 +488,9 @@ def test_preview_revalidation_uses_current_policy_window_and_direction(
                 clock.current += timedelta(seconds=6)
                 venue.timestamp = clock.current.isoformat()
             elif policy == "up_midpoint":
-                venue.bid = "0.59"  # Mid .62 violates policy; executable Up ask remains .65.
+                venue.bid = "0.53"  # Mid .59 violates policy; executable Up ask remains .65.
             else:
-                venue.ask = "0.41"  # Mid .38 violates policy; executable Down bid remains .35.
+                venue.ask = "0.47"  # Mid .41 violates policy; executable Down bid remains .35.
             stream_feed.publish()
         return None
 
