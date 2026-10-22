@@ -158,17 +158,17 @@ def test_tiny_favorable_bid_does_not_make_the_whole_holding_profitable(
         assert "sellable 0.01 | remainder 0.99 | net $0.0090" in log
         assert "slice (remainder unpriced) return 36.36%" in log
     else:
-        assert "sellable 0 | remainder 1 | net $0.0000" in log
+        assert "quote reason insufficient_quantity" in log
         assert "position return" not in log
 
 
 @pytest.mark.parametrize("outcome", ["up", "down"])
 @pytest.mark.parametrize(
-    "best_price,depth_price,depth_quantity",
-    [("0.90", "0.40", "0.90"), ("0.90", "0.85", "0.90"), ("0.40", "0.30", "0")],
+    "best_price,depth_price,depth_quantity,exits",
+    [("0.90", "0.40", "0.90", True), ("0.90", "0.85", "0.90", False), ("0.40", "0.30", "0", True)],
 )
 def test_depth_exit_keeps_top_level_ioc_and_accounts_only_actual_fill(
-    venue, journal, books, stream_feed, outcome, best_price, depth_price, depth_quantity
+    venue, journal, books, stream_feed, outcome, best_price, depth_price, depth_quantity, exits
 ):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, books.book(market), outcome, Decimal("1"))
@@ -206,6 +206,13 @@ def test_depth_exit_keeps_top_level_ioc_and_accounts_only_actual_fill(
     TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
 
     requests = [payload for method, path, payload in venue.calls if path == "/v1/orders"]
+    if not exits:
+        assert requests == []
+        row = journal.get(market.slug)
+        assert row["quantity"] == "1"
+        assert row["proceeds"] == "0"
+        assert row["pending"] is None
+        return
     assert len(requests) == 1
     assert requests[0]["quantity"] == 0.10
     assert requests[0]["price"]["value"] == prices[0]

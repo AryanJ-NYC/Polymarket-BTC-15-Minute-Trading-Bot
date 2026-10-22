@@ -136,7 +136,7 @@ class PolymarketClient:
         yes_price, available = levels[0]
         quantity = _floor(min(quantity, available), market.increment)
         if quantity < market.increment:
-            raise ValueError("Position or visible depth is below the minimum trade quantity")
+            raise QuoteUnavailable("insufficient_quantity")
         fee = estimate_fee(market.fee_coefficient, quantity, Decimal("0.5"))
         return _plan(market, book, outcome, "SELL", yes_price, quantity, fee)
 
@@ -159,6 +159,8 @@ class PolymarketClient:
             remaining -= sellable
             if remaining == ZERO:
                 break
+        if remaining == quantity:
+            raise QuoteUnavailable("insufficient_quantity")
         return quantity - remaining, net
 
     def submit(self, plan: Plan, *, validate: Callable[[], None] | None = None) -> str:
@@ -663,6 +665,7 @@ BOOK_FUTURE_TOLERANCE_SECONDS = 5
 QUOTE_REASONS = {
     "missing_bids": "Market book has no positive bids",
     "missing_offers": "Market book has no positive offers",
+    "insufficient_quantity": "Position or visible depth is below the minimum trade quantity",
     "empty_book": "Market book has no positive bids or offers",
     "crossed_book": "Market book is crossed",
     "conflicting_snapshot": "Market book contents changed at the same timestamp",

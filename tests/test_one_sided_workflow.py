@@ -5,6 +5,7 @@ import httpx
 import pytest
 from stream_fakes import snapshot, wait_for
 
+import bot
 from bot import TradingBot
 from execution.polymarket_client import parse_market
 
@@ -50,6 +51,82 @@ def test_owned_one_sided_exit_uses_actual_complementary_fills_without_a_mark(
         assert not any(path.endswith("/book") for _, path, _ in venue.calls)
     else:
         assert sum(path.endswith("/book") for _, path, _ in venue.calls) >= 3
+
+
+@pytest.mark.parametrize("source", ["stream", "rest"])
+@pytest.mark.parametrize("outcome", ["up", "down"])
+def test_one_sided_dust_depth_pauses_exit_with_a_bounded_reason(
+    venue, journal, books, stream_feed, source, outcome
+):
+    market = seed_position(venue, journal, books, outcome)
+    payload = exit_book(venue, outcome, quantity="0.001")
+    if source == "stream":
+        stream_feed.publish(bids=payload["bids"], offers=payload["offers"])
+    else:
+        stream_feed.disconnect()
+    venue.on_request = lambda request: (
+        httpx.Response(200, json={"marketData": payload})
+        if request.url.path.endswith("/book")
+        else None
+    )
+
+    messages = []
+    sink = bot.logger.add(messages.append, format="{message}")
+    try:
+        TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
+    finally:
+        bot.logger.remove(sink)
+
+    assert not any(path in {"/v1/orders", "/v1/order/preview"} for _, path, _ in venue.calls)
+    row = journal.get(market.slug)
+    assert row["quantity"] == "1"
+    assert row["proceeds"] == "0"
+    assert row["pending"] is None
+    assert len(row["orders"]) == 1
+    assert "quote reason insufficient_quantity" in "".join(messages)
+
+
+@pytest.mark.parametrize("source", ["stream", "rest"])
+@pytest.mark.parametrize("outcome", ["up", "down"])
+@pytest.mark.parametrize("top_quantity,exits", [("0.5", False), ("1", True)])
+def test_take_profit_requires_whole_holding_in_the_best_price_ioc(
+    venue, journal, books, stream_feed, source, outcome, top_quantity, exits
+):
+    market = seed_position(venue, journal, books, outcome)
+    payload = exit_book(venue, outcome, quantity=top_quantity)
+    if top_quantity == "0.5":
+        payload["bids" if outcome == "up" else "offers"].append(
+            {
+                "px": {"value": "0.98" if outcome == "up" else "0.02", "currency": "USD"},
+                "qty": "0.5",
+            }
+        )
+    if source == "stream":
+        stream_feed.publish(bids=payload["bids"], offers=payload["offers"])
+    else:
+        stream_feed.disconnect()
+    venue.on_request = lambda request: (
+        httpx.Response(200, json={"marketData": payload})
+        if request.url.path.endswith("/book")
+        else None
+    )
+    venue.fill_price = "0.99" if outcome == "up" else "0.01"
+
+    TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
+
+    creates = [body for _, path, body in venue.calls if path == "/v1/orders"]
+    row = journal.get(market.slug)
+    assert row["pending"] is None
+    if not exits:
+        assert creates == []
+        assert row["quantity"] == "1"
+        assert row["proceeds"] == "0"
+        assert len(row["orders"]) == 1
+        return
+    assert len(creates) == 1
+    assert Decimal(str(creates[0]["quantity"])) == 1
+    assert Decimal(row["quantity"]) == Decimal("0.5")
+    assert Decimal(row["proceeds"]) == Decimal("0.485")
 
 
 @pytest.mark.parametrize("source", ["stream", "rest"])

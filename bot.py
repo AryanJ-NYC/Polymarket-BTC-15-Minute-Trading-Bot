@@ -948,6 +948,7 @@ class TradingBot:
             settings = row.get("settings") or self.settings
             if change <= number(settings.get("stop_loss", self.settings["stop_loss"])) or (
                 remaining == 0
+                and plan.quantity == number(row["quantity"])
                 and change >= number(settings.get("take_profit", self.settings["take_profit"]))
             ):
                 if self.live:

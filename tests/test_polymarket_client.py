@@ -7,7 +7,7 @@ import pytest
 from polymarket_us import APIStatusError
 
 import execution.polymarket_client as client_module
-from execution.polymarket_client import PolymarketClient, order_fill, parse_market
+from execution.polymarket_client import PolymarketClient, QuoteUnavailable, order_fill, parse_market
 
 
 def test_account_and_current_typed_market(venue, market_row):
@@ -146,6 +146,21 @@ def test_one_sided_book_prices_owned_exit_without_inventing_entry_or_mark(
     with pytest.raises(ValueError):
         venue.client.sell_plan(market, book, "down" if outcome == "up" else "up", Decimal("1"))
     assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize("outcome", ["up", "down"])
+def test_sub_increment_exit_depth_has_a_bounded_rejection(venue, outcome):
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+    levels = [(Decimal("0.63"), Decimal("0.001"))]
+    book = replace(
+        book, bids=levels if outcome == "up" else [], asks=levels if outcome == "down" else []
+    )
+
+    for quote in (venue.client.exit_value, venue.client.sell_plan):
+        with pytest.raises(QuoteUnavailable) as rejected:
+            quote(market, book, outcome, Decimal("1"))
+        assert rejected.value.reason == "insufficient_quantity"
 
 
 def test_discovery_rejects_two_current_contracts(venue):

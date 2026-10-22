@@ -86,9 +86,12 @@ top-level depth. Never increase the budget to meet a minimum quantity.
 Exit valuation walks the bids for Up or the complementary offers for Down,
 rounding each sellable slice down to the quantity increment and subtracting a
 conservative rounded fee bound per slice. It does not scale one best-price slice
-across the holding. Only fully covered depth has a whole-position return and can
-trigger take-profit. For incomplete depth, logs identify the unpriced remainder;
-the stop uses the sellable slice's proportional entry cost and prior proceeds.
+across the holding. Only fully covered depth has a whole-position return.
+Take-profit also requires the planned best-price IOC to cover the entire holding;
+profitable depth spread across prices cannot trigger a partial take-profit.
+For incomplete depth, logs identify the unpriced remainder; the stop uses the
+sellable slice's proportional entry cost and prior proceeds. If no slice reaches
+the quantity increment, the quote is unavailable with `insufficient_quantity`.
 This snapshot estimate does not guarantee later liquidity. Execution continues
 one bounded best-price IOC at a time, with fresh checks and actual-fill readback.
 
