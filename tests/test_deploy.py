@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -96,6 +97,35 @@ def test_closed_entry_window_does_not_stop_current_process(host, monkeypatch):
     monkeypatch.setattr(deploy, "quiet_window", lambda: False)
     deploy.update()
     assert host.calls == []
+
+
+@pytest.mark.parametrize(
+    "seconds,quiet",
+    [
+        (60, False),
+        (100, False),
+        (105, False),
+        (119.999, False),
+        (120, True),
+        (239.999, True),
+        (240, False),
+        (300, False),
+        (400, False),
+        (420, True),
+        (539.999, True),
+        (540, False),
+        (700, False),
+        (720, False),
+        (840, False),
+        (870, False),
+    ],
+)
+def test_update_quiet_window_respects_both_horizons(clock, monkeypatch, seconds, quiet):
+    clock.current = clock.current.replace(minute=30, second=0, microsecond=0) + timedelta(
+        seconds=seconds
+    )
+    monkeypatch.setattr(deploy, "datetime", clock)
+    assert deploy.quiet_window() is quiet
 
 
 def test_preparation_failure_does_not_stop_current_process(host, monkeypatch):

@@ -289,7 +289,7 @@ def test_legacy_settled_row_rechecks_account_resolution_fees(
     venue.activities = [
         {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION", "positionResolution": resolution}
     ]
-    venue.client.discover_market = lambda: None
+    venue.client.discover_market = lambda horizon_seconds=900: None
     TradingBot(venue.client, journal, books, live=True).tick()
     row = journal.get(market.slug)
     assert row["settlement"]["resolution"] == resolution
@@ -330,7 +330,7 @@ def test_legacy_settlement_retains_resolution_after_exit_attempt(
     venue.activities = [
         {"type": "ACTIVITY_TYPE_POSITION_RESOLUTION", "positionResolution": resolution}
     ]
-    venue.client.discover_market = lambda: None
+    venue.client.discover_market = lambda horizon_seconds=900: None
     TradingBot(venue.client, journal, books, live=True).tick()
     closed = journal.get(market.slug)
     assert closed["settlement"]["resolution"] == resolution
@@ -407,7 +407,7 @@ def test_exited_trade_gets_official_result_without_rewriting_exit_pnl(
     assert pnl is not None
     clock.current += timedelta(minutes=3)
     venue.settlement = 1
-    venue.client.discover_market = lambda: None
+    venue.client.discover_market = lambda horizon_seconds=900: None
     trader = TradingBot(venue.client, journal, books, live=live)
     trader.tick()
     closed = journal.get(market.slug)

@@ -27,13 +27,17 @@ References: [authentication](https://docs.polymarket.us/api-reference/authentica
 Paginate `markets.list` and select contracts by `assetPriceTerms`:
 
 - `asset.symbol == "btc"`
-- `horizon == "15m"`
+- `horizon == "5m"` or `"15m"`, selected independently
 - `marketType == "ASSET_PRICE_MARKET_TYPE_UP_DOWN"`
 
 Use the timezone-aware `windowStart` and `windowEnd` measurement window. `endDate`
-is a later expiration timestamp. Validate a 15-minute duration, both tradable
-sides, the quantity increment, price tick and fee coefficient. Do not construct
-slugs or stop discovery after an arbitrary first page.
+is a later expiration timestamp. Require exactly 300 seconds for `5m` and 900
+seconds for `15m`; reject a typed horizon whose measurement duration disagrees.
+Validate both tradable sides, the quantity increment, price tick and fee
+coefficient. Do not construct slugs or stop discovery after an arbitrary first
+page. Ambiguity is rejected within the requested horizon. A missing five-minute
+contract does not suppress discovery of the fifteen-minute contract. Owned
+contracts of either supported horizon use the same parser after restart.
 
 Up/YES pays when the closing reference is at or above the opening reference.
 Both reference prices use CF Benchmarks BRTI averages over the 60 seconds before
@@ -43,7 +47,8 @@ Authenticated books use `marketData.marketSlug`, `state`, `transactTime`, `bids`
 and `offers`. Each level has a USD `px` Amount and a decimal `qty`. Validate the
 slug, open state, finite prices/quantities, tick alignment, at least one positive
 side and an uncrossed spread when both sides exist. Accept timestamps at most
-35 seconds old or five seconds ahead; null or
+35 seconds old or five seconds ahead; this inherited limit has not been
+optimized for five-minute trading. Null or
 non-advancing timestamps must not manufacture strategy history.
 
 Paper and live trading use the SDK's authenticated full `marketData` WebSocket

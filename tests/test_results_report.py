@@ -318,6 +318,7 @@ def test_contract_outcomes_resolve_skipped_observations_and_are_immutable(venue,
         "window_start": market.start.isoformat(),
         "window_end": market.end.isoformat(),
         "yes_settlement_price": "0",
+        "horizon_seconds": 900,
         "recorded_at": clock.current.isoformat(),
     }
     clock.current += timedelta(seconds=1)

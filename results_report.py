@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from execution.polymarket_client import QuoteUnavailable, parse_time
+from execution.polymarket_client import QuoteUnavailable, estimate_fee, number, parse_time
 
 
 def main() -> int:
@@ -36,7 +36,14 @@ def main() -> int:
             if "experiments" in tables
             else []
         )
-    report = summarize(rows, opportunities=opportunities, experiments=experiments)
+        outcomes = (
+            [json.loads(raw) for (raw,) in db.execute("SELECT data FROM contract_outcomes")]
+            if "contract_outcomes" in tables
+            else []
+        )
+    report = summarize(
+        rows, opportunities=opportunities, experiments=experiments, outcomes=outcomes
+    )
     report["trades"] = rows
     if args.json:
         print(json.dumps(report, indent=2))
@@ -57,6 +64,7 @@ def summarize(
     *,
     opportunities: list[dict] | None = None,
     experiments: list[dict] | None = None,
+    outcomes: list[dict] | None = None,
 ) -> dict:
     opportunities = opportunities or []
     policies = {}
@@ -86,7 +94,23 @@ def summarize(
             }
             for _, group in sorted(groups.items())
         ],
-        "by_policy": {policy: _summarize(trades) for policy, trades in sorted(policies.items())},
+        "by_policy": {
+            policy: {
+                **_summarize(policies.get(policy, [])),
+                **_coverage(policies.get(policy, []), policy_opportunities.get(policy, [])),
+                **_opportunity_report(policy_opportunities.get(policy, [])),
+                **(
+                    _five_minute_evidence(
+                        policy_opportunities.get(policy, []),
+                        policies.get(policy, []),
+                        outcomes or [],
+                    )
+                    if policy == FIVE_MINUTE_POLICY
+                    else {}
+                ),
+            }
+            for policy in sorted(policies.keys() | policy_opportunities.keys())
+        },
         **_opportunity_report(opportunities),
         "opportunity_decisions": {
             policy: _opportunity_report(observations)["opportunity_decisions"]
@@ -273,6 +297,171 @@ def _coverage(rows: list[dict], opportunities: list[dict]) -> dict:
     }
 
 
+def _five_minute_evidence(opportunities, trades, outcomes):
+    def contracts(decisions):
+        return {row["slug"] for row in opportunities if row["decision"] in decisions}
+
+    ages = {"provider": [], "local": []}
+    for row in opportunities:
+        book = row.get("book") or {}
+        for kind in ages:
+            age = book.get(f"{kind}_age_seconds")
+            if age is not None:
+                ages[kind].append(float(age))
+    dates = {}
+    for row in opportunities:
+        date = (row.get("window_start") or row["observed_at"])[:10]
+        dates.setdefault(date, set()).add(row["slug"])
+    total = len({row["slug"] for row in opportunities})
+    return {
+        "horizon_seconds": 300,
+        "decision_count": len(contracts({"decision_started"})),
+        "eligible_entry_count": len(contracts({"eligible_entry"})),
+        "missed_window_count": len(contracts({"missed_window"})),
+        "shared_capacity_skip_count": len(
+            contracts({"risk_rejected", "insufficient_buying_power"})
+        ),
+        "quote_age_seconds": {
+            kind: {
+                "samples": len(values),
+                "minimum": min(values) if values else None,
+                "maximum": max(values) if values else None,
+                "mean": sum(values) / len(values) if values else None,
+            }
+            for kind, values in ages.items()
+        },
+        "daily_concentration": {
+            date: {
+                "observed_contract_count": len(slugs),
+                "observed_contract_fraction": len(slugs) / total if total else None,
+                "entry_attempt_count": sum(row["slug"] in slugs for row in trades),
+            }
+            for date, slugs in sorted(dates.items())
+        },
+        "quote_based_evaluation": _assumed_fills(opportunities, outcomes),
+        "execution_basis": "Inspect by_execution_mode; paper fills are simulated and legacy mode is unknown",
+        "by_execution_mode": {
+            mode: {
+                **_summarize(
+                    [
+                        row
+                        for row in trades
+                        if (row.get("settings") or {}).get("execution_mode", "unknown") == mode
+                    ]
+                ),
+                "basis": {
+                    "live": "Actual fills, collected fees and official settlement readback",
+                    "paper": "Simulated paper fills and estimated fees; no actual execution",
+                    "unknown": "Legacy execution mode unknown; not verified as actual execution",
+                }[mode],
+            }
+            for mode in ("live", "paper", "unknown")
+        },
+    }
+
+
+def _assumed_fills(opportunities, outcomes):
+    # One contemporaneous eligibility book per contract. Diagnostics and later
+    # preflight books never replace the decision quote, especially after 105s.
+    selected = {}
+    sized = {}
+    for row in sorted(opportunities, key=lambda item: item.get("observed_at", "")):
+        if not row.get("window_start") or not row.get("observed_at"):
+            continue
+        elapsed = (parse_time(row["observed_at"]) - parse_time(row["window_start"])).total_seconds()
+        if not 100 <= elapsed < 105:
+            continue
+        if row.get("intended_order"):
+            sized.setdefault(row["slug"], row)
+        if row["decision"] == "eligible_entry":
+            selected.setdefault(row["slug"], row)
+    labels = {row["slug"]: row for row in outcomes}
+    evaluated = []
+    rejected = unsized = pending = budget_exceeded = 0
+    for slug, row in selected.items():
+        book = row.get("book") or {}
+        try:
+            bid, ask = number(book["bid"]), number(book["ask"])
+            quote_at = parse_time(book["quote_timestamp"])
+            observed = parse_time(row["observed_at"])
+            age = (observed - quote_at).total_seconds()
+            if not 0 < bid < ask < 1 or not 0 <= age <= 35:
+                raise ValueError("Invalid decision book")
+            if book.get("provider_age_seconds", age) > 35 or book.get("local_age_seconds", 0) > 35:
+                raise ValueError("Stale decision book")
+            mid = (bid + ask) / 2
+            if not Decimal("0.80") < max(mid, 1 - mid) <= Decimal("0.95"):
+                raise ValueError("Outside fixed favorite band")
+            up = mid > Decimal("0.5")
+            price = ask if up else 1 - bid
+            visible = number(book["ask_quantity"] if up else book["bid_quantity"])
+            coefficient = number(book["fee_coefficient"])
+            if visible <= 0 or not 0 <= coefficient <= 1:
+                raise ValueError("Invalid terms")
+        except (ValueError, KeyError, TypeError):
+            rejected += 1
+            continue
+        if slug not in sized:
+            unsized += 1
+            continue
+        sizing_row = sized[slug]
+        budget = (sizing_row.get("settings") or {}).get("sizing", {}).get("budget")
+        if budget is None or number(budget) <= 0:
+            unsized += 1
+            continue
+        budget = number(budget)
+        quantity = min(number(sizing_row["intended_order"]["quantity"]), visible)
+        increment = row.get("quantity_increment")
+        if increment is None or number(increment) <= 0:
+            unsized += 1
+            continue
+        quantity = quantity // number(increment) * number(increment)
+        if quantity <= 0:
+            unsized += 1
+            continue
+        fee = estimate_fee(coefficient, quantity, ask if up else bid)
+        entry_cost = quantity * price + fee
+        if entry_cost > budget:
+            budget_exceeded += 1
+            continue
+        label = labels.get(slug)
+        if label is None:
+            pending += 1
+            continue
+        yes_value = number(label["yes_settlement_price"])
+        if not 0 <= yes_value <= 1:
+            raise ValueError("Invalid official outcome")
+        pnl = quantity * ((yes_value if up else 1 - yes_value) - price) - fee
+        evaluated.append(
+            {
+                "slug": slug,
+                "window_end": row["window_end"],
+                "decision_at": row["observed_at"],
+                "quote_timestamp": book["quote_timestamp"],
+                "outcome": "up" if up else "down",
+                "quantity": str(quantity),
+                "entry_price": str(price),
+                "estimated_fee": str(fee),
+                "entry_cost": str(entry_cost),
+                "budget": str(budget),
+                "yes_settlement_price": str(yes_value),
+                "net_pnl": str(pnl),
+            }
+        )
+    evaluated.sort(key=lambda row: (row["window_end"], row["slug"]))
+    return {
+        "basis": "Assumed fills, executable-side decision quotes; not actual execution",
+        "sizing_basis": "Intended quantity and fee-inclusive budget captured before 105 seconds; quantity capped by decision depth and increment, over-budget repricing excluded",
+        "labeled_count": len(evaluated),
+        "pending_outcome_count": pending,
+        "rejected_quote_count": rejected,
+        "unsized_count": unsized,
+        "budget_exceeded_count": budget_exceeded,
+        "known_net_pnl": str(sum((number(row["net_pnl"]) for row in evaluated), Decimal("0"))),
+        "outcomes": evaluated,
+    }
+
+
 def _comparison_settings(row: dict) -> dict:
     settings = row.get("settings") or {}
     return {key: settings.get(key, "legacy/unknown") for key in COMPARISON_FIELDS}
@@ -283,7 +472,10 @@ def _policy(row: dict) -> str:
     return settings.get("model_tag") or settings.get("policy_version") or "legacy"
 
 
+FIVE_MINUTE_POLICY = "btc-5m-strong-favorite-100-v1"
+
 COMPARISON_FIELDS = (
+    "horizon_seconds",
     "experiment",
     "timing_preset",
     "policy_version",

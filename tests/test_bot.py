@@ -84,7 +84,7 @@ def test_paper_down_settles_from_actual_market_result(
     trader.tick()
     row = journal.records()[0]
     clock.current += timedelta(minutes=3)
-    venue.client.discover_market = lambda: None
+    venue.client.discover_market = lambda horizon_seconds=900: None
     trader.tick()
     assert journal.records()[0]["pnl"] is None  # 404 is unresolved.
     venue.settlement = 0
@@ -404,7 +404,7 @@ def test_live_settlement_requires_matching_provider_resolution(venue, journal, c
             },
         }
     ]
-    venue.client.discover_market = lambda: None
+    venue.client.discover_market = lambda horizon_seconds=900: None
     trader.tick()
     assert Decimal(journal.get(market.slug)["pnl"]) == Decimal("0.62")
     assert trader.finished
@@ -420,7 +420,9 @@ def test_one_trade_manages_to_completion_without_second_entry(
     assert len(journal.records()) == 1
     clock.current += timedelta(minutes=3)
     # An unresolved settlement may span another contract; never enter that contract.
-    venue.client.discover_market = lambda: pytest.fail("Must not discover a second entry")
+    venue.client.discover_market = lambda horizon_seconds=900: pytest.fail(
+        "Must not discover a second entry"
+    )
     trader.tick()
     assert not trader.finished
     venue.settlement = 1
@@ -439,7 +441,9 @@ def test_one_trade_restart_resumes_existing_position(venue, journal, clock, book
     assert restarted.trade_id == market.slug
     clock.current += timedelta(minutes=3)
     venue.settlement = 0
-    venue.client.discover_market = lambda: pytest.fail("Must resume the existing trade")
+    venue.client.discover_market = lambda horizon_seconds=900: pytest.fail(
+        "Must resume the existing trade"
+    )
     restarted.tick()
     assert restarted.finished
     assert len(journal.records()) == 1
@@ -796,7 +800,7 @@ def test_settlement_read_outage_preserves_position_until_confirmed(
     clock.current += timedelta(minutes=3)
     venue.settlement = 0
     venue.failures[("GET", f"/v1/markets/{venue.market['slug']}/settlement")] = [failure]
-    venue.client.discover_market = lambda: None
+    venue.client.discover_market = lambda horizon_seconds=900: None
     trader.tick()
     assert journal.records()[0]["state"] == "open"
     assert journal.records()[0]["pnl"] is None

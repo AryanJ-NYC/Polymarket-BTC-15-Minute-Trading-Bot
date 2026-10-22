@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -53,7 +54,6 @@ def test_rest_comparison_worker_only_reads_and_stops_cleanly(venue, tmp_path):
         worker.join(timeout=2)
     assert not worker.is_alive()
     rows = [json.loads(line) for line in path.read_text().splitlines()]
-    assert len(rows) == 1
     assert rows[0]["available"] is True
     assert rows[0]["source"] == "rest_baseline"
     assert venue.book_request_ids
@@ -72,7 +72,7 @@ def test_shutdown_after_slow_discovery_does_not_start_a_book_read(tmp_path):
     books = []
 
     class Exchange:
-        def discover_market(self):
+        def discover_market(self, horizon_seconds=900):
             entered.set()
             assert released.wait(2)
             return type("Market", (), {"slug": "test-market"})()
@@ -179,8 +179,8 @@ def test_shutdown_finishes_slow_book_and_flushes_sample_before_worker_returns(ve
     market = venue.client.discover_market()
 
     class Exchange:
-        def discover_market(self):
-            return market
+        def discover_market(self, horizon_seconds=900):
+            return market if horizon_seconds == 900 else None
 
         def book(self, selected):
             calls.append(selected)
@@ -236,14 +236,16 @@ def test_context_summary_counts_decision_availability_and_all_request_attempts()
     }
 
 
-@pytest.mark.parametrize("stop_reason", ["duration", "signal", "failure", "one_sided"])
+@pytest.mark.parametrize(
+    "stop_reason", ["duration", "signal", "failure", "one_sided", "slow_five_minute"]
+)
 def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
     monkeypatch, tmp_path, stop_reason
 ):
     import itertools
     import signal
     import sys
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from decimal import Decimal
     from types import SimpleNamespace
 
@@ -253,7 +255,28 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
     selected = []
     snapshots = []
     handlers = {}
-    market = SimpleNamespace(slug="test-market")
+    book_calls = []
+
+    class WallClock(datetime):
+        current = datetime.now(timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    slow_five = stop_reason == "slow_five_minute"
+    if slow_five:
+        monkeypatch.setattr(observer, "datetime", WallClock)
+    market = SimpleNamespace(
+        slug="test-market",
+        horizon_seconds=300 if slow_five else 900,
+        start=WallClock.current - timedelta(seconds=100 if slow_five else 180),
+        end=WallClock.current + timedelta(seconds=200 if slow_five else 720),
+        tradable=True,
+        increment=Decimal("0.01"),
+        tick=Decimal("0.01"),
+        fee_coefficient=Decimal("0.05"),
+    )
     from execution.polymarket_client import Book
 
     book = Book(
@@ -280,8 +303,8 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
         def start(self):
             pass
 
-        def current_market(self):
-            return market
+        def current_markets(self):
+            return {market.horizon_seconds: market}
 
         def join(self):
             events.append("baseline_joined")
@@ -304,6 +327,9 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
 
         def book(self, selected_market):
             assert selected_market is market
+            book_calls.append(selected_market)
+            if slow_five:
+                WallClock.current += timedelta(seconds=6)
             return book
 
         def close(self):
@@ -362,7 +388,7 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
     clock = itertools.count(0, 0.1)
     assert observer.main() == (1 if stop_reason == "failure" else 0)
 
-    assert bool(selected) is (stop_reason != "one_sided")
+    assert bool(selected) is (stop_reason not in {"one_sided", "slow_five_minute"})
     assert len(snapshots) == len(selected) + 1  # Final counter snapshot after cleanup.
     assert events == [
         "context_started",
@@ -387,6 +413,18 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
             assert all(row["quote_reason"] == "missing_offers" for row in rows)
             assert all(row["ask"] is None for row in rows)
         assert summary["context"]["decision_snapshots"] == len(selected)
+        if slow_five:
+            evidence = observer._read_rows(output / "five-minute.jsonl")
+            decisions = [row for row in evidence if row["decision"] != "contract_observed"]
+            assert len(book_calls) == 1
+            assert len(decisions) == 1
+            assert decisions[0]["decision"] == "missed_window"
+            assert datetime.fromisoformat(decisions[0]["observed_at"]) >= market.start + timedelta(
+                seconds=105
+            )
+            assert datetime.fromisoformat(decisions[0]["tick_at"]) == market.start + timedelta(
+                seconds=100
+            )
     report = (output / "report.md").read_text()
     assert "Supporting context" in report
     assert "Decision policy: btc-15m-fusion-v2; model=None (default fusion)." in report
@@ -407,3 +445,64 @@ def _context_snapshot():
         }
         for source in ("spot", "sentiment", "options")
     }
+
+
+def test_observer_captures_one_five_minute_decision_with_actual_depth_and_ages(venue, clock):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from execution.polymarket_client import parse_market
+    from tools.observe_market_data import FiveMinuteObservations
+
+    market = parse_market(venue.market)
+    market = replace(
+        market,
+        start=clock.current - timedelta(seconds=101),
+        end=clock.current + timedelta(seconds=199),
+    )
+    book = replace(
+        venue.client.book(parse_market(venue.market)),
+        bids=((Decimal("0.88"), Decimal("1.15")),),
+        asks=((Decimal("0.90"), Decimal("1.15")),),
+    )
+    observed = FiveMinuteObservations()
+    row = observed.decide(market, book, clock.current)
+    assert row["decision"] == "eligible_entry"
+    assert row["outcome"] == "up"
+    assert row["horizon_seconds"] == 300
+    assert row["book"]["ask_quantity"] == "1.15"
+    assert row["book"]["provider_age_seconds"] == 0
+    assert row["settings"]["quote_max_age_seconds"] == 35
+    assert observed.decide(market, book, clock.current + timedelta(seconds=1)) is None
+    assert observed.decide(market, book, clock.current + timedelta(seconds=5)) is None
+
+
+def test_observer_missed_or_missing_first_five_minute_book_is_not_replaced(venue, clock):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from execution.polymarket_client import parse_market
+    from tools.observe_market_data import FiveMinuteObservations
+
+    market = parse_market(venue.market)
+    market = replace(
+        market,
+        start=clock.current - timedelta(seconds=100),
+        end=clock.current + timedelta(seconds=200),
+    )
+    observed = FiveMinuteObservations()
+    row = observed.decide(market, None, clock.current, quote_reason="waiting_snapshot")
+    assert row["decision"] == "book_unavailable"
+    assert (
+        observed.decide(
+            market,
+            venue.client.book(parse_market(venue.market)),
+            clock.current + timedelta(seconds=1),
+        )
+        is None
+    )
+    missed = replace(market, slug="missed")
+    assert (
+        observed.decide(missed, None, clock.current + timedelta(seconds=5))["decision"]
+        == "missed_window"
+    )

@@ -9,6 +9,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from time import monotonic
 
 from execution.polymarket_client import (
     Book,
@@ -77,6 +78,18 @@ class TradeJournal:
         return (
             self.db.execute(
                 "SELECT 1 FROM opportunities WHERE json_extract(data, '$.slug') = ? "
+                "AND json_extract(data, '$.settings.timing_preset') = ? "
+                "AND json_extract(data, '$.decision') != 'contract_observed' LIMIT 1",
+                (slug, preset),
+            ).fetchone()
+            is not None
+        )
+
+    def entry_observed(self, slug: str, preset: str) -> bool:
+        """Recognize a policy's contract observation without consuming its decision."""
+        return (
+            self.db.execute(
+                "SELECT 1 FROM opportunities WHERE json_extract(data, '$.slug') = ? "
                 "AND json_extract(data, '$.settings.timing_preset') = ? LIMIT 1",
                 (slug, preset),
             ).fetchone()
@@ -142,6 +155,7 @@ class TradeJournal:
         settings: dict | None = None,
         *,
         quote_reason: str | None = None,
+        intended_order: Plan | None = None,
     ) -> int:
         now = datetime.now(timezone.utc)
         data = {
@@ -149,6 +163,10 @@ class TradeJournal:
             "observed_at": now.isoformat(),
             "window_start": market.start.isoformat(),
             "window_end": market.end.isoformat(),
+            "horizon_seconds": (market.end - market.start).total_seconds(),
+            "quantity_increment": str(market.increment),
+            "price_tick": str(market.tick),
+            "elapsed_seconds": (now - market.start).total_seconds(),
             "time_remaining_seconds": (market.end - now).total_seconds(),
             "decision": decision,
             "quote_reason": (
@@ -159,11 +177,21 @@ class TradeJournal:
             "outcome": outcome,
             "settings": settings,
             "book": None,
+            "intended_order": _pack_plan(intended_order) if intended_order is not None else None,
         }
         if book is not None:
             two_sided = bool(book.bids and book.asks)
+            local_age = None if book.received_at is None else monotonic() - book.received_at
             data["book"] = {
                 "quote_timestamp": book.timestamp.isoformat(),
+                "received_at": book.received_at,
+                "received_at_utc": (
+                    (now - timedelta(seconds=local_age)).isoformat()
+                    if local_age is not None
+                    else None
+                ),
+                "provider_age_seconds": (now - book.timestamp).total_seconds(),
+                "local_age_seconds": local_age,
                 "midpoint": str(book.mid) if two_sided else None,
                 "spread": str(book.asks[0][0] - book.bids[0][0]) if two_sided else None,
                 "bid": str(book.bids[0][0]) if book.bids else None,
@@ -223,6 +251,9 @@ class TradeJournal:
             "slug": slug,
             "window_start": opportunity["window_start"],
             "window_end": opportunity["window_end"],
+            "horizon_seconds": (
+                parse_time(opportunity["window_end"]) - parse_time(opportunity["window_start"])
+            ).total_seconds(),
             "yes_settlement_price": str(yes_value),
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -250,6 +281,7 @@ class TradeJournal:
             "order_id": None,
             "orders": [],
             "settings": settings,
+            "horizon_seconds": (settings or {}).get("horizon_seconds", 900),
             "accounting_issues": [],
         }
         with self.db:
@@ -487,11 +519,19 @@ class TradeJournal:
 def entry_key(slug: str, preset: str | None = None) -> str:
     # Keep historical/current keys readable by existing tools. The JSON slug
     # remains the exchange market identity; the SQLite key identifies a trade.
-    if preset not in {None, "earlier", "current", "later", "model-current", "minute-five"}:
+    if preset not in {
+        None,
+        "earlier",
+        "current",
+        "later",
+        "model-current",
+        "minute-five",
+        "five-minute",
+    }:
         raise ValueError("Unknown timing experiment")
     return (
         f"{slug}:{preset}"
-        if preset in {"earlier", "later", "model-current", "minute-five"}
+        if preset in {"earlier", "later", "model-current", "minute-five", "five-minute"}
         else slug
     )
 
