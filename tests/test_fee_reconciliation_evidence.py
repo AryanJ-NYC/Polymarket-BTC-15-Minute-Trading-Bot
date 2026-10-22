@@ -71,7 +71,7 @@ def test_captured_fee_disagreement_survives_recovery_and_report(
         assert resolution["afterPosition"]["fees"] is None
         assert Decimal(row["settlement_proceeds"]) == 0
         assert row["pnl"] is None
-        if collected_fee == "0.0200":
+        if collected_fee is not None:
             journal.risk_check(Decimal("1"), Decimal("100"))
             assert journal.exposure() == 0
             # Keep the disputed loss in the daily budget at the higher cost.

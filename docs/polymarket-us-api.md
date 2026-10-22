@@ -196,12 +196,15 @@ cash debit. Provider cash-ledger confirmation or field definitions are needed
 to settle that interpretation; no provider defect or extra charge is assumed.
 
 A fully closed, zero-quantity trade with known costs/proceeds and no pending
-order may pass entry guards if its only issues are equal resolution fee/cost
-differences within $0.01. The report retains disputed exact P&L. The daily loss
+order may pass entry guards if its only issues are resolution cost/fee
+differences, each within $0.05. The differences need not be equal. A missing
+resolution fee field is accepted when collected order fees and both cost
+amounts are known. The report retains disputed exact P&L. The daily loss
 budget uses the higher entry cost, so accepted uncertainty cannot hide losses.
 This policy recognizes existing records on read without rewriting evidence.
-Unknown, unrelated, open-position, larger or inconsistent differences remain
-blocking. Reproducible synthetic fixtures live under `tests/fixtures/`; private
+Unknown order costs/collected fees, missing resolution cost, unrelated issues,
+open positions and larger differences remain blocking. Reproducible synthetic
+fixtures live under `tests/fixtures/`; private
 captures and issue-specific run reports remain local or in the issue/PR.
 
 [Collected commission schema](https://docs.polymarket.us/api-reference/oapi-schemas/orders-schema.json),
