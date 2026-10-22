@@ -281,6 +281,7 @@ class TradingBot:
                     **(
                         {
                             "baseline_windows": TIMING_WINDOWS,
+                            "minute_five_settings": MINUTE_FIVE_SETTINGS,
                             "model_settings": self._model_settings,
                             "entry_order": "sha256-contract-v1",
                         }
@@ -304,6 +305,7 @@ class TradingBot:
         self.position_markets = {}
         self.observations = 0
         self.last_health = None
+        self._minute_five_admission = None
 
     @property
     def settings(self) -> dict:
@@ -370,6 +372,8 @@ class TradingBot:
     def _tick(self) -> None:
         # This is the sole owner of strategy, order, and journal mutations.
         # The receiver only publishes immutable books on its own thread.
+        self._minute_five_admission = None
+        self._claim_minute_five()
         if monotonic() < self.next_data_attempt:
             self._record_pause("exchange_backoff")
             return
@@ -379,6 +383,7 @@ class TradingBot:
             return
         self._discover()
         self._select_timing()
+        self._claim_minute_five()
         if monotonic() < self.next_data_attempt:
             self._record_pause("exchange_backoff")
             return
@@ -434,6 +439,8 @@ class TradingBot:
             return
         admissions = [self._settings_for_arm(arm) for arm in self._entry_arms()]
         admissions = [settings for settings in admissions if self._in_entry_window(settings)]
+        if self._minute_five_admission is not None:
+            admissions.insert(0, self._minute_five_admission)
         book = None
         try:
             book = self.books.book(self.market)
@@ -501,6 +508,31 @@ class TradingBot:
         first = _experiment_arm(self.experiment["id"], self.market.slug)
         return (first, "model" if first == "baseline" else "baseline")
 
+    def _claim_minute_five(self) -> None:
+        # Assigned comparisons retain their pinned policy; ordinary timing runs
+        # and same-contract comparisons always include the quote-only policy.
+        if (
+            self.market is None
+            or self._minute_five_admission is not None
+            or (self.model is not None and not self.simultaneous)
+            or (self.one_trade and self.trade_id is not None)
+            or (
+                self.experiment is not None
+                and self.market.start < parse_time(self.experiment["eligible_from"])
+            )
+        ):
+            return
+        settings = dict(MINUTE_FIVE_SETTINGS)
+        if not self._in_entry_window(settings) or self.journal.entry_decided(
+            self.market.slug, "minute-five"
+        ):
+            return
+        # Commit before quote/account work. A crash, pause or skip consumes this
+        # decision, while a later strategy still owns its separate entry slot.
+        self.journal.record_opportunity(self.market, None, "decision_started", settings=settings)
+        self._minute_five_admission = settings
+        logger.info("Minute-five decision claimed: {}", self.market.slug)
+
     def _consider_entry(
         self, book, *, unavailable: bool, settings: dict, context: dict | None
     ) -> None:
@@ -509,7 +541,14 @@ class TradingBot:
                 self.market, book, "already_attempted", settings=settings
             )
             return
-        if "model_tag" not in settings:
+        if settings.get("timing_preset") == "minute-five":
+            outcome = _minute_five_outcome(book, settings)
+            if outcome is None:
+                self.journal.record_opportunity(
+                    self.market, book, "outside_favorite_band", settings=settings
+                )
+                return
+        elif "model_tag" not in settings:
             snapshot = context or {}
             settings = {**settings, "context": snapshot}
             outcome = self.strategy.decide(self.market, book, snapshot)
@@ -541,7 +580,13 @@ class TradingBot:
             book = self.books.book(self.market)
             if book.entry_reason:
                 raise QuoteUnavailable(book.entry_reason)
-            if "model_tag" not in settings and (
+            if settings.get("timing_preset") == "minute-five":
+                if _minute_five_outcome(book, settings) != outcome:
+                    self.journal.record_opportunity(
+                        self.market, book, "price_changed", outcome, settings
+                    )
+                    return
+            elif "model_tag" not in settings and (
                 (outcome == "up" and book.mid <= number(settings["up_midpoint"]))
                 or (outcome == "down" and book.mid >= number(settings["down_midpoint"]))
             ):
@@ -562,6 +607,13 @@ class TradingBot:
             book = self.books.book(self.market)
             if book.entry_reason:
                 raise QuoteUnavailable(book.entry_reason)
+            if settings.get("timing_preset") == "minute-five" and (
+                _minute_five_outcome(book, settings) != outcome
+            ):
+                self.journal.record_opportunity(
+                    self.market, book, "price_changed", outcome, settings
+                )
+                return
             plan, settings = self._entry_plan(book, outcome, account, settings)
             if plan is None:
                 return
@@ -620,6 +672,10 @@ class TradingBot:
         self._select_timing()
         if self.market is None:
             return
+        if self._minute_five_admission is not None:
+            self.journal.record_opportunity(
+                self.market, None, reason, settings=self._minute_five_admission
+            )
         for arm in self._entry_arms():
             self._record_active_pause(reason, self._settings_for_arm(arm))
 
@@ -806,12 +862,26 @@ class TradingBot:
         self, plan, market, book, *, streamed: bool, trade_id: str, settings: dict | None
     ) -> None:
 
+        def record_rejection(exc):
+            if plan.action == "BUY" and (settings or {}).get("timing_preset") == "minute-five":
+                self.journal.record_opportunity(
+                    market,
+                    book,
+                    "submission_window_closed"
+                    if datetime.now(timezone.utc) >= plan.expires_at
+                    else "submission_preflight_rejected",
+                    plan.outcome,
+                    settings,
+                    quote_reason=quote_reason(exc),
+                )
+
         def validate():
             self._validate_execution(plan, market, book, streamed=streamed, settings=settings)
 
         try:
             validate()
         except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
+            record_rejection(exc)
             self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
             if not _unavailable_book(exc):
                 raise
@@ -826,6 +896,7 @@ class TradingBot:
             try:
                 order_id = self.exchange.submit(plan, validate=validate)
             except OrderNotSubmitted as exc:
+                record_rejection(exc.cause)
                 self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
                 logger.warning(
                     "Order not submitted for {}: {} | quote reason {}",
@@ -839,6 +910,7 @@ class TradingBot:
                     self._wait_for_data(exc.cause)
                 return
             except OrderPreflightError as exc:
+                record_rejection(exc)
                 self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
                 logger.info("Order preflight rejected: {}", exc)
                 return
@@ -989,7 +1061,10 @@ class TradingBot:
             elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
             if not settings["entry_start_seconds"] <= elapsed < settings["entry_end_seconds"]:
                 raise ValueError("Entry deadline elapsed")
-            if "model_tag" not in settings:
+            if settings.get("timing_preset") == "minute-five":
+                if _minute_five_outcome(latest, settings) != plan.outcome:
+                    raise ValueError("Minute-five favorite is no longer eligible")
+            elif "model_tag" not in settings:
                 if (plan.outcome == "up" and latest.mid <= number(settings["up_midpoint"])) or (
                     plan.outcome == "down" and latest.mid >= number(settings["down_midpoint"])
                 ):
@@ -1107,6 +1182,8 @@ class TradingBot:
                         unavailable = not self._settle_position(row) or unavailable
                     continue
                 if row["state"] != "open":
+                    continue
+                if (row.get("settings") or {}).get("exit_policy") == "settlement-only-v1":
                     continue
                 if row["entry_cost"] is None or row["proceeds"] is None:
                     logger.warning(
@@ -1273,6 +1350,17 @@ class TradingBot:
         )
 
 
+def _minute_five_outcome(book, settings) -> str | None:
+    favorite = max(book.mid, 1 - book.mid)
+    if (
+        number(settings["favorite_midpoint_min"])
+        < favorite
+        <= number(settings["favorite_midpoint_max"])
+    ):
+        return "up" if book.mid > Decimal("0.5") else "down"
+    return None
+
+
 def _unavailable_book(exc: Exception) -> bool:
     return isinstance(exc, ValueError) or retryable_api_error(exc, missing=True)
 
@@ -1296,6 +1384,22 @@ def _experiment_arm(experiment_id: str, slug: str) -> str:
     digest = hashlib.sha256((experiment_id + "\0" + slug).encode()).digest()
     return ("baseline", "model")[digest[0] % 2]
 
+
+MINUTE_FIVE_SETTINGS = {
+    "policy_version": "btc-15m-minute-five-v1",
+    "timing_preset": "minute-five",
+    "entry_start_seconds": 300,
+    "entry_end_seconds": 305,
+    "favorite_midpoint_min": "0.80",
+    "favorite_midpoint_max": "0.95",
+    "exit_policy": "settlement-only-v1",
+    "sizing_policy": "bankroll-percentage-v1",
+    "entry_bankroll_fraction": str(ENTRY_BANKROLL_FRACTION),
+    "max_open_positions": 5,
+    "max_exposure_fraction": str(MAX_EXPOSURE_FRACTION),
+    "daily_loss_fraction": str(DAILY_LOSS_FRACTION),
+    "extra_cost_usd": "0",
+}
 
 TIMING_WINDOWS = (("earlier", 720, 780), ("current", 780, 840), ("later", 840, 870))
 ROOT = Path(__file__).resolve().parent

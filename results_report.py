@@ -293,6 +293,8 @@ COMPARISON_FIELDS = (
     "minimum_snapshots",
     "up_midpoint",
     "down_midpoint",
+    "favorite_midpoint_min",
+    "favorite_midpoint_max",
     "min_signals",
     "min_consensus",
     "fusion_weights",

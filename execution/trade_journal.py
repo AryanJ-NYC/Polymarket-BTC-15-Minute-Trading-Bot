@@ -72,6 +72,17 @@ class TradeJournal:
             return any(row["slug"] == slug for row in self.records())
         return self.get(entry_key(slug, preset)) is not None
 
+    def entry_decided(self, slug: str, preset: str) -> bool:
+        """One-shot decisions include skips, independently of reserved orders."""
+        return (
+            self.db.execute(
+                "SELECT 1 FROM opportunities WHERE json_extract(data, '$.slug') = ? "
+                "AND json_extract(data, '$.settings.timing_preset') = ? LIMIT 1",
+                (slug, preset),
+            ).fetchone()
+            is not None
+        )
+
     def start_experiment(self, experiment_id: str, configuration: dict) -> dict:
         """Pin a comparison before its first whole contract, including no-entry runs."""
         if not isinstance(experiment_id, str) or not re.fullmatch(
@@ -476,9 +487,13 @@ class TradeJournal:
 def entry_key(slug: str, preset: str | None = None) -> str:
     # Keep historical/current keys readable by existing tools. The JSON slug
     # remains the exchange market identity; the SQLite key identifies a trade.
-    if preset not in {None, "earlier", "current", "later", "model-current"}:
+    if preset not in {None, "earlier", "current", "later", "model-current", "minute-five"}:
         raise ValueError("Unknown timing experiment")
-    return f"{slug}:{preset}" if preset in {"earlier", "later", "model-current"} else slug
+    return (
+        f"{slug}:{preset}"
+        if preset in {"earlier", "later", "model-current", "minute-five"}
+        else slug
+    )
 
 
 def pending_plan(row: dict) -> Plan:

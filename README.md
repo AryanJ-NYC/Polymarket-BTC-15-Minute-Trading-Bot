@@ -87,6 +87,9 @@ Temporary read failures retain known order IDs and recover automatically.
   the winning share of weighted signal contributions; confidence is the average
   indicator confidence. Neither is a settlement probability or a sizing input.
   Book history resets for each contract. Starting late may skip the current window.
+- Adds one quote-only minute-five entry with favorite midpoint above .80 and at
+  most .95, held to settlement under the same shared limits. See the continuous
+  minute-five policy below for one-shot decisions and deadline behavior.
 - Reuses spike, tick velocity, order-flow, divergence, sentiment, and options
   processors. Optional external context can be unavailable; no input is invented.
 - Uses the official SDK's authenticated full `marketData` WebSocket for paper
@@ -330,9 +333,8 @@ The baseline runner evaluates all three fixed windows in every contract; no extr
 flag or environment variable is needed. An explicitly enrolled baseline/model
 comparison keeps its frozen whole-contract baseline window; this timing change
 does not alter that separate experiment. Each eligible entry independently uses
-the existing 2% bankroll ceiling including fees. Three entries can therefore fund
-roughly 6% of the same bankroll before exits. The shared 10% exposure and daily
-loss fractions and five-open-trade limit still apply across all experiments.
+the existing 2% bankroll ceiling including fees. With the ordinary minute-five
+policy below, four entries can fund roughly 8% of the same bankroll before exits. The shared 10% exposure and daily-loss fractions and five-open-trade limit still apply across all experiments.
 Normal signal, warmup, quote and deadline checks can produce no entry.
 
 Same-side experiment trades can overlap. An opposing signal while another
@@ -343,8 +345,8 @@ executed returns. Each experiment owns its remaining shares and exits; account
 reconciliation sums their holdings and pending-fill ranges per market.
 
 The journal retains its existing table: historical/current trade keys remain the
-market slug; earlier/later keys append `:earlier` or `:later`. The JSON `slug`
-remains the provider market, and `trade_id` identifies the experiment trade.
+market slug; earlier/later keys append `:earlier` or `:later`, and minute-five
+keys append `:minute-five`. The JSON `slug` remains the provider market, and `trade_id` identifies the experiment trade.
 Historical attempts with unknown timing block further attempts in that same
 contract without inventing an experiment assignment. They remain reportable as
 legacy/unknown. Preserve the journal and its deployment backup; older code cannot
@@ -372,7 +374,7 @@ settings; changing context snapshots do not create groups. Top-level and
 `by_policy` totals are broad rollups. The report includes attempted/filled trades,
 known collected fees, distinct contracts, completed no-entry contracts, conflict
 coverage, known P&L, win/loss averages, drawdown, and pending/disputed results.
-Three trades in one contract are correlated observations; inspect contract count
+Multiple trades in one contract are correlated observations; inspect contract count
 alongside trade count. Missing historical settings stay `legacy/unknown`.
 
 The existing `--duration` control bounds a comparison, and `--one-trade` admits
@@ -381,25 +383,64 @@ expiry can leave holdings or results unresolved; preserve and inspect them using
 the existing recovery procedure. Running the experiment does not automatically
 select a permanent winning window or change stakes.
 
+### Continuous minute-five strong favorites
+
+Ordinary baseline operation automatically includes `btc-15m-minute-five-v1` as a
+fourth policy; no extra flag or environment variable activates it:
+
+```bash
+python bot.py --live
+```
+
+On the first normal tick at elapsed 300 seconds and before 305, save one durable
+eligibility decision. Require a fresh, open, correctly identified two-sided book
+and a favorite midpoint strictly above .80 and at most .95. Buy Up at the YES ask,
+or Down at one minus the YES bid, using the existing fee-inclusive 2% ceiling,
+quantity flooring and available depth. This policy needs no fusion signals,
+warmup or fitted model. Later baseline sampling and signal rules still apply.
+
+A missing/stale/invalid book, out-of-band favorite, conflict, risk rejection or
+other pause consumes that decision. `decision_started` is committed before quote
+and account work, so a crash during evaluation also prevents resampling after
+restart. No tick in the five-second interval means no entry; there is no catch-up.
+Refresh and preflight must preserve the selected side, band, price/depth and
+305-second submission deadline. An ambiguous order keeps its reservation and ID
+for normal reconciliation, never another submission.
+
+The saved `settlement-only-v1` exit policy holds this trade's shares through price
+moves until official settlement. Baseline price exits sell only their own shares.
+Same-side entries can coexist; opposing entries record conflicts. A baseline can
+retry inside its window, while the minute-five decision stays consumed. All four
+share the existing 10% exposure/daily-loss and five-open-trade limits; the early
+holding can reduce later coverage. Old trades retain their saved exit settings.
+
+Inspect minute-five decisions/skips, actual timing, quotes, attempts, fills and
+known fees/results in `results_report.py --json`, alongside the other policies.
+Multiple trades on one contract are correlated; disputed amounts stay unknown.
+The five-second allowance is a scheduling assumption, and retrospective display
+prices do not prove live profitability. Keep the fixed rule and continuous run
+while collecting actual outcomes; do not shut down after an arbitrary sample.
+
 ### Include the model in every contract
 
-To evaluate all four experiments together, select the fixed same-contract comparison
-with the existing model and a **new** comparison ID:
+To include the model alongside the ordinary four policies, select the fixed
+same-contract comparison with the existing model and a **new** comparison ID:
 
 ```bash
 python bot.py --live --model logs/candidate.json --experiment-id btc-four-comparison-1 --simultaneous
 ```
 
-The three baseline timing entries run alongside one model entry at 13:00–14:00.
-Each slot has its own durable attempt and saved policy, including a `model-current`
+The three baseline timing entries and minute-five policy run alongside one model
+entry at 13:00–14:00. Each slot has its own durable attempt and saved policy, including a `model-current`
 trade key. Model entries retain the existing 2% bankroll sizing, fee-aware EV gate,
-and +20%/-30% exits. There is no additional allowance: all four share the same
-10% exposure/daily-loss fractions and five-open-trade guard. Four eligible entries
-can fund roughly 8% of bankroll before exits; actual limits can block later slots.
+and +20%/-30% exits. There is no additional allowance: all five share the same
+10% exposure/daily-loss fractions and five-open-trade guard. Five eligible entries
+can fund roughly 10% of bankroll before exits; actual limits can block later slots.
 
 Registration pins `same-contract-v1`, all timing windows, baseline/model settings,
-model tag and the admission-order rule. New enrollment waits for a whole contract;
-restarts retain it. Existing assigned A/B comparisons keep their original behavior
+minute-five settings, model tag and the admission-order rule. A comparison enrolled
+before minute-five was added needs a new ID; its immutable definition is preserved.
+New enrollment waits for a whole contract; restarts retain it. Existing assigned A/B comparisons keep their original behavior
 and records, and their IDs cannot be reused with this configuration.
 
 At 13:00, the same SHA-256 comparison-ID/NUL/contract rule chooses whether baseline
@@ -408,12 +449,14 @@ a pending first order pauses the second. Opportunities save `entry_priority`,
 which does not split settings cohorts. Earlier baseline holdings can still block
 an opposing model signal. Conflicts and shared capacity affect coverage, so these
 are correlated comparisons with execution interference, not independent samples
-or a clean randomized treatment estimate. Use the four `by_settings` cohorts and
-the new ID's `by_experiment` arm totals; prior assigned A/B results stay separate.
+or a clean randomized treatment estimate. Use the separate `by_settings` cohorts,
+minute-five `by_policy` totals, and the new ID's baseline/model `by_experiment` arm
+totals; prior assigned A/B results stay separate.
 
-The initial six-contract bounded comparison permits up to 24 attempts, subject to
-signals, conflicts and the existing limits. `--duration` still finishes the current
-tick and can leave pending holdings or results. Do not start a second runner.
+Continuous operation has no contract-count shutdown. Start the service without
+`--duration`, `--once` or `--one-trade`; existing risk/error stops still apply.
+Keep one runner and the existing journal backup/recovery procedure. A code merge
+alone does not prove deployment, policy decisions, real fills or settlements.
 
 ## Probability model experiment
 
