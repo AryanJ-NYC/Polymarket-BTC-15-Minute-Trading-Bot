@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -60,6 +61,56 @@ class TradeJournal:
     def get(self, slug: str) -> dict | None:
         row = self.db.execute("SELECT data FROM trades WHERE slug = ?", (slug,)).fetchone()
         return json.loads(row[0]) if row else None
+
+    def start_experiment(self, experiment_id: str, configuration: dict) -> dict:
+        """Pin a comparison before its first whole contract, including no-entry runs."""
+        if not isinstance(experiment_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", experiment_id
+        ):
+            raise ValueError(
+                "Experiment ID must be 1-64 letters, digits, dots, underscores or hyphens"
+            )
+        if not isinstance(configuration, dict):
+            raise ValueError("Experiment configuration must be a finite JSON object")
+        try:
+            encoded = json.dumps(configuration, sort_keys=True, allow_nan=False)
+            configuration = json.loads(encoded)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Experiment configuration must be a finite JSON object") from exc
+        with self.db:
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS experiments (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
+            )
+            row = self.db.execute(
+                "SELECT data FROM experiments WHERE id = ?", (experiment_id,)
+            ).fetchone()
+            if row is not None:
+                try:
+                    definition = json.loads(row[0])
+                    started = parse_time(definition["started_at"])
+                    eligible = parse_time(definition["eligible_from"])
+                    if definition["id"] != experiment_id or eligible != _experiment_boundary(
+                        started
+                    ):
+                        raise ValueError("Invalid saved experiment identity or start")
+                    saved = json.dumps(definition["configuration"], sort_keys=True, allow_nan=False)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError("Stored experiment definition is invalid") from exc
+                if saved != encoded:
+                    raise ValueError("Experiment ID is already pinned to a different configuration")
+                return definition
+            now = datetime.now(timezone.utc)
+            definition = {
+                "id": experiment_id,
+                "configuration": configuration,
+                "started_at": now.isoformat(),
+                "eligible_from": _experiment_boundary(now).isoformat(),
+            }
+            self.db.execute(
+                "INSERT INTO experiments VALUES (?, ?)",
+                (experiment_id, json.dumps(definition, allow_nan=False)),
+            )
+        return definition
 
     def record_opportunity(
         self,
@@ -395,6 +446,11 @@ def pending_plan(row: dict) -> Plan:
         data["request"],
         parse_time(data["expires_at"]),
     )
+
+
+def _experiment_boundary(started: datetime) -> datetime:
+    eligible = started.replace(minute=started.minute // 15 * 15, second=0, microsecond=0)
+    return eligible + timedelta(minutes=15) if eligible < started else eligible
 
 
 def _pack_plan(plan: Plan) -> dict:

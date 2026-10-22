@@ -91,6 +91,49 @@ unprivileged service user, restricts writes to the state directory, keeps the
 credentials outside the code tree, and sends logs to the system journal. The
 firewall allows inbound SSH only; the bot needs no public HTTP endpoint.
 
+## Concurrent baseline/model experiment
+
+The [concurrent experiment](../README.md#run-baseline-and-model-together) uses the
+same service, account and journal. Contracts are allocated between its two arms;
+do not launch another process, journal or host against this account. Ordinary
+application deployment keeps the existing baseline command until the operator
+explicitly configures an experiment.
+
+Keep the selected, verified model outside application releases, for example at
+`/var/lib/polymarket-us/models/candidate.json`, readable by `polymarket-us`.
+Record its file hash and canonical model tag before activation. During the
+documented maintenance procedure, pause the updater, confirm both the journal
+and provider account are flat, stop the existing service, and preserve a
+consistent SQLite backup. Avoid the entry window while changing the command.
+Retain the existing journal and all its historical risk/accounting records.
+
+Use a systemd drop-in at
+`/etc/systemd/system/polymarket-us.service.d/experiment.conf` to select both the
+model and experiment ID explicitly:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/opt/polymarket-us/current/.venv/bin/python /opt/polymarket-us/current/bot.py --live --env-file /etc/polymarket-us/.env.us --model /var/lib/polymarket-us/models/candidate.json --experiment-id btc-model-comparison-1
+```
+
+Reload systemd and start the same service. Verify its exact command, deployed
+revision, registered experiment definition, model tag and arm-tagged journal
+decisions. New experiment enrollment waits for the next whole contract; existing
+positions always retain their recorded management settings. Resume the updater
+after inspecting the running service. There is no automatic experiment timeout.
+
+The drop-in survives application updates. A changed candidate, baseline settings
+or extra modeled cost requires a new experiment ID; reusing an ID with changed
+configuration stops startup. Observe actual fills and settled results with the
+read-only report's `by_experiment` groups. Both arms share the original account
+limits, including legacy losses and exposure. Unknown/disputed P&L stays unknown.
+
+To return to baseline-only entries, use the same flat maintenance procedure to
+remove only this experiment drop-in, reload systemd and resume the existing
+service. Keep its journal, model artifact and experiment records for reporting.
+Completing an issue or recording a comparison does not stop the trading service.
+
 ## Automatic updates
 
 The root-owned `polymarket-update.timer` checks `main` every five minutes. For each
