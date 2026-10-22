@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import re
 import signal
 import sys
 from dataclasses import replace
@@ -64,6 +66,10 @@ def main() -> int:
         "--model", type=Path, help="Use a fitted probability model JSON for entries"
     )
     parser.add_argument(
+        "--experiment-id",
+        help="Compare baseline and --model on assigned contracts under shared limits",
+    )
+    parser.add_argument(
         "--extra-cost-usd",
         default="0",
         help="Additional modeled cost per entry, charged once in EV",
@@ -81,6 +87,7 @@ def main() -> int:
     previous_handlers = {}
     try:
         model = load_model(args.model) if args.model is not None else None
+        _validate_experiment(args.experiment_id, model)
         extra_cost = number(args.extra_cost_usd)
         if extra_cost < 0 or (model is None and extra_cost != 0):
             raise ValueError("Extra cost must be nonnegative and requires --model")
@@ -115,7 +122,7 @@ def main() -> int:
         journal = TradeJournal(ROOT / "logs" / f"us-{mode_name}.sqlite")
         books = exchange.market_stream()
         books.start()
-        if model is None:
+        if model is None or args.experiment_id is not None:
             context = ContextRefresher()
             context.start()
         bot = TradingBot(
@@ -127,6 +134,7 @@ def main() -> int:
             model=model,
             extra_cost=extra_cost,
             context=context,
+            experiment_id=args.experiment_id,
         )
         logger.info("Starting {} mode; press Ctrl+C to stop", mode_name.upper())
         duration = args.duration or (15 if args.once else None)
@@ -188,12 +196,18 @@ class TradingBot:
         model: ProbabilityModel | None = None,
         extra_cost: Decimal = Decimal("0"),
         context: ContextRefresher | None = None,
+        experiment_id: str | None = None,
     ):
+        _validate_experiment(experiment_id, model)
         extra_cost = number(extra_cost)
         if extra_cost < 0 or (model is None and extra_cost != 0):
             raise ValueError("Extra cost must be nonnegative and requires a model")
         self.model = model
-        self.context = (context or ContextRefresher()) if model is None else None
+        self.experiment = None
+        self.market = None
+        self.context = (
+            (context or ContextRefresher()) if model is None or experiment_id is not None else None
+        )
         self.extra_cost = extra_cost
         self.exchange = exchange
         self.journal = journal
@@ -208,7 +222,7 @@ class TradingBot:
             if unfinished:
                 self.trade_id = unfinished[0]["trade_id"]
         self.strategy = BTCStrategy15Min()
-        self.settings = {
+        self._baseline_settings = {
             "policy_version": BASELINE_POLICY_VERSION,
             "entry_start_seconds": 780,
             "entry_end_seconds": 840,
@@ -225,29 +239,72 @@ class TradingBot:
             "daily_loss_fraction": str(DAILY_LOSS_FRACTION),
             "fusion_weights": self.strategy.fusion.weights.copy(),
         }
+        self._model_settings = self._baseline_settings.copy()
         if model is not None:
-            self.settings.update(
+            self._model_settings.update(
                 policy_version="btc-15m-logistic-v1",
                 model_tag=model.tag,
                 model=model.artifact,
                 extra_cost_usd=str(extra_cost),
             )
-        else:
-            self.settings.update(
+        if model is None:
+            self._baseline_settings.update(
                 timing_preset="current",
                 exit_policy="price-thresholds-v1",
                 sizing_policy="bankroll-percentage-v1",
                 extra_cost_usd="0",
             )
+        if experiment_id is not None:
+            self.experiment = journal.start_experiment(
+                experiment_id,
+                {
+                    "assignment_version": "sha256-contract-v1",
+                    "model_tag": model.tag,
+                    "extra_cost_usd": str(extra_cost),
+                    "baseline_settings": self._baseline_settings,
+                },
+            )
+            logger.info(
+                "Experiment {} | model {} | whole contracts from {} | shared bankroll limits",
+                experiment_id,
+                model.tag,
+                self.experiment["eligible_from"],
+            )
         self.next_outcome_attempt = 0.0
         self.outcome_cursor = ""
         self.next_data_attempt = 0.0
-        self.market = None
         self.next_discovery = 0.0
         self.next_rest_attempt = {}
         self.position_markets = {}
         self.observations = 0
         self.last_health = None
+
+    @property
+    def settings(self) -> dict:
+        settings = self._model_settings if self._uses_model else self._baseline_settings
+        if self.experiment is None or self.market is None:
+            return settings
+        return {
+            **settings,
+            "experiment": {
+                "id": self.experiment["id"],
+                "arm": "model" if self._uses_model else "baseline",
+                "assignment_version": self.experiment["configuration"]["assignment_version"],
+                "model_tag": self.model.tag,
+                "eligible_from": self.experiment["eligible_from"],
+            },
+        }
+
+    @property
+    def _uses_model(self) -> bool:
+        if self.model is None:
+            return False
+        if self.experiment is None:
+            return True
+        return (
+            self.market is not None
+            and _experiment_arm(self.experiment["id"], self.market.slug) == "model"
+        )
 
     @property
     def finished(self) -> bool:
@@ -324,9 +381,14 @@ class TradingBot:
         ):
             self._capture_outcomes()
             if monotonic() < self.next_data_attempt:
+                self._record_pause("exchange_backoff")
                 return
         if self.market is None:
             logger.info("Waiting for a current BTC 15-minute contract")
+            return
+        if self.experiment is not None and self.market.start < parse_time(
+            self.experiment["eligible_from"]
+        ):
             return
         capture = self._in_entry_window()
         book = None
@@ -375,7 +437,7 @@ class TradingBot:
                 )
             return
         settings = self.settings
-        if self.model is None:
+        if not self._uses_model:
             snapshot = self.context.snapshot()
             settings = {**settings, "context": snapshot}
             outcome = self.strategy.decide(self.market, book, snapshot)
@@ -424,7 +486,7 @@ class TradingBot:
             book = self.books.book(self.market)
             if book.entry_reason:
                 raise QuoteUnavailable(book.entry_reason)
-            if self.model is None and (
+            if not self._uses_model and (
                 (outcome == "up" and book.mid <= number(self.settings["up_midpoint"]))
                 or (outcome == "down" and book.mid >= number(self.settings["down_midpoint"]))
             ):
@@ -495,6 +557,14 @@ class TradingBot:
             self._execute(plan, self.market, book, streamed=True, trade_id=self.trade_id)
 
     def _record_pause(self, reason: str) -> None:
+        if self.experiment is not None:
+            self._record_experiment_pause(
+                {
+                    "exchange_backoff": "data_backoff",
+                    "reconciliation_pending": "pending_reconciliation",
+                }.get(reason, reason)
+            )
+            return
         self._select_timing()
         if self.market is not None and self._in_entry_window():
             self.journal.record_opportunity(self.market, None, reason, settings=self.settings)
@@ -512,6 +582,15 @@ class TradingBot:
     def _in_entry_window(self) -> bool:
         elapsed = (datetime.now(timezone.utc) - self.market.start).total_seconds()
         return self.settings["entry_start_seconds"] <= elapsed < self.settings["entry_end_seconds"]
+
+    def _record_experiment_pause(self, decision: str) -> None:
+        if (
+            self.experiment is not None
+            and self.market is not None
+            and self.market.start >= parse_time(self.experiment["eligible_from"])
+            and self._in_entry_window()
+        ):
+            self.journal.record_opportunity(self.market, None, decision, settings=self.settings)
 
     def _entry_plan(self, book, outcome, account, settings):
         capture = self._in_entry_window()
@@ -554,7 +633,7 @@ class TradingBot:
                 )
             return None, settings
         try:
-            if self.model is None:
+            if not self._uses_model:
                 plan = self.exchange.buy_plan(
                     self.market,
                     book,
@@ -841,7 +920,7 @@ class TradingBot:
                 < self.settings["entry_end_seconds"]
             ):
                 raise ValueError("Entry deadline elapsed")
-            if self.model is None:
+            if not self._uses_model:
                 if (
                     plan.outcome == "up" and latest.mid <= number(self.settings["up_midpoint"])
                 ) or (
@@ -1126,6 +1205,22 @@ class TradingBot:
 
 def _unavailable_book(exc: Exception) -> bool:
     return isinstance(exc, ValueError) or retryable_api_error(exc, missing=True)
+
+
+def _validate_experiment(experiment_id: str | None, model: ProbabilityModel | None) -> None:
+    if experiment_id is None:
+        return
+    if not isinstance(experiment_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", experiment_id
+    ):
+        raise ValueError("Experiment ID must be 1-64 letters, digits, dots, underscores or hyphens")
+    if model is None:
+        raise ValueError("An experiment requires --model")
+
+
+def _experiment_arm(experiment_id: str, slug: str) -> str:
+    digest = hashlib.sha256((experiment_id + "\0" + slug).encode()).digest()
+    return ("baseline", "model")[digest[0] % 2]
 
 
 TIMING_WINDOWS = (("earlier", 720, 780), ("current", 780, 840), ("later", 840, 870))

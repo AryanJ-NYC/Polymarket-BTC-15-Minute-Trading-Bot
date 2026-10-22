@@ -215,7 +215,7 @@ def test_report_counts_contracts_skips_actual_fees_and_explicit_setting_groups(v
         "no_signal",
         settings={"timing_preset": "earlier", "take_profit": "0.30", "stop_loss": "-0.30"},
     )
-    report = summarize(journal.records(), journal.opportunities())
+    report = summarize(journal.records(), opportunities=journal.opportunities())
     assert report["contract_count"] == 1
     assert report["entry_attempt_count"] == report["trade_count"] == 2
     assert Decimal(report["known_collected_fees"]) == Decimal("0.02")
@@ -443,7 +443,7 @@ def test_pending_readback_spanning_later_window_stays_in_coverage(
         row for row in journal.opportunities() if row["settings"].get("timing_preset") == "later"
     ]
     assert [row["decision"] for row in observations] == [reason] * 4
-    report = summarize(journal.records(), journal.opportunities())
+    report = summarize(journal.records(), opportunities=journal.opportunities())
     later = next(
         group for group in report["by_settings"] if group["settings"]["timing_preset"] == "later"
     )
@@ -510,6 +510,33 @@ def test_delayed_buy_readback_and_another_lots_exit_leave_ordering_explicitly_un
         assert row["pnl"] is None
         assert row["settlement"]["market_check"]["status"] == "unconfirmed_chronology"
         assert row["settlement"]["market_check"]["expected_cost"] is None
+
+
+def test_enrolled_model_comparison_keeps_its_pinned_single_baseline_window(
+    venue, journal, stream_feed, clock, monkeypatch, future_market, tmp_path
+):
+    from test_model_bot import saved_model
+
+    clock.current = future_market.start
+    trader = bot.TradingBot(
+        venue.client,
+        journal,
+        stream_feed.books,
+        model=saved_model(tmp_path, 0.1),
+        experiment_id="test-baseline",
+        context=bullish_context(),
+    )
+    for seconds in (720, 780, 840):
+        clock.current = future_market.start + timedelta(seconds=seconds)
+        publish(venue, stream_feed, clock)
+        warm(trader.strategy, stream_feed.books.book(future_market), clock, monkeypatch)
+        trader.tick()
+        assert len(journal.records()) == (0 if seconds == 720 else 1)
+    row = journal.records()[0]
+    assert row["settings"]["experiment"]["arm"] == "baseline"
+    assert row["settings"]["entry_start_seconds"] == 780
+    assert row["settings"]["entry_end_seconds"] == 840
+    assert "timing_preset" not in row["settings"]
 
 
 @pytest.fixture

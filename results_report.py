@@ -23,29 +23,20 @@ def main() -> int:
     if not args.journal.is_file():
         parser.error(f"Journal does not exist: {args.journal}")
     with sqlite3.connect(f"{args.journal.resolve().as_uri()}?mode=ro", uri=True) as db:
-        db.execute("BEGIN")  # One consistent read-only snapshot while the runner writes.
+        db.execute("BEGIN")
         rows = [json.loads(raw) for (raw,) in db.execute("SELECT data FROM trades ORDER BY rowid")]
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        decisions = {}
-        opportunities = []
-        quote_reasons = Counter()
-        if "opportunities" in tables:
-            for (raw,) in db.execute("SELECT data FROM opportunities"):
-                opportunity = json.loads(raw)
-                opportunities.append(opportunity)
-                policy = _policy(opportunity)
-                decisions.setdefault(policy, Counter())[opportunity["decision"]] += 1
-                if (
-                    opportunity["decision"] == "book_unavailable"
-                    or opportunity.get("quote_reason") is not None
-                ):
-                    quote_reasons[QuoteUnavailable(opportunity.get("quote_reason")).reason] += 1
-    report = summarize(rows, opportunities)
-    report["opportunity_count"] = sum(sum(counts.values()) for counts in decisions.values())
-    report["opportunity_decisions"] = {
-        policy: dict(sorted(counts.items())) for policy, counts in sorted(decisions.items())
-    }
-    report["quote_rejection_reasons"] = dict(sorted(quote_reasons.items()))
+        opportunities = (
+            [json.loads(raw) for (raw,) in db.execute("SELECT data FROM opportunities")]
+            if "opportunities" in tables
+            else []
+        )
+        experiments = (
+            [json.loads(raw) for (raw,) in db.execute("SELECT data FROM experiments ORDER BY id")]
+            if "experiments" in tables
+            else []
+        )
+    report = summarize(rows, opportunities=opportunities, experiments=experiments)
     report["trades"] = rows
     if args.json:
         print(json.dumps(report, indent=2))
@@ -61,17 +52,23 @@ def main() -> int:
     return 0
 
 
-def summarize(rows: list[dict], opportunities: list[dict] | None = None) -> dict:
+def summarize(
+    rows: list[dict],
+    *,
+    opportunities: list[dict] | None = None,
+    experiments: list[dict] | None = None,
+) -> dict:
     opportunities = opportunities or []
     policies = {}
-    groups = {}
     for row in rows:
         policies.setdefault(_policy(row), []).append(row)
+    policy_opportunities = {}
+    for row in opportunities:
+        policy_opportunities.setdefault(_policy(row), []).append(row)
+    groups = {}
     for field, items in (("trades", rows), ("opportunities", opportunities)):
         for row in items:
             settings = _comparison_settings(row)
-            # Serialize only these explicit comparison fields; no configuration
-            # fingerprints, artifact manifests, or changing observation data.
             key = json.dumps(settings, sort_keys=True)
             group = groups.setdefault(
                 key, {"settings": settings, "trades": [], "opportunities": []}
@@ -80,15 +77,84 @@ def summarize(rows: list[dict], opportunities: list[dict] | None = None) -> dict
     return {
         **_summarize(rows),
         **_coverage(rows, opportunities),
-        "by_policy": {policy: _summarize(trades) for policy, trades in sorted(policies.items())},
         "by_settings": [
             {
                 "settings": group["settings"],
                 **_summarize(group["trades"]),
                 **_coverage(group["trades"], group["opportunities"]),
+                **_opportunity_report(group["opportunities"]),
             }
             for _, group in sorted(groups.items())
         ],
+        "by_policy": {policy: _summarize(trades) for policy, trades in sorted(policies.items())},
+        **_opportunity_report(opportunities),
+        "opportunity_decisions": {
+            policy: _opportunity_report(observations)["opportunity_decisions"]
+            for policy, observations in sorted(policy_opportunities.items())
+        },
+        "by_experiment": _experiment_report(rows, opportunities, experiments or []),
+    }
+
+
+def _experiment_report(rows, opportunities, definitions):
+    grouped = {}
+    for definition in definitions:
+        identity = definition.get("id") if isinstance(definition, dict) else None
+        if not isinstance(identity, str) or not identity or identity in grouped:
+            raise ValueError("Invalid or duplicated experiment definition")
+        grouped[identity] = {"definition": definition, "baseline": {}, "model": {}}
+    assignments = {}
+    for kind, records in (("trades", rows), ("opportunities", opportunities)):
+        for row in records:
+            settings = row.get("settings") or {}
+            if "experiment" not in settings:
+                continue
+            experiment = settings["experiment"]
+            if (
+                not isinstance(experiment, dict)
+                or not isinstance(experiment.get("id"), str)
+                or not experiment["id"]
+                or experiment.get("arm") not in ("baseline", "model")
+            ):
+                raise ValueError("Invalid experiment identity or arm in journal record")
+            identity, arm = experiment["id"], experiment["arm"]
+            key = (identity, row["slug"])
+            if key in assignments and assignments[key] != arm:
+                raise ValueError("Conflicting experiment arm for contract")
+            assignments[key] = arm
+            group = grouped.setdefault(identity, {"definition": None, "baseline": {}, "model": {}})
+            group[arm].setdefault(kind, []).append(row)
+    return {
+        identity: {
+            "definition": group["definition"],
+            "by_arm": {
+                arm: {
+                    **_summarize(group[arm].get("trades", [])),
+                    "entry_attempt_count": len(group[arm].get("trades", [])),
+                    "unfilled_count": sum(
+                        row["state"] == "unfilled" for row in group[arm].get("trades", [])
+                    ),
+                    **_opportunity_report(group[arm].get("opportunities", [])),
+                }
+                for arm in ("baseline", "model")
+            },
+        }
+        for identity, group in sorted(grouped.items())
+    }
+
+
+def _opportunity_report(opportunities):
+    decisions = Counter(row["decision"] for row in opportunities)
+    quote_reasons = Counter(
+        QuoteUnavailable(row.get("quote_reason")).reason
+        for row in opportunities
+        if row["decision"] == "book_unavailable" or row.get("quote_reason") is not None
+    )
+    return {
+        "observed_contract_count": len({row["slug"] for row in opportunities}),
+        "opportunity_count": len(opportunities),
+        "opportunity_decisions": dict(sorted(decisions.items())),
+        "quote_rejection_reasons": dict(sorted(quote_reasons.items())),
     }
 
 
@@ -200,6 +266,7 @@ def _policy(row: dict) -> str:
 
 
 COMPARISON_FIELDS = (
+    "experiment",
     "timing_preset",
     "policy_version",
     "model_tag",
