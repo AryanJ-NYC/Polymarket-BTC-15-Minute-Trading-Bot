@@ -351,8 +351,8 @@ sizes, Brier score and log loss for the model and midpoint comparator. Evaluatio
 contracts are not used to refit this artifact. Compare those prediction metrics
 with actual financial results separately; neither proves profitability.
 
-Select that exact model for entries using `--model logs/model.json` with the
-existing `--duration` or `--one-trade` controls. The model policy keeps the normal
+Select that exact model for entries using `--model logs/model.json`. The optional
+`--duration` and `--one-trade` controls remain available. The model policy keeps the normal
 20 distinct snapshots and minute 13–14 entry window, but uses its fitted Up
 probability instead of heuristic fusion or the baseline midpoint thresholds.
 An unreadable or invalid requested model stops startup before connecting to the
@@ -377,6 +377,58 @@ realized result of earlier exits.
 Track each experiment's sample counts, checks, deployed revision, prediction
 metrics and actual execution results in its GitHub issue or PR. Automated fixture
 coverage, deployed behavior and live execution are separate evidence.
+
+### Run baseline and model together
+
+Use one runner and the existing live journal for an ongoing real-money comparison:
+
+```bash
+python bot.py --live --model logs/candidate.json --experiment-id btc-model-comparison-1
+```
+
+This command continues until stopped; it has no experiment time limit. Each BTC
+contract is assigned to exactly one arm, baseline or model, by the first byte of
+SHA-256 over the UTF-8 experiment ID, a NUL separator and the market slug. An even
+byte selects baseline and an odd byte selects model, giving approximately equal
+allocation over many contracts. Both policies trade during the same calendar
+period, on different contracts. They do not compete for the same account position.
+This is an interleaved A/B experiment, rather than two traders placing orders on
+the same contract. A skipped model opportunity stays with the model arm.
+
+The experiment ID pins the candidate model tag, assignment version, baseline
+settings and extra modeled cost in the journal. Reusing an ID with changed
+configuration fails startup. Restarting the same configuration preserves its
+original start and assignments. New enrollment begins with the first whole
+15-minute contract after registration. Existing positions continue to be managed
+using their saved settings, including positions opened before the experiment.
+
+Both arms share the same account, journal and unchanged limits: 2% per-entry
+target, five open positions, 10% aggregate funded exposure and the 10% daily loss
+budget. Existing losses, legacy positions and pending orders count toward those
+limits across both arms. There is no separate allowance for the model. Do not
+start a second runner or use a second journal for the same account.
+
+Every observed experiment opportunity and entry retains its arm and experiment
+ID. The ordinary read-only report includes `by_experiment`, with each arm's
+distinct observed contracts, decisions, entry attempts, fills, unresolved
+accounting and realized financial metrics. Its `by_policy` totals also include
+activity outside the experiment; use `by_experiment` for the comparison:
+
+```bash
+python results_report.py --journal logs/us-live.sqlite --json
+```
+
+A zero-entry arm remains visible through its registered definition and recorded
+skips. Never treat an unstarted experiment as an observed no-entry result.
+Missing or disputed fees keep exact P&L unknown. Allocation is independent of
+quotes and outcomes, but liquidity and shared risk guards can leave the arms with
+different numbers of fills. Compare their observed opportunities as well as their
+financial results. Prediction scores, simulated fills and actual trading returns
+are separate evidence.
+
+Without `--experiment-id`, the existing baseline-only and model-only modes keep
+their behavior. Adding the flag requires an explicitly selected model; it never
+activates from an environment variable or automatically selects a new artifact.
 
 ## Fee reconciliation
 
