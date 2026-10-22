@@ -41,8 +41,9 @@ each measurement boundary, rather than a spot-exchange ticker.
 
 Authenticated books use `marketData.marketSlug`, `state`, `transactTime`, `bids`
 and `offers`. Each level has a USD `px` Amount and a decimal `qty`. Validate the
-slug, open state, finite prices/quantities, a two-sided uncrossed book and quote
-age. Accept timestamps at most 35 seconds old or five seconds ahead; null or
+slug, open state, finite prices/quantities, tick alignment, at least one positive
+side and an uncrossed spread when both sides exist. Accept timestamps at most
+35 seconds old or five seconds ahead; null or
 non-advancing timestamps must not manufacture strategy history.
 
 Paper and live trading use the SDK's authenticated full `marketData` WebSocket
@@ -59,6 +60,10 @@ validation. A book 404 means data is unavailable, rather than empty liquidity.
 
 The measurement-window restriction applies to execution. Bankroll valuation may
 need fresh books for other held contracts outside their measurement window.
+Midpoint entries and marks require both sides. Owned Up exits require YES bids;
+owned Down exits require YES offers. Missing-side midpoint valuation returns
+unavailable bankroll while leaving account ownership reads usable for exits and
+reconciliation.
 
 References: [market fields and books](https://docs.polymarket.us/api-reference/market/overview),
 [crypto settlement rules](https://docs.polymarket.us/faqs/crypto-faqs).
@@ -81,9 +86,12 @@ top-level depth. Never increase the budget to meet a minimum quantity.
 Exit valuation walks the bids for Up or the complementary offers for Down,
 rounding each sellable slice down to the quantity increment and subtracting a
 conservative rounded fee bound per slice. It does not scale one best-price slice
-across the holding. Only fully covered depth has a whole-position return and can
-trigger take-profit. For incomplete depth, logs identify the unpriced remainder;
-the stop uses the sellable slice's proportional entry cost and prior proceeds.
+across the holding. Only fully covered depth has a whole-position return.
+Take-profit also requires the planned best-price IOC to cover the entire holding;
+profitable depth spread across prices cannot trigger a partial take-profit.
+For incomplete depth, logs identify the unpriced remainder; the stop uses the
+sellable slice's proportional entry cost and prior proceeds. If no slice reaches
+the quantity increment, the quote is unavailable with `insufficient_quantity`.
 This snapshot estimate does not guarantee later liquidity. Execution continues
 one bounded best-price IOC at a time, with fresh checks and actual-fill readback.
 

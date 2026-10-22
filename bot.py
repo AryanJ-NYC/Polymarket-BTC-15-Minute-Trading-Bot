@@ -27,12 +27,14 @@ from execution.polymarket_client import (
     OrderPending,
     OrderPreflightError,
     PolymarketClient,
+    QuoteUnavailable,
     api_error_summary,
     estimate_fee,
     number,
     order_fill,
     parse_time,
     position_quantity,
+    quote_reason,
     retryable_api_error,
     validate_book,
 )
@@ -95,10 +97,11 @@ def main() -> int:
                 raise ValueError("No current BTC 15-minute market was found")
             book = exchange.book(market)
             logger.info(
-                "Market data OK: {} | YES bid {} ask {} | window {} to {} UTC",
+                "Market data OK: {} | YES bid {} ask {} | entry reason {} | window {} to {} UTC",
                 market.slug,
-                book.bids[0][0],
-                book.asks[0][0],
+                book.bids[0][0] if book.bids else None,
+                book.asks[0][0] if book.asks else None,
+                book.entry_reason,
                 market.start.strftime("%H:%M"),
                 market.end.strftime("%H:%M"),
             )
@@ -312,12 +315,19 @@ class TradingBot:
             logger.info("Waiting for a current BTC 15-minute contract")
             return
         capture = self._in_entry_window()
+        book = None
         try:
             book = self.books.book(self.market)
-        except StreamUnavailable as exc:
+            if book.entry_reason:
+                raise QuoteUnavailable(book.entry_reason)
+        except QuoteUnavailable as exc:
             if capture:
                 self.journal.record_opportunity(
-                    self.market, None, "book_unavailable", settings=self.settings
+                    self.market,
+                    book,
+                    "book_unavailable",
+                    settings=self.settings,
+                    quote_reason=quote_reason(exc),
                 )
             logger.info("Entries paused: {} | stream {}", exc, self.books.health())
             return
@@ -387,6 +397,8 @@ class TradingBot:
                     )
                 return
             book = self.books.book(self.market)
+            if book.entry_reason:
+                raise QuoteUnavailable(book.entry_reason)
             if self.model is None and (
                 (outcome == "up" and book.mid <= number(self.settings["up_midpoint"]))
                 or (outcome == "down" and book.mid >= number(self.settings["down_midpoint"]))
@@ -408,6 +420,8 @@ class TradingBot:
                     )
                 return
             book = self.books.book(self.market)
+            if book.entry_reason:
+                raise QuoteUnavailable(book.entry_reason)
             plan, settings = self._entry_plan(book, outcome, account, settings)
             if plan is None:
                 return
@@ -434,10 +448,17 @@ class TradingBot:
                 self._wait_for_data(exc)
             if capture:
                 self.journal.record_opportunity(
-                    self.market, book, "plan_rejected", outcome, settings
+                    self.market,
+                    book,
+                    "plan_rejected",
+                    outcome,
+                    settings,
+                    quote_reason=quote_reason(exc),
                 )
             logger.info(
-                "Entry skipped: executable quote or account unavailable ({})", type(exc).__name__
+                "Entry skipped: executable quote or account unavailable ({}, reason {})",
+                type(exc).__name__,
+                quote_reason(exc),
             )
             return
         if self.journal.reserve_entry(plan, self.market.end, settings=settings):
@@ -587,16 +608,28 @@ class TradingBot:
 
         try:
             validate()
-        except ValueError as exc:
+        except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
             self.journal.finish_order(plan.slug, Decimal("0"), Decimal("0"), Decimal("0"))
-            logger.info("Order skipped before submission: {}", exc)
+            if not _unavailable_book(exc):
+                raise
+            detail = str(exc) if isinstance(exc, ValueError) else api_error_summary(exc)
+            logger.info(
+                "Order skipped before submission: {} | quote reason {}", detail, quote_reason(exc)
+            )
+            if not isinstance(exc, ValueError):
+                self._wait_for_data(exc, plan.slug if plan.action == "SELL" else None)
             return
         if self.live:
             try:
                 order_id = self.exchange.submit(plan, validate=validate)
             except OrderNotSubmitted as exc:
                 self.journal.finish_order(plan.slug, Decimal("0"), Decimal("0"), Decimal("0"))
-                logger.warning("Order not submitted for {}: {}", plan.slug, exc)
+                logger.warning(
+                    "Order not submitted for {}: {} | quote reason {}",
+                    plan.slug,
+                    exc,
+                    quote_reason(exc.cause),
+                )
                 if isinstance(exc.cause, APIError):
                     if getattr(exc.cause, "status_code", None) in {401, 403}:
                         raise exc.cause from None
@@ -733,11 +766,13 @@ class TradingBot:
     def _validate_execution(self, plan, market, book, *, streamed: bool) -> None:
         if datetime.now(timezone.utc) >= plan.expires_at:
             raise ValueError("Order plan has expired")
-        latest = self.books.book(market) if streamed else book
+        latest = self.books.book(market) if streamed else self.exchange.book(market)
         validate_book(market, latest)
         if streamed and latest.generation != book.generation:
             raise ValueError("Order book connection/subscription generation changed")
         if plan.action == "BUY":
+            if latest.entry_reason:
+                raise QuoteUnavailable(latest.entry_reason)
             elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
             if (
                 not self.settings["entry_start_seconds"]
@@ -913,6 +948,7 @@ class TradingBot:
             settings = row.get("settings") or self.settings
             if change <= number(settings.get("stop_loss", self.settings["stop_loss"])) or (
                 remaining == 0
+                and plan.quantity == number(row["quantity"])
                 and change >= number(settings.get("take_profit", self.settings["take_profit"]))
             ):
                 if self.live:
@@ -998,7 +1034,12 @@ class TradingBot:
             else:
                 self.next_rest_attempt[slug] = monotonic() + max(30, delay)
         detail = api_error_summary(exc) if isinstance(exc, APIError) else str(exc)
-        logger.warning("Exchange monitoring paused for {}: {}", slug or "account", detail)
+        logger.warning(
+            "Exchange monitoring paused for {}: {} | quote reason {}",
+            slug or "account",
+            detail,
+            quote_reason(exc),
+        )
 
 
 def _unavailable_book(exc: Exception) -> bool:

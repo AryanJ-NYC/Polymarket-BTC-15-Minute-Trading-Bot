@@ -467,3 +467,51 @@ def test_read_only_report_counts_policy_decisions_and_accepts_legacy_database(ve
     result = json.loads(report.stdout)
     assert result["opportunity_count"] == 0
     assert result["opportunity_decisions"] == {}
+
+
+def test_one_sided_capture_and_read_only_quote_reasons_preserve_unknown_legacy(venue, tmp_path):
+    path = tmp_path / "quote-reasons.sqlite"
+    journal = TradeJournal(path)
+    market = parse_market(venue.market)
+    book = replace(venue.client.book(market), asks=())
+    journal.record_opportunity(market, book, "book_unavailable", quote_reason="missing_offers")
+    journal.record_opportunity(market, None, "book_unavailable", quote_reason="secret=do-not-save")
+    legacy = {**journal.opportunities()[0], "book": None}
+    legacy.pop("quote_reason")
+    with journal.db:
+        journal.db.execute("INSERT INTO opportunities VALUES (?)", (json.dumps(legacy),))
+    journal.record_opportunity(market, None, "account_unavailable")
+    journal.record_opportunity(market, None, "plan_rejected", quote_reason="missing_bids")
+    original = journal.opportunities()
+    snapshot = original[0]["book"]
+    assert snapshot["bid"] == "0.63"
+    assert snapshot["bid_quantity"] == "100"
+    assert snapshot["ask"] is snapshot["ask_quantity"] is None
+    assert snapshot["midpoint"] is snapshot["spread"] is None
+    assert original[0]["quote_reason"] == "missing_offers"
+    assert original[1]["quote_reason"] == "unknown"
+    assert original[-1]["quote_reason"] == "missing_bids"
+    report = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).parents[1] / "results_report.py"),
+            "--journal",
+            str(path),
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    result = json.loads(report.stdout)
+    assert result["quote_rejection_reasons"] == {
+        "missing_bids": 1,
+        "missing_offers": 1,
+        "unknown": 2,
+    }
+    assert result["opportunity_decisions"] == {
+        "legacy": {"book_unavailable": 3, "account_unavailable": 1, "plan_rejected": 1}
+    }
+    assert "do-not-save" not in json.dumps(original) + report.stdout
+    assert journal.opportunities() == original
+    journal.close()

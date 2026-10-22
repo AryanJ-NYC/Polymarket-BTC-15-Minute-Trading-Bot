@@ -23,10 +23,14 @@ history for the new contract.
 
 Provider `transactTime` and local monotonic receipt time are separate. A book must
 belong to the expected open BTC 15-minute contract, be inside its measurement
-window, and have finite positive executable depth on both sides with an uncrossed
-spread. Provider age must be between -5 and 35 seconds; streamed books also expire
+window, and have finite positive executable depth on at least one side. Prices
+must follow the market tick; two-sided books must have an uncrossed spread.
+Provider age must be between -5 and 35 seconds; streamed books also expire
 35 seconds after local receipt. Heartbeats establish connection activity without
 refreshing book age. Older and duplicate snapshots never replace a newer book.
+Conflicting contents at the same timestamp invalidate the cache with
+`conflicting_snapshot` until a newer snapshot arrives; replaying the old contents
+cannot restore executable liquidity.
 
 Subscriptions include the current entry contract and unexpired contracts with
 bot-owned positions. Removing a subscription immediately removes its cached book.
@@ -54,7 +58,9 @@ discovery, and outcome-history rate limits pause further REST operations across
 the trading loop while socket receipt continues independently.
 
 The trading loop rechecks the latest eligible quote and entry deadline after slow
-context/account work and again around submission. Spending caps, preview
+context/account work and again around submission. An exit using REST fallback
+refreshes its book before and after preview; a changed executable price, reduced
+depth or missing required side prevents submission. Spending caps, preview
 validation, duplicate reservations, and actual-fill accounting still apply. A
 shutdown signal finishes the current serialized trading tick, then closes the
 receiver, journal, and REST client. Stream closure wakes the receiver and joins
@@ -66,13 +72,28 @@ snapshots, and bounded pause reasons. A connection can be healthy while a specif
 contract is waiting for its first eligible snapshot. Inspect both connection
 health and quote availability.
 
-An `OPEN` market can still have a one-sided book with no bids or no offers.
-Such a snapshot fails the same two-sided validation in both stream and REST paths.
-A connected socket with `invalid_snapshot`, an empty executable cache, and a
-rising `malformed` counter can therefore reflect unavailable liquidity rather than
-a broken connection or malformed JSON. Inspect the expected contract, provider
-timestamp, state, and depth on both sides before diagnosing a transport failure.
-The counter includes quote-validation failures, not just invalid message syntax.
+An `OPEN` one-sided book stays cached when it passes the shared stream/REST
+validation. An owned Up position can sell against YES bids without offers; an
+owned Down position can sell against YES offers without bids, at the complementary
+outcome price. Missing required-side depth prevents that exit. Entries and bankroll
+midpoint marks still require both sides; unavailable valuation blocks entries
+while owned exits and reconciliation remain usable. No missing price is invented.
+
+Health exposes per-contract `book_reasons` and `entry_reasons`: a valid bids-only
+book has no book rejection but reports `missing_offers` for entries. Well-formed
+one-sided snapshots do not increment `malformed`. Invalid snapshots retain the
+compatible `invalid_snapshot` status and a bounded detail such as `empty_book`,
+`crossed_book`, `stale_timestamp`, `future_timestamp`, `closed_contract`,
+`wrong_contract` or `malformed_fields`. Connection and subscription unavailability
+have separate reasons. The `malformed` counter still includes quote-validation
+failures, not just invalid message syntax. Inspect the reason and contract, rather
+than inferring a transport failure from the counter.
+
+Entry captures retain `book_unavailable` with a sanitized `quote_reason` and
+available top-side data; missing midpoint, spread and side values are null.
+`results_report.py` counts these reasons and labels legacy missing detail
+`unknown`. The observer records entry and Up/Down exit availability separately
+and never adds a one-sided snapshot to midpoint strategy history.
 
 Entries wait for an eligible streamed snapshot. Position fallback cannot bypass
 validation; an unavailable quote also skips price-based exits while reconciliation

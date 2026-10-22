@@ -45,8 +45,9 @@ def test_removed_then_readded_contract_requires_new_subscription(venue, market_r
         stream.set_markets([market])
         socket.publish(old)
         wait_for(lambda: len(socket.subscriptions) == 2)
-        with pytest.raises(StreamUnavailable):
+        with pytest.raises(StreamUnavailable) as error:
             stream.book(market)
+        assert error.value.reason == "book_unavailable"
         assert socket.unsubscriptions == ["book-1-1"]
         socket.publish(snapshot(socket, market_row, venue.timestamp))
         wait_for(lambda: stream.health()["snapshots"] == 2)
@@ -54,21 +55,27 @@ def test_removed_then_readded_contract_requires_new_subscription(venue, market_r
 
 
 @pytest.mark.parametrize(
-    "changes",
+    "changes,reason",
     [
-        {"marketSlug": "wrong-market"},
-        {"state": "MARKET_STATE_CLOSED"},
-        {"transactTime": None},
-        {"bids": []},
-        {"offers": []},
-        {"bids": [{"px": {"value": "0.66", "currency": "USD"}, "qty": "1"}]},
-        {"offers": [{"px": {"value": "NaN", "currency": "USD"}, "qty": "1"}]},
-        {"offers": [{"px": {"value": "0.65", "currency": "USD"}, "qty": "oops"}]},
-        {"offers": [{"px": {"value": "0.65", "currency": "USD"}}]},
-        {"bids": None},
+        ({"marketSlug": "wrong-market"}, "wrong_contract"),
+        ({"state": "MARKET_STATE_CLOSED"}, "closed_contract"),
+        ({"transactTime": None}, "malformed_fields"),
+        ({"bids": [], "offers": []}, "empty_book"),
+        ({"bids": [{"px": {"value": "0.66", "currency": "USD"}, "qty": "1"}]}, "crossed_book"),
+        ({"offers": [{"px": {"value": "NaN", "currency": "USD"}, "qty": "1"}]}, "malformed_fields"),
+        (
+            {"offers": [{"px": {"value": "0.65", "currency": "USD"}, "qty": "private-header"}]},
+            "malformed_fields",
+        ),
+        ({"offers": [{"px": {"value": "0.65", "currency": "USD"}}]}, "malformed_fields"),
+        ({"bids": None}, "malformed_fields"),
+        ({"bids": [{"px": {"value": "0.631", "currency": "USD"}, "qty": "1"}]}, "malformed_fields"),
+        ({"bids": [{"px": {"value": "0.63", "currency": "USD"}, "qty": "-1"}]}, "malformed_fields"),
     ],
 )
-def test_bad_bound_snapshot_invalidates_previously_executable_book(venue, market_row, changes):
+def test_bad_bound_snapshot_invalidates_previously_executable_book(
+    venue, market_row, changes, reason
+):
     factory = SocketFactory()
     market = parse_market(market_row)
     with started_stream(factory, [market]) as stream:
@@ -77,13 +84,18 @@ def test_bad_bound_snapshot_invalidates_previously_executable_book(venue, market
         wait_for(lambda: stream.health()["snapshots"] == 1)
         socket.publish(snapshot(socket, market_row, venue.timestamp, **changes))
         wait_for(lambda: stream.health()["malformed"] == 1)
-        with pytest.raises(StreamUnavailable):
+        with pytest.raises(StreamUnavailable) as error:
             stream.book(market)
+        assert error.value.reason == reason
+        assert stream.health()["book_reasons"][market.slug] == reason
+        assert stream.health()["entry_reasons"][market.slug] == reason
+        assert "private-header" not in str(error.value)
         # Replaying an old snapshot must not undo invalidation.
         socket.publish(snapshot(socket, market_row, venue.timestamp))
         wait_for(lambda: stream.health()["duplicates"] == 1)
-        with pytest.raises(StreamUnavailable):
+        with pytest.raises(StreamUnavailable) as error:
             stream.book(market)
+        assert error.value.reason == reason
 
 
 @pytest.mark.parametrize("bad_age", [36, -6])
@@ -97,8 +109,39 @@ def test_stale_and_future_snapshot_never_become_executable(venue, market_row, cl
         timestamp = (clock.current - timedelta(seconds=bad_age)).isoformat()
         socket.publish(snapshot(socket, market_row, timestamp))
         wait_for(lambda: stream.health()["malformed"] == 1)
-        with pytest.raises(StreamUnavailable):
+        with pytest.raises(StreamUnavailable) as error:
             stream.book(market)
+        assert error.value.reason == ("stale_timestamp" if bad_age > 0 else "future_timestamp")
+
+
+@pytest.mark.parametrize("missing,reason", [("offers", "missing_offers"), ("bids", "missing_bids")])
+def test_one_sided_snapshot_remains_cached_for_exits_and_explains_entry_pause(
+    venue, market_row, missing, reason
+):
+    factory = SocketFactory()
+    market = parse_market(market_row)
+    levels = [
+        {
+            "px": {"value": str(Decimal("0.99") - Decimal("0.01") * index), "currency": "USD"},
+            "qty": "1",
+        }
+        for index in range(26)
+    ]
+    changes = (
+        {"bids": levels, "offers": []}
+        if missing == "offers"
+        else {"bids": [], "offers": [{"px": {"value": "0.01", "currency": "USD"}, "qty": "1"}]}
+    )
+    with started_stream(factory, [market]) as stream:
+        socket = factory.ready()
+        socket.publish(snapshot(socket, market_row, venue.timestamp, **changes))
+        wait_for(lambda: stream.health()["snapshots"] == 1)
+        book = stream.book(market)
+        assert book.entry_reason == reason
+        assert stream.health()["entry_reasons"][market.slug] == reason
+        assert stream.health()["book_reasons"][market.slug] is None
+        assert stream.health()["malformed"] == 0
+        assert stream.health()["cached_books"] == 1
 
 
 def test_heartbeats_and_out_of_order_updates_never_refresh_quote_age(
@@ -125,8 +168,10 @@ def test_heartbeats_and_out_of_order_updates_never_refresh_quote_age(
         socket.publish({"heartbeat": {}})
         wait_for(lambda: stream.health()["message_age_seconds"] == 0)
         assert stream.health()["quote_age_seconds"][market.slug] == 36
-        with pytest.raises(StreamUnavailable):
+        with pytest.raises(StreamUnavailable) as error:
             stream.book(market)
+        assert error.value.reason == "stale_receipt"
+        assert stream.health()["entry_reasons"][market.slug] == "stale_receipt"
 
 
 def test_disconnect_requires_new_generation_snapshot_and_clean_shutdown(
@@ -192,8 +237,10 @@ def test_provider_errors_are_sanitized_and_do_not_leak_authenticated_data(venue,
         assert "secret-key" not in str(stream.health())
         assert stream.health()["reason"] == "subscription_error"
         assert 0 < stream.health()["backoff_seconds"] <= 30
-        with pytest.raises(StreamUnavailable):
+        with pytest.raises(StreamUnavailable) as error:
             stream.book(market)
+        assert error.value.reason == "subscription_unavailable"
+        assert stream.health()["entry_reasons"][market.slug] == "subscription_unavailable"
 
 
 def test_real_sdk_authenticates_and_sends_full_book_wire_subscription(
