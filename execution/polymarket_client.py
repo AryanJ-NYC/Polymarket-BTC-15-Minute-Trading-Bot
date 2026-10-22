@@ -106,7 +106,15 @@ class PolymarketClient:
         validate_book(market, book)
         return book
 
-    def buy_plan(self, market: Market, book: Book, outcome: str, budget: Decimal) -> Plan:
+    def buy_plan(
+        self,
+        market: Market,
+        book: Book,
+        outcome: str,
+        budget: Decimal,
+        *,
+        deadline: datetime | None = None,
+    ) -> Plan:
         validate_book(market, book)
         if book.entry_reason:
             raise QuoteUnavailable(book.entry_reason)
@@ -124,7 +132,7 @@ class PolymarketClient:
             fee_bound = estimate_fee(market.fee_coefficient, quantity, Decimal("0.5"))
         if quantity < market.increment:
             raise ValueError("Budget or visible depth is below the minimum trade quantity")
-        return _plan(market, book, outcome, "BUY", yes_price, quantity, fee_bound)
+        return _plan(market, book, outcome, "BUY", yes_price, quantity, fee_bound, deadline)
 
     def sell_plan(self, market: Market, book: Book, outcome: str, quantity: Decimal) -> Plan:
         validate_book(market, book)
@@ -542,6 +550,7 @@ def _plan(
     yes_price: Decimal,
     quantity: Decimal,
     fee: Decimal,
+    deadline: datetime | None = None,
 ) -> Plan:
     if yes_price % market.tick:
         raise ValueError("Book price is not aligned to the market tick")
@@ -559,7 +568,7 @@ def _plan(
     price = yes_price if outcome == "up" else ONE - yes_price
     expires = min(market.end, book.timestamp + timedelta(seconds=BOOK_MAX_AGE_SECONDS))
     if action == "BUY":
-        expires = min(expires, market.start + timedelta(minutes=14))
+        expires = min(expires, deadline or market.start + timedelta(minutes=14))
     return Plan(
         market.slug, outcome, action, yes_price, quantity, quantity * price, fee, request, expires
     )

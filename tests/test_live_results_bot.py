@@ -44,10 +44,8 @@ def test_entry_persists_policy_and_observation_before_submission(
     assert journal.records()[0]["state"] == "open"
 
 
-@pytest.mark.parametrize("shift", [-11, 50])
-def test_no_late_window_capture_outside_entry_window(
-    venue, journal, clock, shift, books, stream_feed
-):
+@pytest.mark.parametrize("shift", [-71, 80])
+def test_no_timing_capture_outside_tested_windows(venue, journal, clock, shift, books, stream_feed):
     clock.current += timedelta(seconds=shift)
     venue.timestamp = clock.current.isoformat()
     if shift >= 0:
@@ -309,7 +307,7 @@ def test_legacy_settlement_retains_resolution_after_exit_attempt(
     journal.reserve_entry(entry, market.end)
     journal.finish_order(market.slug, Decimal("1"), Decimal("0.65"), Decimal("0.01"))
     exit_plan = venue.client.sell_plan(market, book, "up", Decimal("0.4"))
-    journal.reserve_exit(exit_plan)
+    journal.reserve_exit(exit_plan.slug, exit_plan)
     journal.finish_order(
         market.slug,
         Decimal(sold_quantity),
@@ -448,7 +446,7 @@ def test_restart_subscribes_to_owned_contract_before_accounting_and_pending_exit
     )
     if state == "pending_sell":
         sell = venue.client.sell_plan(owned, book, "up", Decimal("1"))
-        journal.reserve_exit(sell)
+        journal.reserve_exit(sell.slug, sell)
         journal.update(owned.slug, order_id="known-pending-exit")
         venue.on_request = lambda request: (
             httpx.Response(404, json={"error": "readback temporarily unavailable"})
@@ -478,7 +476,10 @@ def test_preview_revalidation_uses_current_policy_window_and_direction(
         venue.bid, venue.ask, venue.fill_price = "0.35", "0.37", "0.36"
         stream_feed.publish()
     trader = TradingBot(venue.client, journal, books, live=True)
-    trader.settings.update(entry_end_seconds=795, up_midpoint="0.63", down_midpoint="0.37")
+    if policy == "entry_end":
+        clock.current += timedelta(seconds=49)
+        venue.timestamp = clock.current.isoformat()
+        stream_feed.publish()
     monkeypatch.setattr(trader.strategy, "decide", lambda *_: outcome)
 
     def during_preview(request):
@@ -487,9 +488,9 @@ def test_preview_revalidation_uses_current_policy_window_and_direction(
                 clock.current += timedelta(seconds=6)
                 venue.timestamp = clock.current.isoformat()
             elif policy == "up_midpoint":
-                venue.bid = "0.59"  # Mid .62 violates policy; executable Up ask remains .65.
+                venue.bid = "0.53"  # Mid .59 violates policy; executable Up ask remains .65.
             else:
-                venue.ask = "0.41"  # Mid .38 violates policy; executable Down bid remains .35.
+                venue.ask = "0.47"  # Mid .41 violates policy; executable Down bid remains .35.
             stream_feed.publish()
         return None
 

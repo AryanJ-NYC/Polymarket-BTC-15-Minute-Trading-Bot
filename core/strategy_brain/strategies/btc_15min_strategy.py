@@ -21,6 +21,7 @@ from execution.polymarket_client import Book, Market
 
 class BTCStrategy15Min:
     def __init__(self):
+        self.entry_window = (780, 840)
         self.slug = None
         self.ticks = deque(maxlen=200)
         self.last_sample = None
@@ -43,7 +44,7 @@ class BTCStrategy15Min:
         }.items():
             self.fusion.set_weight(name, weight)
 
-    def observe(self, book: Book) -> None:
+    def observe(self, book: Book, context: dict | None = None) -> None:
         if self.slug != book.slug:
             self.slug = book.slug
             self.ticks.clear()
@@ -58,10 +59,18 @@ class BTCStrategy15Min:
             self.ticks.append({"ts": book.timestamp, "price": book.mid})
             self.last_sample = now
 
+        spot = (context or {}).get("spot", {})
+        if spot.get("available"):
+            for processor in self.processors:
+                if isinstance(processor, PriceDivergenceProcessor):
+                    processor.observe_spot(
+                        spot["value"], spot.get("source_timestamp") or spot.get("received_at")
+                    )
+
     def decide(self, market: Market, book: Book, context: dict | None = None) -> str | None:
         self.observe(book)
         elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
-        if not 780 <= elapsed < 840 or len(self.ticks) < 20:
+        if not self.entry_window[0] <= elapsed < self.entry_window[1] or len(self.ticks) < 20:
             return None
         if book.mid > 0.60:
             outcome = "up"

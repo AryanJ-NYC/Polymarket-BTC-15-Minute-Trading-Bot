@@ -83,7 +83,7 @@ def test_all_held_sources_allow_owned_position_management_and_reconciliation(
         )
         if work == "reconcile":
             sell = venue.client.sell_plan(market, book, "up", Decimal("1"))
-            journal.reserve_exit(sell)
+            journal.reserve_exit(sell.slug, sell)
             journal.update(market.slug, order_id="bot-order-1")
             venue.order = {
                 **sell.request,

@@ -321,7 +321,7 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
                 end=market.end - timedelta(minutes=15),
             )
             journal.record_opportunity(old, replace(book, slug=old.slug), "no_signal")
-        clock.current = market.start + timedelta(minutes=14, seconds=10)
+        clock.current = market.start + timedelta(minutes=14, seconds=40)
         venue.timestamp = clock.current.isoformat()
         publish_book(stream_feed, venue, clock)
         original = venue.handle
@@ -433,7 +433,7 @@ def test_post_entry_history_still_honors_shared_retry_after(
             end=market.end - timedelta(minutes=15),
         )
         journal.record_opportunity(old, replace(book, slug=old.slug), "no_signal")
-        clock.current = market.start + timedelta(minutes=14, seconds=10)
+        clock.current = market.start + timedelta(minutes=14, seconds=40)
         venue.timestamp = clock.current.isoformat()
         publish_book(stream_feed, venue, clock)
         header = (
@@ -527,7 +527,7 @@ def warm_up(trader, venue, clock, stream_feed):
 
 def next_late_window(venue, clock):
     market = parse_market(venue.market)
-    clock.current = market.end + timedelta(minutes=14, seconds=10)
+    clock.current = market.end + timedelta(minutes=14, seconds=40)
     venue.market["slug"] = "next-" + market.end.strftime("%Y%m%d%H%M")
     venue.market["assetPriceTerms"].update(
         windowStart=market.end.isoformat(),

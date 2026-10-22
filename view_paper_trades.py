@@ -14,7 +14,7 @@ def main():
         for (raw,) in db.execute("SELECT data FROM trades ORDER BY rowid"):
             row = json.loads(raw)
             print(
-                f"{row['slug']} | {row['outcome']} | {row['state']} | "
+                f"{row.get('trade_id', row['slug'])} | {row['outcome']} | {row['state']} | "
                 f"remaining={row['quantity']} | cost=${row['entry_cost']} | "
                 f"realized P&L={row['pnl'] if row['pnl'] is not None else 'pending'}"
             )

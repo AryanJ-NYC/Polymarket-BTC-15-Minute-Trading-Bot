@@ -87,7 +87,7 @@ def test_known_order_recovers_during_quote_rate_limit_without_duplicate_submissi
     trader.tick()
     assert len(venue.book_request_ids) == 1
     sell = venue.client.sell_plan(market, book, "up", Decimal("1"))
-    journal.reserve_exit(sell)
+    journal.reserve_exit(sell.slug, sell)
     journal.update(market.slug, order_id="bot-order-1")
     venue.order = terminal_order(sell, quantity="0.5", price="0.63")
     pending = journal.get(market.slug)

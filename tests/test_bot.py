@@ -436,7 +436,7 @@ def test_one_trade_restart_resumes_existing_position(venue, journal, clock, book
     journal.reserve_entry(plan, market.end)
     journal.finish_order(market.slug, Decimal("1"), Decimal("0.37"), Decimal("0.01"))
     restarted = TradingBot(venue.client, journal, books, one_trade=True)
-    assert restarted.trade_slug == market.slug
+    assert restarted.trade_id == market.slug
     clock.current += timedelta(minutes=3)
     venue.settlement = 0
     venue.client.discover_market = lambda: pytest.fail("Must resume the existing trade")
@@ -592,7 +592,7 @@ def test_live_request_fits_remaining_exposure_after_partial_exits(
         exit_plan = venue.client.sell_plan(
             held, venue.client.book(held), "up", Decimal(exit_quantity)
         )
-        journal.reserve_exit(exit_plan)
+        journal.reserve_exit(exit_plan.slug, exit_plan)
         journal.finish_order(held_slug, Decimal(exit_quantity), Decimal("0.1575"), Decimal("0"))
     remaining = Decimal("3") - Decimal(exit_quantity)
     exposure = Decimal(funded) * remaining / 3
@@ -1006,7 +1006,7 @@ def test_pending_partial_exit_can_expire_while_other_position_is_managed(
     journal.reserve_entry(entry, market.end)
     journal.finish_order(market.slug, Decimal("1"), Decimal("0.65"), Decimal("0.01"))
     exit_plan = venue.client.sell_plan(market, book, "up", Decimal("0.5"))
-    journal.reserve_exit(exit_plan)
+    journal.reserve_exit(exit_plan.slug, exit_plan)
     journal.update(market.slug, order_id="pending-exit")
     venue.failures[("GET", "/v1/order/pending-exit")] = [404, 404, 404]
     if expired:

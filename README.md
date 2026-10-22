@@ -78,7 +78,9 @@ Temporary read failures retain known order IDs and recover automatically.
   the later expiration timestamp.
 - Preserves the previous late-window entry policy: sample the latest distinct
   book at most once every three seconds (20 observations take at least 57 seconds),
-  enter only between minute 13 and minute 14, follow Up above a
+  evaluate three fixed timing experiments: earlier 12:00-13:00, current
+  13:00-14:00 and later 14:00-14:30 (start inclusive, end exclusive). Each
+  experiment may attempt one entry per contract. Follow Up above a
   YES midpoint of 0.60 or Down below 0.40, and require at least one signal and a
   dominant fused direction supporting that favorite with strictly more than
   50% consensus. Opposite signals, ties, and no signal skip entry. Consensus is
@@ -188,7 +190,8 @@ change actual account equity.
 
 `logs/us-paper.sqlite` and `logs/us-live.sqlite` keep separate paper/live records.
 They are ignored by Git. One process can hold each journal. Each contract can
-have one entry attempt, committed before submitting to the exchange. Successful
+have one entry attempt per timing experiment, committed before submitting to
+the exchange. Failed and zero-fill attempts also consume that experiment slot. Successful
 submissions record the exchange order ID, then verify terminal state and actual
 cumulative fills. Partial IOC fills are tracked at their actual quantity and fee.
 Only a known bot order can be canceled; the bot never cancels all account orders.
@@ -235,7 +238,8 @@ reconciliation and other owned positions to continue.
 Cancellation acknowledgments also require terminal readback before accounting.
 Preflight/preview failures proven to precede create release their reservation as
 unfilled; failures after create begins keep the reservation for reconciliation.
-BUY plans expire at minute 14 even when preview or account requests take time.
+Baseline BUY plans expire at the selected timing window's end even when preview
+or account requests take time. Model entries retain their current 13:00-14:00 window.
 Logs include the failed HTTP method/path and status without response bodies.
 
 If a process dies or loses the response before saving an ID, it cannot know
@@ -319,6 +323,97 @@ runner's Retry-After gate. The duration is checked between ticks,
 so in-flight requests/readback can outlast it. An unresolved create is never
 retried. Restart with the same journal; do not delete state or start a second
 runner. A bounded run may finish with pending results that need later readback.
+
+## Timing experiments
+
+The baseline runner evaluates all three fixed windows in every contract; no extra
+flag or environment variable is needed. An explicitly enrolled baseline/model
+comparison keeps its frozen whole-contract baseline window; this timing change
+does not alter that separate experiment. Each eligible entry independently uses
+the existing 2% bankroll ceiling including fees. Three entries can therefore fund
+roughly 6% of the same bankroll before exits. The shared 10% exposure and daily
+loss fractions and five-open-trade limit still apply across all experiments.
+Normal signal, warmup, quote and deadline checks can produce no entry.
+
+Same-side experiment trades can overlap. An opposing signal while another
+experiment still holds that contract is recorded as `opposite_position_conflict`
+without reserving an attempt. A later tick can enter if the conflict clears inside
+that window. Conflicts, unavailable books, and other skips are observations, not
+executed returns. Each experiment owns its remaining shares and exits; account
+reconciliation sums their holdings and pending-fill ranges per market.
+
+The journal retains its existing table: historical/current trade keys remain the
+market slug; earlier/later keys append `:earlier` or `:later`. The JSON `slug`
+remains the provider market, and `trade_id` identifies the experiment trade.
+Historical attempts with unknown timing block further attempts in that same
+contract without inventing an experiment assignment. They remain reportable as
+legacy/unknown. Preserve the journal and its deployment backup; older code cannot
+manage several experiment trades in one market safely. Use a compatible forward
+fix after new experiment entries exist.
+
+Settlement binds one provider resolution to the combined remaining quantity and
+atomically allocates official payouts to each experiment's actual retained shares.
+The full market cost/fee claim is recorded once as shared evidence, never charged
+to every experiment. A chronological market average-cost comparison checks pooled
+basis; the provider's precise allocation method after multiple entries and sales
+is not documented. A disagreement stays visible with unknown exact results; the
+existing qualified five-cent settled fee tolerance is applied once to the market,
+with any conservative risk adjustment charged once to a retained result on
+the settlement day. Replayed evidence preserves that reserve. Actual order commissions and
+sale proceeds stay separate from pooled basis. A recovered order readback can
+leave actual fill order uncertain when other experiments sold in the meantime;
+that case records `unconfirmed_chronology` and unknown exact results instead of
+inferring exchange execution order from local receipt timestamps. Paused known
+markets retain per-window reconciliation, backoff and account-unavailable skips.
+
+Use `by_settings` in the existing results output to compare experiments. These
+groups separate the explicit saved timing, baseline, exit, sizing and extra-cost
+settings; changing context snapshots do not create groups. Top-level and
+`by_policy` totals are broad rollups. The report includes attempted/filled trades,
+known collected fees, distinct contracts, completed no-entry contracts, conflict
+coverage, known P&L, win/loss averages, drawdown, and pending/disputed results.
+Three trades in one contract are correlated observations; inspect contract count
+alongside trade count. Missing historical settings stay `legacy/unknown`.
+
+The existing `--duration` control bounds a comparison, and `--one-trade` admits
+only one trade across all experiments before waiting for its completion. Duration
+expiry can leave holdings or results unresolved; preserve and inspect them using
+the existing recovery procedure. Running the experiment does not automatically
+select a permanent winning window or change stakes.
+
+### Include the model in every contract
+
+To evaluate all four experiments together, select the fixed same-contract comparison
+with the existing model and a **new** comparison ID:
+
+```bash
+python bot.py --live --model logs/candidate.json --experiment-id btc-four-comparison-1 --simultaneous
+```
+
+The three baseline timing entries run alongside one model entry at 13:00–14:00.
+Each slot has its own durable attempt and saved policy, including a `model-current`
+trade key. Model entries retain the existing 2% bankroll sizing, fee-aware EV gate,
+and +20%/-30% exits. There is no additional allowance: all four share the same
+10% exposure/daily-loss fractions and five-open-trade guard. Four eligible entries
+can fund roughly 8% of bankroll before exits; actual limits can block later slots.
+
+Registration pins `same-contract-v1`, all timing windows, baseline/model settings,
+model tag and the admission-order rule. New enrollment waits for a whole contract;
+restarts retain it. Existing assigned A/B comparisons keep their original behavior
+and records, and their IDs cannot be reused with this configuration.
+
+At 13:00, the same SHA-256 comparison-ID/NUL/contract rule chooses whether baseline
+or model is evaluated first. Each admission rereads funds and executable quotes;
+a pending first order pauses the second. Opportunities save `entry_priority`,
+which does not split settings cohorts. Earlier baseline holdings can still block
+an opposing model signal. Conflicts and shared capacity affect coverage, so these
+are correlated comparisons with execution interference, not independent samples
+or a clean randomized treatment estimate. Use the four `by_settings` cohorts and
+the new ID's `by_experiment` arm totals; prior assigned A/B results stay separate.
+
+The initial six-contract bounded comparison permits up to 24 attempts, subject to
+signals, conflicts and the existing limits. `--duration` still finishes the current
+tick and can leave pending holdings or results. Do not start a second runner.
 
 ## Probability model experiment
 

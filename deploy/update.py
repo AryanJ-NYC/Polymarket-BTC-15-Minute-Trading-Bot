@@ -138,7 +138,7 @@ def ci_passed(sha: str) -> bool:
 
 
 def ready() -> bool:
-    # The current strategy admits entries only during minutes 13-14. Allow a
+    # The baseline admits entries only during minutes 12-14:30. Allow a
     # generous margin for shutdown, account reads, and the new process's startup.
     if not quiet_window() or not journal_flat():
         return False

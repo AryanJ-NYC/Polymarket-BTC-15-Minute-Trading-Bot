@@ -109,7 +109,9 @@ def test_both_arms_and_legacy_activity_share_daily_loss_capacity(venue, tmp_path
         )
         with pytest.raises(ValueError, match="loss budget"):
             journal.risk_check(Decimal("0.26"), Decimal("50"))
-        journal.reserve_exit(replace(plan, slug="model-arm", action="SELL", quantity=Decimal("1")))
+        journal.reserve_exit(
+            "model-arm", replace(plan, slug="model-arm", action="SELL", quantity=Decimal("1"))
+        )
         with pytest.raises(RuntimeError, match="unresolved"):
             journal.entry_budget(Decimal("50"), Decimal("50"))
     finally:

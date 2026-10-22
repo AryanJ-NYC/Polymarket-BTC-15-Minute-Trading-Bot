@@ -55,12 +55,22 @@ class TradeJournal:
 
     def records(self) -> list[dict]:
         return [
-            json.loads(row[0]) for row in self.db.execute("SELECT data FROM trades ORDER BY rowid")
+            {**json.loads(raw), "trade_id": key}
+            for key, raw in self.db.execute("SELECT slug, data FROM trades ORDER BY rowid")
         ]
 
-    def get(self, slug: str) -> dict | None:
-        row = self.db.execute("SELECT data FROM trades WHERE slug = ?", (slug,)).fetchone()
-        return json.loads(row[0]) if row else None
+    def get(self, trade_id: str) -> dict | None:
+        row = self.db.execute("SELECT data FROM trades WHERE slug = ?", (trade_id,)).fetchone()
+        return {**json.loads(row[0]), "trade_id": trade_id} if row else None
+
+    def entry_attempted(self, slug: str, preset: str | None = None) -> bool:
+        current = self.get(slug)
+        # Historical attempts cannot truthfully be assigned to a timing experiment.
+        if current and not (current.get("settings") or {}).get("timing_preset"):
+            return True
+        if preset is None:
+            return any(row["slug"] == slug for row in self.records())
+        return self.get(entry_key(slug, preset)) is not None
 
     def start_experiment(self, experiment_id: str, configuration: dict) -> dict:
         """Pin a comparison before its first whole contract, including no-entry runs."""
@@ -209,8 +219,13 @@ class TradeJournal:
             self.db.execute("INSERT INTO contract_outcomes VALUES (?, ?)", (slug, json.dumps(data)))
 
     def reserve_entry(self, plan: Plan, end: datetime, *, settings: dict | None = None) -> bool:
-        """Commit before order placement; never submit the same market twice."""
+        """Commit one attempt per contract/experiment before order placement."""
+        preset = (settings or {}).get("timing_preset")
+        if self.entry_attempted(plan.slug, preset):
+            return False
+        trade_id = entry_key(plan.slug, preset)
         data = {
+            "trade_id": trade_id,
             "slug": plan.slug,
             "outcome": plan.outcome,
             "end": end.isoformat(),
@@ -228,28 +243,42 @@ class TradeJournal:
         }
         with self.db:
             result = self.db.execute(
-                "INSERT OR IGNORE INTO trades VALUES (?, ?)", (plan.slug, json.dumps(data))
+                "INSERT OR IGNORE INTO trades VALUES (?, ?)", (trade_id, json.dumps(data))
             )
         return result.rowcount == 1
 
-    def reserve_exit(self, plan: Plan) -> None:
-        data = self.get(plan.slug)
+    def reserve_exit(self, trade_id: str, plan: Plan) -> None:
+        data = self.get(trade_id)
         if not data or data["pending"] or data["state"] != "open":
             raise ValueError("Position is not available for exit")
-        self.update(plan.slug, pending=_pack_plan(plan), order_id=None)
+        if (
+            plan.slug != data["slug"]
+            or plan.outcome != data["outcome"]
+            or plan.quantity > number(data["quantity"])
+        ):
+            raise ValueError("Exit does not belong to this experiment trade")
+        self.update(data["trade_id"], pending=_pack_plan(plan), order_id=None)
 
-    def update(self, slug: str, **fields) -> None:
-        data = self.get(slug)
+    def update(self, trade_id: str, **fields) -> None:
+        data = self.get(trade_id)
         if data is None:
             raise ValueError("Unknown journal position")
         data.update(fields)
         with self.db:
-            self.db.execute("UPDATE trades SET data = ? WHERE slug = ?", (json.dumps(data), slug))
+            self.db.execute(
+                "UPDATE trades SET data = ? WHERE slug = ?", (json.dumps(data), trade_id)
+            )
 
     def finish_order(
-        self, slug: str, quantity: Decimal, notional: Decimal, fee: Decimal | None
+        self,
+        trade_id: str,
+        quantity: Decimal,
+        notional: Decimal,
+        fee: Decimal | None,
+        *,
+        readback_delayed: bool = False,
     ) -> None:
-        data = self.get(slug)
+        data = self.get(trade_id)
         if not data or not data["pending"]:
             raise ValueError("No reserved order to finish")
         plan = pending_plan(data)
@@ -264,6 +293,7 @@ class TradeJournal:
                 "fee": str(fee) if fee is not None else None,
                 "average_price": str(notional / quantity) if quantity else None,
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "readback_delayed": readback_delayed,
                 "request": data["pending"],
             }
         ]
@@ -293,73 +323,83 @@ class TradeJournal:
         if fee is None:
             issues = issues + [f"Unknown collected fee for order {data['order_id']}"]
         self.update(
-            slug, **fields, orders=orders, pending=None, order_id=None, accounting_issues=issues
+            trade_id, **fields, orders=orders, pending=None, order_id=None, accounting_issues=issues
         )
 
-    def settle(self, slug: str, yes_value: Decimal, *, resolution: dict | None = None) -> None:
-        data = self.get(slug)
+    def settle(self, trade_id: str, yes_value: Decimal, *, resolution: dict | None = None) -> None:
+        data = self.get(trade_id)
         if not data or data["pending"] or data["state"] not in {"open", "closed"}:
             raise ValueError("Position cannot be settled")
         if not 0 <= yes_value <= 1:
             raise ValueError("Invalid settlement value")
-        settlement = {
-            "yes_value": str(yes_value),
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
-            "resolution": resolution,
-        }
-        value = yes_value if data["outcome"] == "up" else 1 - yes_value
-        payout = number(data["quantity"]) * value
-        proceeds = number(data["proceeds"]) + payout if data["proceeds"] is not None else None
-        issues = list(data.get("accounting_issues", []))
-        # A provider resolution may disagree with the order's fee/cost fields.
-        # Preserve both sources; never choose one to fabricate an exact result.
-        has_exit_fill = any(
-            o["action"] == "SELL" and number(o["quantity"]) > 0 for o in data["orders"]
-        )
-        if resolution:
-            before = resolution.get("beforePosition", {})
-            bought = retained = Decimal("1")
-            if has_exit_fill:
-                bought = sum(
-                    (number(o["quantity"]) for o in data["orders"] if o["action"] == "BUY"),
-                    Decimal("0"),
-                )
-                sold = sum(
-                    (number(o["quantity"]) for o in data["orders"] if o["action"] == "SELL"),
-                    Decimal("0"),
-                )
-                # Resolution describes only the shares retained after actual sales.
-                # Rebuild this quantity from fills, including for already-settled rows.
-                retained = bought - sold
-            if before.get("cost") is not None and data["entry_cost"] is not None:
-                if amount(before["cost"]) != number(data["entry_cost"]) * retained / bought:
-                    issues.append(RESOLUTION_COST_ISSUE)
-            fees = [o["fee"] for o in data["orders"] if o["action"] == "BUY"]
-            if before.get("fees") is not None and all(fee is not None for fee in fees):
-                if (
-                    amount(before["fees"])
-                    != sum((number(fee) for fee in fees), Decimal("0")) * retained / bought
-                ):
-                    issues.append(RESOLUTION_FEE_ISSUE)
-        if data["state"] == "closed":
-            self.update(
-                slug,
-                settlement=settlement,
-                accounting_issues=issues,
-                pnl=None if issues else data["pnl"],
-            )
+        self.update(trade_id, **_settlement_fields(data, yes_value, resolution))
+
+    def settle_market(
+        self, slug: str, yes_value: Decimal, *, resolution: dict | None = None
+    ) -> None:
+        """Bind one market resolution and atomically pay each retained experiment holding."""
+        rows = [
+            row
+            for row in self.records()
+            if row["slug"] == slug and row["state"] in {"open", "closed"}
+        ]
+        if not rows or any(row["pending"] for row in rows) or not 0 <= yes_value <= 1:
+            raise ValueError("Market is not ready for settlement")
+        if len(rows) == 1:
+            self.settle(rows[0]["trade_id"], yes_value, resolution=resolution)
             return
-        self.update(
-            slug,
-            quantity="0",
-            state="closed",
-            proceeds=_money(proceeds),
-            pnl=_net(proceeds, data["entry_cost"]) if not issues else None,
-            settlement=settlement,
-            settlement_proceeds=str(payout),
-            accounting_issues=issues,
-            closed_at=datetime.now(timezone.utc).isoformat(),
+        if all(row["state"] == "closed" and row.get("settlement") for row in rows):
+            if any(number(row["settlement"]["yes_value"]) != yes_value for row in rows):
+                raise ValueError("Conflicting official settlement outcome")
+            if resolution is None or all(
+                row["settlement"].get("resolution") == resolution for row in rows
+            ):
+                return  # Preserve the payout and its once-only risk reserve on replay.
+        check = _market_resolution_check(rows, resolution) if resolution else None
+        # Reserve an unallocated positive market difference against the worst
+        # retained result, never an earlier winner or an earlier UTC day.
+        retained = [
+            row
+            for row in rows
+            if sum(
+                number(order["quantity"]) * (1 if order["action"] == "BUY" else -1)
+                for order in row["orders"]
+            )
+            > 0
+        ]
+        adjustment_owner = min(
+            retained,
+            key=lambda row: (
+                number(row["proceeds"] or "0")
+                + (
+                    number(row["quantity"])
+                    * (yes_value if row["outcome"] == "up" else 1 - yes_value)
+                    if row["state"] == "open"
+                    else Decimal("0")
+                )
+                - number(row["entry_cost"] or "0")
+            ),
+            default=None,
         )
+        updates = []
+        for row in rows:
+            changes = _settlement_fields(row, yes_value, None)
+            changes["settlement"].update(resolution=resolution, scope="market", market_check=check)
+            if check and check["status"] != "matched":
+                changes["accounting_issues"] = list(
+                    dict.fromkeys(changes["accounting_issues"] + [MARKET_RESOLUTION_ISSUE])
+                )
+                changes["pnl"] = None
+            changes["settlement"]["risk_adjustment"] = (
+                str(max(Decimal("0"), number(check["cost_delta"])))
+                if row == adjustment_owner
+                and check
+                and check["status"] == "tolerated_fee_difference"
+                else "0"
+            )
+            updates.append((json.dumps({**row, **changes}), row["trade_id"]))
+        with self.db:
+            self.db.executemany("UPDATE trades SET data = ? WHERE slug = ?", updates)
 
     def exposure(self) -> Decimal:
         """Funded remaining entry cost plus pending BUY reservations."""
@@ -433,6 +473,14 @@ class TradeJournal:
             raise ValueError(f"{reason} is exhausted or already at risk")
 
 
+def entry_key(slug: str, preset: str | None = None) -> str:
+    # Keep historical/current keys readable by existing tools. The JSON slug
+    # remains the exchange market identity; the SQLite key identifies a trade.
+    if preset not in {None, "earlier", "current", "later", "model-current"}:
+        raise ValueError("Unknown timing experiment")
+    return f"{slug}:{preset}" if preset in {"earlier", "later", "model-current"} else slug
+
+
 def pending_plan(row: dict) -> Plan:
     data = row["pending"]
     return Plan(
@@ -467,6 +515,155 @@ def _pack_plan(plan: Plan) -> dict:
     }
 
 
+def _settlement_fields(data: dict, yes_value: Decimal, resolution: dict | None) -> dict:
+    settlement = {
+        "yes_value": str(yes_value),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "resolution": resolution,
+    }
+    value = yes_value if data["outcome"] == "up" else 1 - yes_value
+    payout = number(data["quantity"]) * value
+    proceeds = number(data["proceeds"]) + payout if data["proceeds"] is not None else None
+    issues = list(data.get("accounting_issues", []))
+    # A provider resolution may disagree with the order's fee/cost fields.
+    # Preserve both sources; never choose one to fabricate an exact result.
+    has_exit_fill = any(o["action"] == "SELL" and number(o["quantity"]) > 0 for o in data["orders"])
+    if resolution:
+        before = resolution.get("beforePosition", {})
+        bought = retained = Decimal("1")
+        if has_exit_fill:
+            bought = sum(
+                (number(o["quantity"]) for o in data["orders"] if o["action"] == "BUY"),
+                Decimal("0"),
+            )
+            sold = sum(
+                (number(o["quantity"]) for o in data["orders"] if o["action"] == "SELL"),
+                Decimal("0"),
+            )
+            # Resolution describes only the shares retained after actual sales.
+            # Rebuild this quantity from fills, including for already-settled rows.
+            retained = bought - sold
+        if before.get("cost") is not None and data["entry_cost"] is not None:
+            if amount(before["cost"]) != number(data["entry_cost"]) * retained / bought:
+                issues.append(RESOLUTION_COST_ISSUE)
+        fees = [o["fee"] for o in data["orders"] if o["action"] == "BUY"]
+        if before.get("fees") is not None and all(fee is not None for fee in fees):
+            if (
+                amount(before["fees"])
+                != sum((number(fee) for fee in fees), Decimal("0")) * retained / bought
+            ):
+                issues.append(RESOLUTION_FEE_ISSUE)
+    if data["state"] == "closed":
+        return dict(
+            settlement=settlement,
+            accounting_issues=issues,
+            pnl=None if issues else data["pnl"],
+        )
+    return dict(
+        quantity="0",
+        state="closed",
+        proceeds=_money(proceeds),
+        pnl=_net(proceeds, data["entry_cost"]) if not issues else None,
+        settlement=settlement,
+        settlement_proceeds=str(payout),
+        accounting_issues=issues,
+        closed_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def _market_resolution_check(rows: list[dict], resolution: dict) -> dict:
+    # A market-wide average-cost pool is a comparison basis, not a claim that
+    # the provider allocates sales to the experiment requesting them. Preserve
+    # a disagreement; never replace order-collected amounts with pooled basis.
+    before = resolution["beforePosition"]
+    expected = sum(
+        (
+            sum(
+                (
+                    number(order["quantity"]) * (1 if order["action"] == "BUY" else -1)
+                    for order in row["orders"]
+                ),
+                Decimal("0"),
+            )
+            * (1 if row["outcome"] == "up" else -1)
+            for row in rows
+        ),
+        Decimal("0"),
+    )
+    if (
+        number(before["netPositionDecimal"]) != expected
+        or number(resolution["afterPosition"]["netPositionDecimal"]) != 0
+    ):
+        raise RuntimeError("Resolution quantities do not match combined experiment ownership")
+    orders = [order for row in rows for order in row["orders"] if number(order["quantity"]) > 0]
+    if any(order.get("readback_delayed") for order in orders) and any(
+        order["action"] == "SELL" for order in orders
+    ):
+        return {
+            "status": "unconfirmed_chronology",
+            "basis": "unknown_execution_order",
+            "expected_cost": None,
+            "expected_fees": None,
+            "cost_delta": None,
+            "fee_delta": None,
+        }
+    quantity = cost = fees = Decimal("0")
+    events = sorted(
+        ((order["recorded_at"], order) for row in rows for order in row["orders"]),
+        key=lambda item: item[0],
+    )
+    for _, order in events:
+        filled = number(order["quantity"])
+        if not filled:
+            continue
+        if order["action"] == "BUY":
+            quantity += filled
+            fee = number(order["fee"]) if order["fee"] is not None else None
+            fees = fees + fee if fees is not None and fee is not None else None
+            cost = (
+                cost + number(order["notional"]) + fee
+                if cost is not None and fee is not None
+                else None
+            )
+        else:
+            if not 0 < filled <= quantity:
+                raise ValueError("Market sale exceeds recorded holdings")
+            fraction = (quantity - filled) / quantity
+            cost = cost * fraction if cost is not None else None
+            fees = fees * fraction if fees is not None else None
+            quantity -= filled
+            if not quantity:
+                cost = fees = Decimal("0")
+    cost_delta = (
+        amount(before["cost"]) - cost
+        if cost is not None and before.get("cost") is not None
+        else None
+    )
+    fee_delta = (
+        amount(before["fees"]) - fees
+        if fees is not None and before.get("fees") is not None
+        else None
+    )
+    status = "unconfirmed"
+    if cost_delta == 0 and fee_delta == 0:
+        status = "matched"
+    elif (
+        cost_delta is not None
+        and fee_delta is not None
+        and cost_delta == fee_delta
+        and abs(fee_delta) <= SETTLEMENT_FEE_TOLERANCE
+    ):
+        status = "tolerated_fee_difference"
+    return {
+        "status": status,
+        "basis": "market_average_cost_comparison",
+        "expected_cost": _money(cost),
+        "expected_fees": _money(fees),
+        "cost_delta": _money(cost_delta),
+        "fee_delta": _money(fee_delta),
+    }
+
+
 def _daily_room(rows: list[dict], bankroll: Decimal) -> Decimal:
     today = datetime.now(timezone.utc).date().isoformat()
     losses = Decimal("0")
@@ -493,6 +690,23 @@ def _risk_entry_cost(row: dict) -> Decimal | None:
     issues = set(row.get("accounting_issues", []))
     if not issues:
         return entry_cost
+    if issues == {MARKET_RESOLUTION_ISSUE}:
+        settlement = row.get("settlement") or {}
+        check = settlement.get("market_check") or {}
+        delta = check.get("cost_delta")
+        if (
+            row["state"] == "closed"
+            and number(row["quantity"]) == 0
+            and not row["pending"]
+            and row["proceeds"] is not None
+            and check.get("status") == "tolerated_fee_difference"
+            and delta is not None
+            and check.get("fee_delta") is not None
+            and number(delta) == number(check["fee_delta"])
+            and abs(number(delta)) <= SETTLEMENT_FEE_TOLERANCE
+        ):
+            return entry_cost + number(settlement.get("risk_adjustment", "0"))
+        return None
     if (
         issues - {RESOLUTION_COST_ISSUE, RESOLUTION_FEE_ISSUE}
         or row["state"] != "closed"
@@ -531,6 +745,7 @@ def _net(proceeds: Decimal | None, entry_cost: str | None) -> str | None:
     return str(proceeds - number(entry_cost))
 
 
+MARKET_RESOLUTION_ISSUE = "Market resolution basis differs from combined order accounting"
 SETTLEMENT_FEE_TOLERANCE = Decimal("0.05")
 RESOLUTION_COST_ISSUE = "Resolution cost differs from recorded entry cost"
 RESOLUTION_FEE_ISSUE = "Resolution fees differ from collected order fees"
