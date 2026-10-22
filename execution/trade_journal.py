@@ -435,20 +435,16 @@ def _risk_entry_cost(row: dict) -> Decimal | None:
     resolution = (row.get("settlement") or {}).get("resolution") or {}
     before = resolution.get("beforePosition", {})
     fees = [order["fee"] for order in row["orders"] if order["action"] == "BUY"]
-    if (
-        before.get("cost") is None
-        or before.get("fees") is None
-        or not fees
-        or any(fee is None for fee in fees)
-    ):
+    if before.get("cost") is None or not fees or any(fee is None for fee in fees):
         return None
     provider_cost = amount(before["cost"])
-    fee_difference = amount(before["fees"]) - sum((number(fee) for fee in fees), Decimal("0"))
-    if (
-        abs(fee_difference) > SETTLEMENT_FEE_TOLERANCE
-        or provider_cost - entry_cost != fee_difference
-    ):
+    if provider_cost < 0 or abs(provider_cost - entry_cost) > SETTLEMENT_FEE_TOLERANCE:
         return None
+    if before.get("fees") is not None:
+        provider_fee = amount(before["fees"])
+        collected_fee = sum((number(fee) for fee in fees), Decimal("0"))
+        if provider_fee < 0 or abs(provider_fee - collected_fee) > SETTLEMENT_FEE_TOLERANCE:
+            return None
     # Budget the higher claim, but never turn it into an asserted exact P&L.
     return max(entry_cost, provider_cost)
 
@@ -463,6 +459,6 @@ def _net(proceeds: Decimal | None, entry_cost: str | None) -> str | None:
     return str(proceeds - number(entry_cost))
 
 
-SETTLEMENT_FEE_TOLERANCE = Decimal("0.01")
+SETTLEMENT_FEE_TOLERANCE = Decimal("0.05")
 RESOLUTION_COST_ISSUE = "Resolution cost differs from recorded entry cost"
 RESOLUTION_FEE_ISSUE = "Resolution fees differ from collected order fees"

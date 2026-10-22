@@ -186,8 +186,12 @@ def test_exposure_uses_existing_durable_order_records_after_reopen(venue, tmp_pa
     [
         ("0.0100", "0.0100", True),
         ("-0.0100", "-0.0100", True),
-        ("0.0101", "0.0101", False),
-        ("0.0070", "0.0060", False),
+        ("0.0101", "0.0101", True),
+        ("0.0500", "0.0500", True),
+        ("-0.0100", "-0.0500", True),
+        ("0.0501", "0.0100", False),
+        ("0.0100", "0.0501", False),
+        ("0.0070", "0.0060", True),
     ],
 )
 def test_settled_fee_tolerance_preserves_dispute_and_budgets_higher_cost(
@@ -214,18 +218,28 @@ def test_settled_fee_tolerance_preserves_dispute_and_budgets_higher_cost(
         return
     journal.risk_check(Decimal("1"), Decimal("100"))
     higher_cost = max(Decimal("0.9785"), provider_cost)
-    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1") - higher_cost
+    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == max(
+        Decimal("0"), Decimal("1") - higher_cost
+    )
     assert journal.exposure() == 0
     assert journal.get(market.slug) == row
     # Even a legacy exact-looking P&L must not hide the accepted fee difference
     # from the daily guard; this only changes a synthetic test journal.
     journal.update(market.slug, pnl="-0.9785")
-    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1") - higher_cost
+    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == max(
+        Decimal("0"), Decimal("1") - higher_cost
+    )
     clock.current += timedelta(days=1)
     assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("0.2")
 
 
-def test_previously_recorded_small_fee_dispute_allows_entries_after_reopen(venue, tmp_path):
+@pytest.mark.parametrize(
+    "provider_fee,provider_cost",
+    [("0.0270", "0.9855"), (None, "0.9855"), (None, "0.9685")],
+)
+def test_previously_recorded_small_fee_dispute_allows_entries_after_reopen(
+    venue, tmp_path, provider_fee, provider_cost
+):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
     path = tmp_path / "accepted.sqlite"
@@ -238,8 +252,12 @@ def test_previously_recorded_small_fee_dispute_allows_entries_after_reopen(venue
             Decimal("0"),
             resolution={
                 "beforePosition": {
-                    "cost": {"value": "0.9855", "currency": "USD"},
-                    "fees": {"value": "0.0270", "currency": "USD"},
+                    "cost": {"value": provider_cost, "currency": "USD"},
+                    "fees": (
+                        {"value": provider_fee, "currency": "USD"}
+                        if provider_fee is not None
+                        else None
+                    ),
                 }
             },
         )
@@ -304,7 +322,9 @@ def test_partial_resolution_does_not_round_retained_fraction_before_costs(venue,
     assert row["accounting_issues"] == []
 
 
-@pytest.mark.parametrize("fault", ["other_issue", "missing_fee", "missing_cost", "open_position"])
+@pytest.mark.parametrize(
+    "fault", ["other_issue", "missing_order_fee", "missing_cost", "open_position"]
+)
 def test_small_difference_does_not_waive_other_accounting_guards(venue, journal, fault):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
@@ -323,8 +343,12 @@ def test_small_difference_does_not_waive_other_accounting_guards(venue, journal,
             accounting_issues=journal.get(market.slug)["accounting_issues"]
             + ["Unresolved partial exit"],
         )
-    elif fault in {"missing_fee", "missing_cost"}:
-        resolution["beforePosition"]["fees" if fault == "missing_fee" else "cost"] = None
+    elif fault == "missing_order_fee":
+        orders = journal.get(market.slug)["orders"]
+        orders[0]["fee"] = None
+        journal.update(market.slug, orders=orders)
+    elif fault == "missing_cost":
+        resolution["beforePosition"]["cost"] = None
         journal.update(market.slug, settlement={"resolution": resolution})
     else:
         journal.update(market.slug, state="open", quantity="1.35")

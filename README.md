@@ -393,8 +393,9 @@ and prints JSON with relevant source fields and timestamps. It does not repair
 a journal or claim an authoritative cash debit. See the maintained
 [fee accounting contract](docs/polymarket-us-api.md#fee-reconciliation).
 
-A fully settled trade's fee dispute does not block new entries when the
-resolution fee and total cost differ from collected-order accounting by the
-same amount, up to $0.01. The report keeps the dispute and unknown exact P&L;
-the daily loss budget uses the higher entry cost. Missing amounts, unsettled
-orders, other accounting issues, and larger differences still require review.
+A fully settled trade's cost or fee dispute does not block new entries when
+each reported difference is at most $0.05. Settlement may omit its fee field
+when the collected order fees and both cost amounts are known. The report keeps
+the dispute and unknown exact P&L; the daily loss budget uses the higher entry
+cost. Unknown order costs or collected fees, unsettled orders, other accounting
+issues, and larger differences still require review.
