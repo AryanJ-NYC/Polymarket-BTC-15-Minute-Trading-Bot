@@ -105,6 +105,49 @@ def test_current_books_use_authenticated_route(venue, monkeypatch):
     assert len(set(venue.book_request_ids)) == 2
 
 
+@pytest.mark.parametrize(
+    "outcome,missing,yes_price", [("up", "offers", "0.99"), ("down", "bids", "0.01")]
+)
+def test_one_sided_book_prices_owned_exit_without_inventing_entry_or_mark(
+    venue, outcome, missing, yes_price
+):
+    market = parse_market(venue.market)
+    venue.bid, venue.ask = ("0.99", "0.99") if outcome == "up" else ("0.01", "0.01")
+
+    def one_sided(request):
+        if not request.url.path.endswith("/book"):
+            return None
+        data = {
+            "marketSlug": market.slug,
+            "state": "MARKET_STATE_OPEN",
+            "transactTime": venue.timestamp,
+            "bids": [{"px": {"value": "0.99", "currency": "USD"}, "qty": "2"}],
+            "offers": [{"px": {"value": "0.01", "currency": "USD"}, "qty": "2"}],
+        }
+        data[missing] = []
+        return httpx.Response(200, json={"marketData": data})
+
+    venue.on_request = one_sided
+    venue.positions = {market.slug: {"netPositionDecimal": "1" if outcome == "up" else "-1"}}
+    book = venue.client.book(market)
+    plan = venue.client.sell_plan(market, book, outcome, Decimal("1"))
+    assert plan.yes_price == Decimal(yes_price)
+    assert plan.notional == Decimal("0.99")
+    assert venue.client.exit_value(market, book, outcome, Decimal("1")) == (
+        Decimal("1"),
+        Decimal("0.97"),
+    )
+    assert venue.client.account().bankroll is None
+    with pytest.raises(ValueError):
+        _ = book.mid
+    for direction in ("up", "down"):
+        with pytest.raises(ValueError):
+            venue.client.buy_plan(market, book, direction, Decimal("1"))
+    with pytest.raises(ValueError):
+        venue.client.sell_plan(market, book, "down" if outcome == "up" else "up", Decimal("1"))
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
 def test_discovery_rejects_two_current_contracts(venue):
     venue.pages = {0: [venue.market, {**venue.market, "slug": "another-btc-contract"}]}
     with pytest.raises(ValueError, match="Multiple"):

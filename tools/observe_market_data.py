@@ -29,7 +29,7 @@ from core.strategy_brain.strategies.btc_15min_strategy import (
     BTCStrategy15Min,
 )
 from execution.market_stream import MarketStream
-from execution.polymarket_client import PolymarketClient
+from execution.polymarket_client import PolymarketClient, quote_reason
 
 
 def main() -> int:
@@ -130,18 +130,19 @@ def main() -> int:
                     eligible_at = time.monotonic()
                     row.update(_book_sample(book))
                     row["available"] = True
-                    decision_started = time.monotonic()
-                    row["context"] = context.snapshot()
-                    strategy.observe(book)
-                    row["decision"] = strategy.decide(market, book, row["context"])
-                    decision_finished = time.monotonic()
-                    row["feature_samples"] = len(strategy.ticks)
-                    row["decision_elapsed_ms"] = (decision_finished - decision_started) * 1000
-                    row["receipt_to_decision_ms"] = (
-                        None
-                        if book.received_at is None
-                        else (decision_finished - book.received_at) * 1000
-                    )
+                    if row["entry_available"]:
+                        decision_started = time.monotonic()
+                        row["context"] = context.snapshot()
+                        strategy.observe(book)
+                        row["decision"] = strategy.decide(market, book, row["context"])
+                        decision_finished = time.monotonic()
+                        row["feature_samples"] = len(strategy.ticks)
+                        row["decision_elapsed_ms"] = (decision_finished - decision_started) * 1000
+                        row["receipt_to_decision_ms"] = (
+                            None
+                            if book.received_at is None
+                            else (decision_finished - book.received_at) * 1000
+                        )
                     if (
                         recovering_since is not None
                         and recovery_injection["status"] == "closed"
@@ -166,7 +167,13 @@ def main() -> int:
                         row["subscription_to_sample_ms"] = (time.monotonic() - subscribed_at) * 1000
                         subscribed_at = None
                 except ValueError as exc:
-                    row.update({"available": False, "reason": type(exc).__name__})
+                    row.update(
+                        {
+                            "available": False,
+                            "reason": type(exc).__name__,
+                            "quote_reason": quote_reason(exc),
+                        }
+                    )
             stream_rows.append(row)
             _append(output / "stream.jsonl", row)
     except Exception as exc:
@@ -387,6 +394,7 @@ class RestBaseline(threading.Thread):
                     {
                         "available": False,
                         "reason": type(exc).__name__,
+                        "quote_reason": quote_reason(exc),
                         "http_status": getattr(exc, "status_code", None),
                     }
                 )
@@ -402,8 +410,12 @@ def _book_sample(book) -> dict:
         "provider_age_ms": (datetime.now(timezone.utc) - book.timestamp).total_seconds() * 1000,
         "receipt_to_observation_ms": None if receipt is None else (observed - receipt) * 1000,
         "generation": getattr(book, "generation", None),
-        "bid": str(book.bids[0][0]),
-        "ask": str(book.asks[0][0]),
+        "bid": str(book.bids[0][0]) if book.bids else None,
+        "ask": str(book.asks[0][0]) if book.asks else None,
+        "entry_available": book.entry_reason is None,
+        "up_exit_available": bool(book.bids),
+        "down_exit_available": bool(book.asks),
+        "quote_reason": book.entry_reason,
     }
 
 
@@ -413,6 +425,10 @@ def _sample_summary(rows: list[dict]) -> dict:
         "samples": len(rows),
         "available_samples": len(available),
         "unavailable_samples": len(rows) - len(available),
+        "entry_available_samples": sum(row.get("entry_available", False) for row in rows),
+        "quote_rejection_reasons": dict(
+            Counter(row["quote_reason"] for row in rows if row.get("quote_reason") is not None)
+        ),
         "provider_age_ms": _quantiles([row["provider_age_ms"] for row in available]),
     }
     for metric in (
@@ -501,6 +517,10 @@ def _report(summary: dict) -> str:
         f"Fatal error class: {summary['fatal_error_class'] or 'none'}.",
         f"Decision policy: {summary['strategy']['policy_version']}; model=None (default fusion).",
         "Probability-model inference/EV selection, account sizing, and order submission are outside this observation.",
+        "",
+        "Book availability includes valid one-sided exit quotes; midpoint decisions require entry availability.",
+        f"Stream entry samples: {summary['stream']['entry_available_samples']}; quote reasons: {json.dumps(summary['stream']['quote_rejection_reasons'], sort_keys=True)}.",
+        f"REST entry samples: {summary['rest_baseline']['entry_available_samples']}; quote reasons: {json.dumps(summary['rest_baseline']['quote_rejection_reasons'], sort_keys=True)}.",
         "",
         "Quantiles use nearest rank. Milliseconds; sample counts include only available values.",
         "",

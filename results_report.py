@@ -9,6 +9,8 @@ from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
+from execution.polymarket_client import QuoteUnavailable
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -23,16 +25,23 @@ def main() -> int:
         rows = [json.loads(raw) for (raw,) in db.execute("SELECT data FROM trades ORDER BY rowid")]
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         decisions = {}
+        quote_reasons = Counter()
         if "opportunities" in tables:
             for (raw,) in db.execute("SELECT data FROM opportunities"):
                 opportunity = json.loads(raw)
                 policy = _policy(opportunity)
                 decisions.setdefault(policy, Counter())[opportunity["decision"]] += 1
+                if (
+                    opportunity["decision"] == "book_unavailable"
+                    or opportunity.get("quote_reason") is not None
+                ):
+                    quote_reasons[QuoteUnavailable(opportunity.get("quote_reason")).reason] += 1
     report = summarize(rows)
     report["opportunity_count"] = sum(sum(counts.values()) for counts in decisions.values())
     report["opportunity_decisions"] = {
         policy: dict(sorted(counts.items())) for policy, counts in sorted(decisions.items())
     }
+    report["quote_rejection_reasons"] = dict(sorted(quote_reasons.items()))
     report["trades"] = rows
     if args.json:
         print(json.dumps(report, indent=2))

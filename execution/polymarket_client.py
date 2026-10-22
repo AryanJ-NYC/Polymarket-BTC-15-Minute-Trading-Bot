@@ -108,6 +108,8 @@ class PolymarketClient:
 
     def buy_plan(self, market: Market, book: Book, outcome: str, budget: Decimal) -> Plan:
         validate_book(market, book)
+        if book.entry_reason:
+            raise QuoteUnavailable(book.entry_reason)
         if outcome not in {"up", "down"} or not budget.is_finite() or budget <= ZERO:
             raise ValueError("Expected Up/Down and a finite positive entry budget")
         yes_price, available = book.asks[0] if outcome == "up" else book.bids[0]
@@ -126,9 +128,12 @@ class PolymarketClient:
 
     def sell_plan(self, market: Market, book: Book, outcome: str, quantity: Decimal) -> Plan:
         validate_book(market, book)
-        if outcome not in {"up", "down"}:
-            raise ValueError("Expected Up or Down")
-        yes_price, available = book.bids[0] if outcome == "up" else book.asks[0]
+        if outcome not in {"up", "down"} or not quantity.is_finite() or quantity <= ZERO:
+            raise ValueError("Expected Up/Down and a finite positive exit quantity")
+        levels = book.bids if outcome == "up" else book.asks
+        if not levels:
+            raise QuoteUnavailable("missing_bids" if outcome == "up" else "missing_offers")
+        yes_price, available = levels[0]
         quantity = _floor(min(quantity, available), market.increment)
         if quantity < market.increment:
             raise ValueError("Position or visible depth is below the minimum trade quantity")
@@ -142,10 +147,10 @@ class PolymarketClient:
         validate_book(market, book)
         if outcome not in {"up", "down"} or not quantity.is_finite() or quantity <= ZERO:
             raise ValueError("Expected Up/Down and a finite positive exit quantity")
+        if not (book.bids if outcome == "up" else book.asks):
+            raise QuoteUnavailable("missing_bids" if outcome == "up" else "missing_offers")
         remaining, net = quantity, ZERO
         for yes_price, available in book.bids if outcome == "up" else book.asks:
-            if yes_price % market.tick:
-                raise ValueError("Book price is not aligned to the market tick")
             sellable = _floor(min(remaining, available), market.increment)
             if sellable == ZERO:
                 continue
@@ -292,7 +297,7 @@ class PolymarketClient:
         try:
             data = response["marketData"]
         except (KeyError, TypeError) as exc:
-            raise ValueError("Malformed market book response") from exc
+            raise QuoteUnavailable("malformed_fields") from exc
         return _parse_book(slug, data)
 
     def _bankroll(
@@ -367,11 +372,33 @@ def parse_book(market: Market, data: dict) -> Book:
 
 
 def validate_book(market: Market, book: Book) -> None:
-    """Enforce one executable quote policy for every transport and order plan."""
+    """Validate a snapshot; each consumer separately requires its needed sides."""
     now = datetime.now(timezone.utc)
-    if not market.tradable or book.slug != market.slug or not market.start <= now < market.end:
-        raise ValueError("Contract is not currently tradable")
+    if book.slug != market.slug:
+        raise QuoteUnavailable("wrong_contract")
+    if not market.tradable:
+        raise QuoteUnavailable("closed_contract")
+    if not market.start <= now < market.end:
+        raise QuoteUnavailable("expired_contract")
+    if not book.bids and not book.asks:
+        raise QuoteUnavailable("empty_book")
+    if book.bids and book.asks and book.bids[0][0] >= book.asks[0][0]:
+        raise QuoteUnavailable("crossed_book")
+    if any(
+        not price.is_finite()
+        or not ZERO < price < ONE
+        or price % market.tick
+        or not quantity.is_finite()
+        or quantity <= ZERO
+        for price, quantity in (*book.bids, *book.asks)
+    ):
+        raise QuoteUnavailable("malformed_fields")
     _validate_quote_age(book)
+
+
+def quote_reason(exc: Exception) -> str:
+    """Expose only known quote reason codes, never provider exception text."""
+    return exc.reason if isinstance(exc, QuoteUnavailable) else "unknown"
 
 
 def retryable_api_error(exc: Exception, *, missing: bool = False) -> bool:
@@ -458,6 +485,8 @@ def _credential(config: dict, *names: str) -> str:
 
 
 def _levels(rows: list[dict], *, reverse: bool) -> tuple:
+    if not isinstance(rows, list):
+        raise QuoteUnavailable("malformed_fields")
     levels = [(amount(row["px"]), number(row["qty"])) for row in rows]
     if any(not ZERO < price < ONE or quantity < ZERO for price, quantity in levels):
         raise ValueError("Invalid order book level")
@@ -466,29 +495,37 @@ def _levels(rows: list[dict], *, reverse: bool) -> tuple:
 
 def _parse_book(slug: str, data: dict) -> Book:
     try:
-        if data["marketSlug"] != slug or data["state"] != "MARKET_STATE_OPEN":
-            raise ValueError("Market book is not open or belongs to another contract")
+        if data["marketSlug"] != slug:
+            raise QuoteUnavailable("wrong_contract")
+        if data["state"] != "MARKET_STATE_OPEN":
+            raise QuoteUnavailable("closed_contract")
         timestamp = parse_time(data["transactTime"])
         bids = _levels(data["bids"], reverse=True)
         asks = _levels(data["offers"], reverse=False)
-        if not bids or not asks or bids[0][0] >= asks[0][0]:
-            raise ValueError("Missing or crossed order book")
+        if not bids and not asks:
+            raise QuoteUnavailable("empty_book")
+        if bids and asks and bids[0][0] >= asks[0][0]:
+            raise QuoteUnavailable("crossed_book")
         book = Book(slug, bids, asks, timestamp)
         _validate_quote_age(book)
         return book
-    except (KeyError, TypeError, AttributeError) as exc:
-        raise ValueError("Malformed market book") from exc
+    except QuoteUnavailable:
+        raise
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise QuoteUnavailable("malformed_fields") from exc
 
 
 def _validate_quote_age(book: Book) -> None:
     age = (datetime.now(timezone.utc) - book.timestamp).total_seconds()
-    if not -BOOK_FUTURE_TOLERANCE_SECONDS <= age <= BOOK_MAX_AGE_SECONDS:
-        raise ValueError("Market book timestamp is stale or in the future")
+    if age > BOOK_MAX_AGE_SECONDS:
+        raise QuoteUnavailable("stale_timestamp")
+    if age < -BOOK_FUTURE_TOLERANCE_SECONDS:
+        raise QuoteUnavailable("future_timestamp")
     if (
         book.received_at is not None
         and not 0 <= monotonic() - book.received_at <= BOOK_MAX_AGE_SECONDS
     ):
-        raise ValueError("Order book receipt is stale")
+        raise QuoteUnavailable("stale_receipt")
 
 
 def _floor(value: Decimal, increment: Decimal) -> Decimal:
@@ -548,7 +585,19 @@ class Book:
 
     @property
     def mid(self) -> Decimal:
+        if self.entry_reason:
+            raise QuoteUnavailable(self.entry_reason)
         return (self.bids[0][0] + self.asks[0][0]) / 2
+
+    @property
+    def entry_reason(self) -> str | None:
+        if not self.bids and not self.asks:
+            return "empty_book"
+        if not self.bids:
+            return "missing_bids"
+        if not self.asks:
+            return "missing_offers"
+        return None
 
     def signal_book(self) -> dict:
         return {
@@ -582,6 +631,14 @@ class Account:
     bankroll: Decimal | None
 
 
+class QuoteUnavailable(ValueError):
+    """A bounded, public-safe reason a quote cannot serve the requested use."""
+
+    def __init__(self, reason: str | None):
+        self.reason = reason if isinstance(reason, str) and reason in QUOTE_REASONS else "unknown"
+        super().__init__(QUOTE_REASONS[self.reason])
+
+
 class OrderPreflightError(ValueError):
     """The order create endpoint was never called; reservation can be released."""
 
@@ -603,6 +660,24 @@ ONE = Decimal("1")
 CENT = Decimal("0.01")
 BOOK_MAX_AGE_SECONDS = 35
 BOOK_FUTURE_TOLERANCE_SECONDS = 5
+QUOTE_REASONS = {
+    "missing_bids": "Market book has no positive bids",
+    "missing_offers": "Market book has no positive offers",
+    "empty_book": "Market book has no positive bids or offers",
+    "crossed_book": "Market book is crossed",
+    "conflicting_snapshot": "Market book contents changed at the same timestamp",
+    "stale_timestamp": "Market book timestamp is stale or in the future (stale)",
+    "future_timestamp": "Market book timestamp is stale or in the future (future)",
+    "stale_receipt": "Order book receipt is stale",
+    "closed_contract": "Market book or contract is not open",
+    "wrong_contract": "Market book belongs to another contract",
+    "expired_contract": "Contract is outside its tradable measurement window",
+    "malformed_fields": "Malformed market book fields (price, quantity, timestamp or market tick)",
+    "connection_unavailable": "Stream connection unavailable",
+    "subscription_unavailable": "Stream subscription unavailable",
+    "book_unavailable": "Stream awaiting a current validated snapshot",
+    "unknown": "Quote unavailable for an unknown reason",
+}
 TERMINAL_STATES = {
     "ORDER_STATE_FILLED",
     "ORDER_STATE_CANCELED",

@@ -236,7 +236,7 @@ def test_context_summary_counts_decision_availability_and_all_request_attempts()
     }
 
 
-@pytest.mark.parametrize("stop_reason", ["duration", "signal", "failure"])
+@pytest.mark.parametrize("stop_reason", ["duration", "signal", "failure", "one_sided"])
 def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
     monkeypatch, tmp_path, stop_reason
 ):
@@ -254,10 +254,13 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
     snapshots = []
     handlers = {}
     market = SimpleNamespace(slug="test-market")
-    book = SimpleNamespace(
+    from execution.polymarket_client import Book
+
+    book = Book(
+        slug="test-market",
         timestamp=datetime.now(timezone.utc),
         bids=[(Decimal("0.60"), Decimal("10"))],
-        asks=[(Decimal("0.61"), Decimal("10"))],
+        asks=[] if stop_reason == "one_sided" else [(Decimal("0.61"), Decimal("10"))],
         received_at=0.0,
         generation=1,
     )
@@ -359,7 +362,7 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
     clock = itertools.count(0, 0.1)
     assert observer.main() == (1 if stop_reason == "failure" else 0)
 
-    assert selected
+    assert bool(selected) is (stop_reason != "one_sided")
     assert len(snapshots) == len(selected) + 1  # Final counter snapshot after cleanup.
     assert events == [
         "context_started",
@@ -376,7 +379,13 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
     assert summary["read_only"]["journal_opened"] is False
     if stop_reason != "failure":
         rows = observer._read_rows(output / "stream.jsonl")
-        assert [row["context"] for row in rows] == selected
+        assert [row["context"] for row in rows if "context" in row] == selected
+        if stop_reason == "one_sided":
+            assert rows
+            assert all(row["available"] and row["up_exit_available"] for row in rows)
+            assert all(row["entry_available"] is False for row in rows)
+            assert all(row["quote_reason"] == "missing_offers" for row in rows)
+            assert all(row["ask"] is None for row in rows)
         assert summary["context"]["decision_snapshots"] == len(selected)
     report = (output / "report.md").read_text()
     assert "Supporting context" in report

@@ -9,7 +9,15 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from execution.polymarket_client import Book, Market, Plan, amount, number, parse_time
+from execution.polymarket_client import (
+    Book,
+    Market,
+    Plan,
+    QuoteUnavailable,
+    amount,
+    number,
+    parse_time,
+)
 from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
 
 
@@ -60,6 +68,8 @@ class TradeJournal:
         decision: str,
         outcome: str | None = None,
         settings: dict | None = None,
+        *,
+        quote_reason: str | None = None,
     ) -> int:
         now = datetime.now(timezone.utc)
         data = {
@@ -69,19 +79,25 @@ class TradeJournal:
             "window_end": market.end.isoformat(),
             "time_remaining_seconds": (market.end - now).total_seconds(),
             "decision": decision,
+            "quote_reason": (
+                QuoteUnavailable(quote_reason).reason
+                if decision == "book_unavailable" or quote_reason is not None
+                else None
+            ),
             "outcome": outcome,
             "settings": settings,
             "book": None,
         }
         if book is not None:
+            two_sided = bool(book.bids and book.asks)
             data["book"] = {
                 "quote_timestamp": book.timestamp.isoformat(),
-                "midpoint": str(book.mid),
-                "spread": str(book.asks[0][0] - book.bids[0][0]),
-                "bid": str(book.bids[0][0]),
-                "ask": str(book.asks[0][0]),
-                "bid_quantity": str(book.bids[0][1]),
-                "ask_quantity": str(book.asks[0][1]),
+                "midpoint": str(book.mid) if two_sided else None,
+                "spread": str(book.asks[0][0] - book.bids[0][0]) if two_sided else None,
+                "bid": str(book.bids[0][0]) if book.bids else None,
+                "ask": str(book.asks[0][0]) if book.asks else None,
+                "bid_quantity": str(book.bids[0][1]) if book.bids else None,
+                "ask_quantity": str(book.asks[0][1]) if book.asks else None,
                 "depth_scope": "top_level",
                 "fee_coefficient": str(market.fee_coefficient),
             }
