@@ -765,21 +765,21 @@ def _market_resolution_check(rows: list[dict], resolution: dict) -> dict:
 
 def _daily_room(rows: list[dict], bankroll: Decimal) -> Decimal:
     today = datetime.now(timezone.utc).date().isoformat()
-    losses = Decimal("0")
+    realized_pnl = Decimal("0")
     costs = _risk_entry_costs(rows)
     for row in rows:
-        if not row.get("closed_at", "").startswith(today):
+        if row["state"] != "closed" or not row.get("closed_at", "").startswith(today):
             continue
         pnl = row["pnl"]
-        if (pnl is None or row.get("accounting_issues")) and row["state"] == "closed":
+        if pnl is None or row.get("accounting_issues"):
             entry_cost = costs[row["trade_id"]]
             if entry_cost is not None and row["proceeds"] is not None:
                 pnl = number(row["proceeds"]) - entry_cost
         if pnl is not None:
-            losses += min(Decimal("0"), number(pnl))
-    # Preserve the existing conservative daily guard, even after partial exits.
+            realized_pnl += number(pnl)
+    # Realized profits replenish the budget; partial exits keep the full cost reserved.
     at_risk = sum(number(row["entry_cost"]) for row in rows if row["state"] == "open")
-    return bankroll * DAILY_LOSS_FRACTION + losses - at_risk
+    return bankroll * DAILY_LOSS_FRACTION + realized_pnl - at_risk
 
 
 def _risk_entry_costs(rows: list[dict]) -> dict[str, Decimal | None]:
