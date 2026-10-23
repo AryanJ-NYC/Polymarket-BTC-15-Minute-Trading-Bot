@@ -709,16 +709,36 @@ def _risk_entry_cost(row: dict) -> Decimal | None:
         settlement = row.get("settlement") or {}
         check = settlement.get("market_check") or {}
         delta = check.get("cost_delta")
+        before = (settlement.get("resolution") or {}).get("beforePosition") or {}
+        # Older saved checks mark an omitted provider fee as unconfirmed even
+        # when known collected costs match exactly. No extra reserve is needed.
+        missing_fee_with_matching_cost = (
+            check.get("status") == "unconfirmed"
+            and delta is not None
+            and number(delta) == 0
+            and check.get("fee_delta") is None
+            and check.get("expected_cost") is not None
+            and check.get("expected_fees") is not None
+            and number(check["expected_fees"]) >= 0
+            and before.get("fees") is None
+            and before.get("cost") is not None
+            and amount(before["cost"]) == number(check["expected_cost"]) >= 0
+        )
         if (
             row["state"] == "closed"
             and number(row["quantity"]) == 0
             and not row["pending"]
             and row["proceeds"] is not None
-            and check.get("status") == "tolerated_fee_difference"
             and delta is not None
-            and check.get("fee_delta") is not None
-            and number(delta) == number(check["fee_delta"])
             and abs(number(delta)) <= SETTLEMENT_FEE_TOLERANCE
+            and (
+                missing_fee_with_matching_cost
+                or (
+                    check.get("status") == "tolerated_fee_difference"
+                    and check.get("fee_delta") is not None
+                    and number(delta) == number(check["fee_delta"])
+                )
+            )
         ):
             return entry_cost + number(settlement.get("risk_adjustment", "0"))
         return None

@@ -589,3 +589,9 @@ when the collected order fees and both cost amounts are known. The report keeps
 the dispute and unknown exact P&L; the daily loss budget uses the higher entry
 cost. Unknown order costs or collected fees, unsettled orders, other accounting
 issues, and larger differences still require review.
+
+For a market shared by multiple policy lots, an omitted settlement fee also
+allows admission when the provider's remaining cost matches the known order
+cost exactly and collected fees and execution order are known. This applies
+to already saved checks without rewriting journal evidence. Raw warnings and
+unknown exact P&L remain; missing-fee cases with a cost difference still block.
