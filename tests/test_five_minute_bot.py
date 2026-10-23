@@ -662,6 +662,107 @@ def test_due_history_waits_until_after_the_five_minute_decision_and_order(
     assert journal.pending_contracts() == []
 
 
+@pytest.mark.parametrize(
+    "live,retained,settlement,expected_entry",
+    [(False, True, 1, True), (True, False, 1, True), (True, True, None, False)],
+    ids=["paper-retained", "live-fully-sold", "live-unresolved-retained"],
+)
+def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_live_guard(
+    venue,
+    journal,
+    stream_feed,
+    clock,
+    five_minute_market,
+    actual_fills,
+    live,
+    retained,
+    settlement,
+    expected_entry,
+):
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    decision_time = clock.current
+    ended = replace(
+        five_minute_market,
+        slug="previous-owned-five-minute",
+        start=five_minute_market.start - timedelta(seconds=300),
+        end=five_minute_market.start,
+    )
+    current_book = stream_feed.books.book(five_minute_market)
+    clock.current = ended.start + timedelta(seconds=100)
+    book = replace(
+        current_book,
+        slug=ended.slug,
+        timestamp=clock.current,
+    )
+    plan = venue.client.buy_plan(ended, book, "up", Decimal("2"), deadline=ended.end)
+    old_id = ended.slug + ":five-minute"
+    journal.reserve_entry(plan, ended.end, settings=dict(bot.FIVE_MINUTE_SETTINGS))
+    journal.finish_order(old_id, Decimal("0.5"), Decimal("0.45"), Decimal("0.01"))
+    if not retained:
+        exit_plan = venue.client.sell_plan(ended, book, "up", Decimal("0.5"))
+        journal.reserve_exit(old_id, exit_plan)
+        journal.finish_order(old_id, Decimal("0.5"), Decimal("0.44"), Decimal("0.01"))
+    old_row = journal.get(old_id)
+    # The unresolved-live case deliberately has no remaining provider position;
+    # disappearance alone must not release the journal's funded holding.
+    assert venue.positions == {}
+    clock.current = decision_time
+    handler = venue.on_request
+    settlement_reads, create_times = [], []
+
+    def slow_settlement(request):
+        if request.url.path == f"/v1/markets/{ended.slug}/settlement":
+            settlement_reads.append(clock.current)
+            clock.current += timedelta(seconds=10)
+            return (
+                httpx.Response(404, json={"error": "Not resolved"})
+                if settlement is None
+                else httpx.Response(200, json={"slug": ended.slug, "settlement": settlement})
+            )
+        if request.method == "POST" and request.url.path == "/v1/orders":
+            create_times.append(clock.current)
+        return handler(request)
+
+    venue.on_request = slow_settlement
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=live)
+    trader.tick()
+    assert settlement_reads == []
+    assert journal.get(old_id) == old_row
+    entry = journal.get(five_minute_market.slug + ":five-minute")
+    assert (entry is not None) is expected_entry
+    if entry is not None:
+        assert entry["state"] == "open"
+        assert entry["orders"][0]["recorded_at"] == decision_time.isoformat()
+        assert entry["settings"]["entry_bankroll_fraction"] == "0.02"
+        assert entry["settings"]["max_exposure_fraction"] == "0.10"
+        assert entry["settings"]["daily_loss_fraction"] == "0.10"
+    if live:
+        assert create_times == ([decision_time] if expected_entry else [])
+    if not expected_entry:
+        assert any(
+            row["decision"] == "position_monitoring_unavailable" for row in journal.opportunities()
+        )
+        assert journal.exposure() == Decimal("0.46")
+
+    clock.current = decision_time + timedelta(seconds=1)
+    trader.tick()
+    assert settlement_reads == [decision_time + timedelta(seconds=1)]
+    assert len(create_times) == (1 if live and expected_entry else 0)
+    if settlement is None:
+        assert journal.get(old_id) == old_row
+        assert journal.get(five_minute_market.slug + ":five-minute") is None
+    else:
+        assert journal.get(old_id)["settlement"]["yes_value"] == "1"
+        assert Decimal(journal.get(old_id)["quantity"]) == 0
+    assert (
+        sum(
+            row["slug"] == five_minute_market.slug and row["decision"] == "decision_started"
+            for row in journal.opportunities()
+        )
+        == 1
+    )
+
+
 @pytest.fixture
 def five_minute_market(venue, stream_feed, clock):
     row = copy.deepcopy(venue.market)

@@ -1341,7 +1341,13 @@ class TradingBot:
             try:
                 if datetime.now(timezone.utc) >= parse_time(row["end"]):
                     if not row.get("settlement"):
-                        unavailable = not self._settle_position(row) or unavailable
+                        if self._five_minute_admission is not None:
+                            # Settle on the next tick, after this one-shot decision.
+                            # Retained live shares still pause entry; paper lots
+                            # remain funded in the unchanged shared risk checks.
+                            unavailable = (self.live and number(row["quantity"]) > 0) or unavailable
+                        else:
+                            unavailable = not self._settle_position(row) or unavailable
                     continue
                 if row["state"] != "open":
                     continue
