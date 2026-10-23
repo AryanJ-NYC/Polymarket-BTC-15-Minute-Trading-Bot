@@ -15,6 +15,11 @@ python -m tools.collect_research_data --env-file /path/to/.env.us --output logs/
 - Original SDK market-data messages for current and near-upcoming contracts,
   including every supplied book level, one-sided/empty books, duplicate updates,
   provider timestamps and state. Capture precedes trading-specific filtering.
+- Polymarket `SUBSCRIPTION_TYPE_TRADE` messages for the same contracts, on the
+  same market socket. Parsed SDK payloads retain provider price/quantity strings,
+  timestamps, trade IDs/states, maker/taker fields and duplicate/corrected records
+  unchanged. These are parsed messages, not original network bytes. Undefined
+  intent and outcome fields remain undefined; quantity units are not normalized.
 - Full typed market metadata, thresholds, reference index, windows, rule text,
   fees and eventual official outcomes, whenever returned by the public API.
   Changed versions are retained; unresolved identities survive restarts.
@@ -69,6 +74,33 @@ Two observed prices do not prove both legs could fill. Outcomes from resolved
 metadata are labels, never features available earlier. Neither dataset establishes
 a profitable strategy by itself.
 
+Polymarket books retain the `market_message` record kind. Messages bound to trade
+requests, plus unbound trade payloads, use `market_trade_message`. Known requests
+route by their expected type, so even a mismatched trade payload on a book request
+remains `market_message`. Both kinds record the expected `subscription_type`,
+request ID and bound contract slug. Bindings are installed before subscribing,
+and both subscription types roll over and reconnect together. A `subscribed`
+record means the SDK completed sending the subscription, not that the provider
+acknowledged it; no provider acknowledgement state is inferred.
+Each payload is archived once through the SDK's generic message callback.
+`binding_status:valid` requires the active connection, matching request/type and
+matching payload `marketSlug`. Control replies, unknown requests, mismatched
+types/slugs, malformed payload shapes and late messages from a retired connection
+are retained with an explicit non-valid status. Their payloads must not be used
+as bound book or trade observations. Provider values are retained without proving
+their economic validity or interpreting a trade state as a fill.
+The first socket close, error callback or provider error envelope marks its
+generation inactive immediately and records one shared connection gap. Buffered
+messages received afterward remain archived but cannot refresh either feed's
+health, even before the reconnect loop resumes.
+
+The trade channel does not prove a complete execution tape. A short observation
+found interior differences between received trades and cumulative book counters.
+Preserve those discrepancies and connection gaps in derived datasets. Aggregate
+books and public trade prints do not establish hypothetical queue priority or
+maker fills. Quiet trade intervals are normal and do not trigger reconnection;
+the existing shared socket message-idle timeout still applies.
+
 ## Storage and health
 
 Output contains daily `YYYY-MM-DD-SESSION.jsonl.gz` files, `status.json`,
@@ -89,6 +121,14 @@ Preserve and inspect any damaged tail before consuming that archive.
 written, queued and dropped record counts, and unavailable BRTI status. Its own
 `checked_at` must be recent: a stopped process leaves its last status on disk.
 Socket connectivity alone does not prove either horizon is delivering books.
+`last_book_received_at` and the separate `last_market_trade_received_at` maps
+advance only for correctly bound data accepted by the archive queue. Trade
+receipts never refresh book health, and control/invalid messages or queue drops
+refresh neither. These receipts are not fsync acknowledgements; the accepted,
+queued and written counters describe writer progress separately. The trade
+`last_market_trade_provider_timestamp` map preserves the last supplied event
+timestamp separately from local receipt time; provider and collector clocks can
+differ. No trade age or receipt counter implies completeness.
 The separate `spot` health object distinguishes socket `connected` from
 subscription `subscribed`, and records its generation, last message receipt,
 snapshot receipt, live trade-update receipt and provider trade timestamp.
