@@ -298,10 +298,12 @@ class TradingBot:
                 sizing_policy="bankroll-percentage-v1",
             )
         if kelly:
+            self._model_settings.pop("take_profit")
             self._model_settings.update(
                 policy_version="btc-15m-model-kelly-v1",
                 sizing_policy="quarter-kelly-v3",
-                exit_policy="model-settlement-v1",
+                exit_policy="model-loss-15-v1",
+                stop_loss="-0.15",
                 entry_bankroll_fraction=str(KELLY_MAX_BANKROLL_FRACTION),
                 kelly_multiplier=str(KELLY_MULTIPLIER),
             )
@@ -1086,6 +1088,7 @@ class TradingBot:
             if plan.action == "BUY" and (settings or {}).get("exit_policy") in {
                 "settlement-only-v1",
                 "model-settlement-v1",
+                "model-loss-15-v1",
             }:
                 self.journal.record_opportunity(
                     market,
@@ -1537,11 +1540,15 @@ class TradingBot:
                 "position" if remaining == 0 else "slice (remainder unpriced)",
                 change,
             )
-            settings = row.get("settings") or self.settings
-            if change <= number(settings.get("stop_loss", self.settings["stop_loss"])) or (
-                remaining == 0
+            settings = row.get("settings") or self._baseline_settings
+            if change <= number(
+                settings.get("stop_loss", self._baseline_settings["stop_loss"])
+            ) or (
+                settings.get("exit_policy") != "model-loss-15-v1"
+                and remaining == 0
                 and plan.quantity == number(row["quantity"])
-                and change >= number(settings.get("take_profit", self.settings["take_profit"]))
+                and change
+                >= number(settings.get("take_profit", self._baseline_settings["take_profit"]))
             ):
                 if self.live:
                     try:
@@ -1685,12 +1692,12 @@ def _experiment_arm(experiment_id: str, slug: str) -> str:
 
 
 def _kelly_experiment_id(requested_id: str) -> str:
-    """Keep legacy results separate when the unchanged service adopts Kelly."""
-    suffix = ".kelly-v3"
+    """Keep saved cohorts separate when the service adopts the model loss exit."""
+    suffix = ".kelly-v3.stop15-v1"
     if len(requested_id) + len(suffix) <= 64:
         return requested_id + suffix
     digest = hashlib.sha256(requested_id.encode()).hexdigest()[:16]
-    return requested_id[:38] + "." + digest + suffix
+    return requested_id[: 64 - len(suffix) - len(digest) - 1] + "." + digest + suffix
 
 
 MINUTE_FIVE_SETTINGS = {

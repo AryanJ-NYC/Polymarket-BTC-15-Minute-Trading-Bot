@@ -503,13 +503,13 @@ python bot.py --live --model logs/candidate.json --experiment-id btc-four-compar
 
 The three baseline timing entries and minute-five policy run alongside one model
 entry at 13:00–14:00. Each slot has its own durable attempt and saved policy, including a `model-current`
-trade key. Model entries use fee-aware quarter Kelly capped at 4% and hold to
-settlement; baseline entries keep their 2% target and saved exits. There is no
+trade key. Model entries use fee-aware quarter Kelly capped at 4% with a 15%
+loss exit, otherwise holding to settlement; baseline entries keep their 2% target and saved exits. There is no
 additional allowance: all five share the same 10% exposure/daily-loss fractions
 and five-open-trade guard. These shared limits can block later slots.
 
 Model comparisons default to quarter Kelly. The supplied ID becomes a separate
-Kelly cohort ending in `.kelly-v3`; a restart of the same command reuses it.
+Kelly stop cohort ending in `.kelly-v3.stop15-v1`; a restart of the same command reuses it.
 `--no-kelly` retains the original ID and legacy fixed-percentage model behavior.
 Registration pins `same-contract-v1`, all timing windows, baseline/model settings,
 minute-five settings, model tag and the admission-order rule. A comparison enrolled
@@ -584,9 +584,10 @@ preview cannot extend the minute-14 cutoff.
 Decision settings retain the full model JSON, its SHA-256 tag, q, candidate
 quantities, prices, fee bounds and EV. `results_report.py` adds `by_policy` metrics
 for each model tag and baseline policy, using actual fills, fees and P&L; it does
-not treat prediction scores as trading returns. Default model entries hold to
-settlement. Baseline and `--no-kelly` entries retain price exits, so their entry
-EV is a settlement-payoff estimate, not a promise about earlier exit returns.
+not treat prediction scores as trading returns. Default model entries attempt a
+15% loss exit and otherwise hold to settlement. Baseline and `--no-kelly` entries
+retain their existing price exits. Entry EV remains a settlement-payoff estimate,
+not a promise about earlier exit returns.
 
 Track each experiment's sample counts, checks, deployed revision, prediction
 metrics and actual execution results in its GitHub issue or PR. Automated fixture
@@ -606,8 +607,8 @@ optional explicit spelling of the default. `--no-kelly` selects the legacy
 2% model sizing and price exits.
 
 Assigned and simultaneous comparisons automatically use a separate immutable
-Kelly cohort: the supplied `--experiment-id` gains `.kelly-v3`. IDs longer than
-55 characters use a readable prefix and stable hash to stay within 64 characters;
+Kelly stop cohort: the supplied `--experiment-id` gains `.kelly-v3.stop15-v1`. IDs too long
+for that suffix use a readable prefix and stable hash to stay within 64 characters;
 the original ID is saved in the configuration. Logs show both IDs. Pass the
 original supplied ID again on restart. `--no-kelly` uses that original ID and
 configuration. Model/cost changes still require a new supplied ID.
@@ -615,9 +616,9 @@ configuration. Model/cost changes still require a new supplied ID.
 The existing DigitalOcean command already selects a model and runs without
 duration/trade-count limits. When this release reaches passing main CI, the
 enabled updater deploys it at the next flat-account quiet window and resumes the
-active service with default Kelly. No additional service flag is needed. Its
-current comparison becomes `btc-five-20261022-a0201afd.kelly-v3`, preserving the
-old results. The updater checks every five minutes; merge does not bypass its
+active service with default Kelly and the loss exit. No additional service flag is needed. Its
+current comparison becomes `btc-five-20261022-a0201afd.kelly-v3.stop15-v1`, preserving
+the previous `.kelly-v3` settlement cohort and legacy results. The updater checks every minute; merge does not bypass its
 CI, flat-account or reconciliation requirements. Existing recoverable-failure
 restart behavior and operator/reconciliation stops remain intact.
 
@@ -641,12 +642,28 @@ existing shared 10% funded exposure, 10% daily net-loss budget and five-position
 limits still apply. Final quote checks, including after preview, also reject a
 planned stake if the refreshed probability no longer supports its size.
 
-New Kelly model trades **hold to official settlement**, because this formula
-models a $1-or-zero settlement payoff. Their saved exit policy survives restart,
-including a restart with `--no-kelly`. Earlier trades retain their own saved exit
-policy. Reports separate Kelly results from legacy sizing for the same model
-tag. The sizing change does not retrain or replace the selected probability
-model. Baseline-only operation is unchanged.
+New Kelly model trades save `model-loss-15-v1`: attempt a bounded IOC sale when
+fresh executable net liquidation value plus prior exit proceeds is at most 85%
+of actual fee-inclusive entry cost. Otherwise they hold to official settlement;
+there is no take-profit or trailing stop. Up uses YES bids and Down uses YES
+offers, including one-sided books. With insufficient depth, the existing slice
+calculation allocates cost and prior proceeds proportionally to the sellable
+quantity and leaves the remainder unpriced. The next IOC sells only visible
+best-price quantity, subject to refreshed quote/account checks and owned quantity.
+Actual fills determine proceeds; missing liquidity, gaps or adverse movement can
+leave shares open or produce losses larger than 15%.
+
+The settlement-based Kelly formula is unchanged by this exit experiment. The
+stop does not make 15% the amount at risk: full funded exposure and the existing
+daily-loss reservations still apply. Saved policies survive restart and mode
+changes, including `--no-kelly`; old `model-settlement-v1` trades remain
+settlement-only. Reports separate the new stop cohort from settlement-only and
+legacy sizing for the same model tag. No model refit, entry-window change, second
+runner, activation flag, experiment expiry or profitability gate is introduced.
+
+Implementation tests, deployment verification, actual live fills and profitability
+are separate evidence. See [model loss-exit operation and comparison](docs/model-loss-exit.md)
+for the cashflow definition, reproducible research and its limits.
 
 ### Run baseline and model together
 

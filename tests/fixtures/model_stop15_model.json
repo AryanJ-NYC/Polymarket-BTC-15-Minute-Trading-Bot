@@ -1,0 +1,65 @@
+{
+  "coefficients": [
+    2.4529171761881496,
+    -0.10116632049646195,
+    0.0
+  ],
+  "features": [
+    "midpoint",
+    "spread",
+    "seconds_remaining"
+  ],
+  "intercept": -0.2173616195813944,
+  "means": [
+    0.4919221556886224,
+    0.018934131736526708,
+    120.0
+  ],
+  "report": {
+    "evaluation": {
+      "brier": 0.07259687092642317,
+      "contracts": 209,
+      "down_contracts": 111,
+      "first_window_start": "2026-10-16T08:30:00+00:00",
+      "last_window_end": "2026-10-22T16:30:00+00:00",
+      "log_loss": 0.2555248962936303,
+      "midpoint_brier": 0.07493409090909091,
+      "midpoint_log_loss": 0.2560586518737283,
+      "observations": 209,
+      "up_contracts": 98
+    },
+    "excluded_observations": 0,
+    "interpretation": "Held-out prediction quality only; this does not establish profitability.",
+    "overlapping_contracts_excluded": 0,
+    "sklearn_version": "1.9.1",
+    "training": {
+      "brier": 0.09298018374790136,
+      "contracts": 835,
+      "down_contracts": 439,
+      "first_window_start": "2026-09-22T16:15:00+00:00",
+      "last_window_end": "2026-10-16T08:30:00+00:00",
+      "log_loss": 0.31287697986316904,
+      "midpoint_brier": 0.09404673652694612,
+      "midpoint_log_loss": 0.31012236677252375,
+      "observations": 835,
+      "up_contracts": 396
+    },
+    "training_end_at_or_before": "2026-10-16T08:30:00+00:00",
+    "unresolved_contracts": 0
+  },
+  "scales": [
+    0.39158749519788366,
+    0.05142230203327958,
+    1.0
+  ],
+  "settings": {
+    "contract_weighting": "equal",
+    "evaluation_fraction": 0.2,
+    "max_iterations": 1000,
+    "minimum_evaluation_contracts": 5,
+    "minimum_training_contracts": 20,
+    "regularization_c": 1.0,
+    "solver": "lbfgs"
+  },
+  "version": 1
+}

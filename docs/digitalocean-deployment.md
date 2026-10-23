@@ -125,10 +125,9 @@ For all three baseline timing slots plus one model slot in each contract, use a
 new comparison ID and append `--simultaneous` to that same ExecStart command.
 This selects the fixed same-contract comparison; the existing A/B ID cannot be
 reused. Preserve its records and candidate file. Keep the flat maintenance,
-backup and single-service procedure above. A bounded initial comparison also
-adds `--duration SECONDS` and temporarily disables automatic restart so a restart
-cannot reset its bound; record the exact full contracts and inspect any remaining
-holdings at expiry. Preserve a copy of the previous drop-in before replacing it.
+backup and single-service procedure above. The default model comparison runs
+continuously without a duration or trade-count limit. Preserve a copy of the
+previous drop-in before replacing it.
 
 Reload systemd and start the same service. Verify its exact command, deployed
 revision, registered experiment definition, model tag and arm-tagged journal
@@ -141,6 +140,13 @@ or extra modeled cost requires a new experiment ID; reusing an ID with changed
 configuration stops startup. Observe actual fills and settled results with the
 read-only report's `by_experiment` groups. Both arms share the original account
 limits, including legacy losses and exposure. Unknown/disputed P&L stays unknown.
+
+New quarter-Kelly model trades automatically save the 15% loss-exit policy after
+deployment. The unchanged supplied ID derives a distinct cohort ending in
+`.kelly-v3.stop15-v1`; the previous `.kelly-v3` settlement cohort and its holdings
+are preserved. No new flag, runner or scheduled end is required. Verify the
+deployed revision and registration separately from provider fills and confirmed
+profitability. See [model loss-exit operation](model-loss-exit.md).
 
 To return to baseline-only entries, use the same flat maintenance procedure to
 remove only this experiment drop-in, reload systemd and resume the existing
