@@ -415,8 +415,10 @@ class TradeJournal:
     def exposure(self) -> Decimal:
         """Funded remaining entry cost plus pending BUY reservations."""
         exposure = Decimal("0")
-        for row in self.records():
-            entry_cost = _risk_entry_cost(row)
+        rows = self.records()
+        costs = _risk_entry_costs(rows)
+        for row in rows:
+            entry_cost = costs[row["trade_id"]]
             if entry_cost is None:
                 raise RuntimeError("Actual costs are unknown or disputed; reconcile before trading")
             quantity = number(row["quantity"])
@@ -448,7 +450,7 @@ class TradeJournal:
         rows = self.records()
         if any(row["pending"] for row in rows):
             raise RuntimeError("An order is unresolved; reconcile it before any further trading")
-        if any(_risk_entry_cost(row) is None for row in rows):
+        if any(cost is None for cost in _risk_entry_costs(rows).values()):
             raise RuntimeError("Actual costs are unknown or disputed; reconcile before trading")
         if sum(row["state"] == "open" for row in rows) >= 5:
             return Decimal("0"), "5 open-position limit"
@@ -682,12 +684,13 @@ def _market_resolution_check(rows: list[dict], resolution: dict) -> dict:
 def _daily_room(rows: list[dict], bankroll: Decimal) -> Decimal:
     today = datetime.now(timezone.utc).date().isoformat()
     losses = Decimal("0")
+    costs = _risk_entry_costs(rows)
     for row in rows:
         if not row.get("closed_at", "").startswith(today):
             continue
         pnl = row["pnl"]
         if (pnl is None or row.get("accounting_issues")) and row["state"] == "closed":
-            entry_cost = _risk_entry_cost(row)
+            entry_cost = costs[row["trade_id"]]
             if entry_cost is not None and row["proceeds"] is not None:
                 pnl = number(row["proceeds"]) - entry_cost
         if pnl is not None:
@@ -695,6 +698,120 @@ def _daily_room(rows: list[dict], bankroll: Decimal) -> Decimal:
     # Preserve the existing conservative daily guard, even after partial exits.
     at_risk = sum(number(row["entry_cost"]) for row in rows if row["state"] == "open")
     return bankroll * DAILY_LOSS_FRACTION + losses - at_risk
+
+
+def _risk_entry_costs(rows: list[dict]) -> dict[str, Decimal | None]:
+    costs = {row["trade_id"]: _risk_entry_cost(row) for row in rows}
+    markets: dict[str, list[dict]] = {}
+    for row in rows:
+        markets.setdefault(row["slug"], []).append(row)
+    for market in markets.values():
+        if any(costs[row["trade_id"]] is None for row in market) and _settled_cashflows_match(
+            market
+        ):
+            for row in market:
+                if costs[row["trade_id"]] is None:
+                    costs[row["trade_id"]] = number(row["entry_cost"])
+    return costs
+
+
+def _settled_cashflows_match(rows: list[dict]) -> bool:
+    """Reconcile a closed market without assuming how the provider allocates its cost basis."""
+    # settle_market excludes unfilled attempts. They carry no settlement basis
+    # only when their completed orders and collected amounts are all known zero.
+    for row in rows:
+        if row["state"] == "unfilled" and (
+            row["pending"]
+            or row.get("accounting_issues")
+            or any(
+                row.get(field) is None or number(row[field]) != 0
+                for field in ("quantity", "entry_cost", "proceeds")
+            )
+            or any(
+                order.get("fee") is None
+                or any(number(order[field]) != 0 for field in ("quantity", "notional", "fee"))
+                for order in row["orders"]
+            )
+        ):
+            return False
+    rows = [row for row in rows if row["state"] != "unfilled"]
+    if not rows:
+        return False
+    settlement = rows[0].get("settlement") or {}
+    resolution = settlement.get("resolution") or {}
+    before = resolution.get("beforePosition") or {}
+    after = resolution.get("afterPosition") or {}
+    yes_value = number(settlement.get("yes_value", "-1"))
+    if (
+        settlement.get("scope") != "market"
+        or yes_value not in {0, 1}
+        or before.get("cost") is None
+        or before.get("realized") is None
+        or after.get("realized") is None
+        # Reported provider fees still use the existing fee-comparison path.
+        or before.get("fees") is not None
+        or after.get("fees") is not None
+    ):
+        return False
+    quantity = payout = gross = fees = Decimal("0")
+    for row in rows:
+        saved = row.get("settlement") or {}
+        if (
+            row["state"] != "closed"
+            or number(row["quantity"]) != 0
+            or row["pending"]
+            or row["entry_cost"] is None
+            or row["proceeds"] is None
+            or set(row.get("accounting_issues", [])) - {MARKET_RESOLUTION_ISSUE}
+            or saved.get("scope") != "market"
+            or number(saved.get("yes_value", "-1")) != yes_value
+            or row["outcome"] not in {"up", "down"}
+            or saved.get("resolution") != resolution
+            or (saved.get("market_check") or {}).get("status") == "unconfirmed_chronology"
+        ):
+            return False
+        retained = entry = proceeds = Decimal("0")
+        for order in row["orders"]:
+            filled = number(order["quantity"])
+            if order["fee"] is None or order.get("readback_delayed") or filled < 0:
+                return False
+            fee = number(order["fee"])
+            notional = number(order["notional"])
+            if fee < 0 or not 0 <= notional <= filled:
+                return False
+            fees += fee
+            if order["action"] == "BUY":
+                retained += filled
+                entry += notional + fee
+                gross -= notional
+            elif order["action"] == "SELL" and filled <= retained:
+                retained -= filled
+                proceeds += notional - fee
+                gross += notional
+            else:
+                return False
+        row_payout = retained * (yes_value if row["outcome"] == "up" else 1 - yes_value)
+        if (
+            entry != number(row["entry_cost"])
+            or proceeds + row_payout != number(row["proceeds"])
+            or (
+                row.get("settlement_proceeds") is not None
+                and number(row["settlement_proceeds"]) != row_payout
+            )
+        ):
+            return False
+        quantity += retained * (1 if row["outcome"] == "up" else -1)
+        payout += row_payout
+    provider_cost = amount(before["cost"])
+    realized = amount(after["realized"])
+    return (
+        number(before["netPositionDecimal"]) == quantity
+        and number(after["netPositionDecimal"]) == 0
+        and (after.get("cost") is None or amount(after["cost"]) == 0)
+        and provider_cost >= 0
+        and amount(before["realized"]) + payout - provider_cost == realized
+        and realized in {gross + payout, gross + payout - fees}
+    )
 
 
 def _risk_entry_cost(row: dict) -> Decimal | None:

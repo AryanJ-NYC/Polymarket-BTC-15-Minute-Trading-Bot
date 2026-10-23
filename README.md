@@ -594,4 +594,15 @@ For a market shared by multiple policy lots, an omitted settlement fee also
 allows admission when the provider's remaining cost matches the known order
 cost exactly and collected fees and execution order are known. This applies
 to already saved checks without rewriting journal evidence. Raw warnings and
-unknown exact P&L remain; missing-fee cases with a cost difference still block.
+unknown exact P&L remain.
+
+A fully closed multi-policy market can also pass admission when its combined
+fills, known collected fees, retained-share payout and provider realized totals
+reconcile exactly. This compares complete cashflows instead of requiring the
+provider to allocate its remaining cost like the journal's average-cost pool.
+Provider realized totals must match either gross cashflows or cashflows net of
+all collected fees, with consistent before/after cost and quantities. This
+read-time check also covers existing saved records; it preserves their raw
+warnings and unknown exact policy P&L. Daily risk still counts each losing
+policy conservatively. Missing evidence, pending/open holdings, delayed fills,
+and unexplained cashflow differences remain blocking; this adds no tolerance.

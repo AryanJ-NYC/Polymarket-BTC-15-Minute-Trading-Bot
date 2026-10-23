@@ -466,6 +466,217 @@ def test_missing_market_fee_exception_keeps_unconfirmed_evidence_blocking(
         journal.entry_budget(Decimal("100"), Decimal("100"))
 
 
+@pytest.fixture
+def settled_fifo_market(venue, journal, clock, request):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "down", Decimal("3"))
+    for preset, quantity, notional, fee in [
+        ("earlier", "1.79", "1.3962", ".02"),
+        ("model-current", "1.60", "1.3600", ".01"),
+        ("current", "1.52", "1.3984", ".01"),
+        ("later", "1.48", "1.4060", "0"),
+    ]:
+        clock.current += timedelta(seconds=1)
+        journal.reserve_entry(plan, market.end, settings={"timing_preset": preset})
+        key = market.slug if preset == "current" else market.slug + ":" + preset
+        journal.finish_order(key, Decimal(quantity), Decimal(notional), Decimal(fee))
+    for preset, quantity, notional, fee in [
+        ("earlier", "1.79", "1.7363", "0"),
+        ("later", "1.48", ".6068", ".02"),
+    ]:
+        clock.current += timedelta(seconds=1)
+        key = market.slug + ":" + preset
+        journal.reserve_exit(key, replace(plan, action="SELL", quantity=Decimal(quantity)))
+        journal.finish_order(key, Decimal(quantity), Decimal(notional), Decimal(fee))
+    yes_value, cost, before_realized, after_realized = getattr(
+        request, "param", ("0", "2.9064", "-.3111", "-.0975")
+    )
+    journal.settle_market(
+        market.slug,
+        Decimal(yes_value),
+        resolution={
+            "beforePosition": {
+                "netPositionDecimal": "-3.12",
+                "cost": {"value": cost, "currency": "USD"},
+                "fees": None,
+                "realized": {"value": before_realized, "currency": "USD"},
+            },
+            "afterPosition": {
+                "netPositionDecimal": "0",
+                "cost": {"value": "0", "currency": "USD"},
+                "realized": {"value": after_realized, "currency": "USD"},
+            },
+        },
+    )
+    return market
+
+
+@pytest.mark.parametrize(
+    "settled_fifo_market,bankroll,daily_budget",
+    [
+        (("0", "2.9064", "-.3111", "-.0975"), "10", ".1808"),
+        (("0", "2.91715", "-.36035", "-.1575"), "10", ".1808"),
+        (("1", "2.9064", "-.3111", "-3.2175"), "40", ".4024"),
+        (("0.0", "2.9064", "-.3111", "-.0975"), "10", ".1808"),
+        (("1.00", "2.9064", "-.3111", "-3.2175"), "40", ".4024"),
+    ],
+    indirect=["settled_fifo_market"],
+)
+def test_settled_provider_basis_does_not_block_reconciled_cashflows(
+    journal, settled_fifo_market, tmp_path, bankroll, daily_budget
+):
+    rows = journal.records()
+    assert len(rows) == 4
+    assert all(row["pnl"] is None and row["accounting_issues"] for row in rows)
+    assert all(
+        Decimal(row["settlement"]["market_check"]["cost_delta"]) > Decimal(".17") for row in rows
+    )
+    assert journal.exposure() == 0
+    assert journal.entry_budget(Decimal(bankroll), Decimal("100")) == (
+        Decimal(daily_budget),
+        "daily 10% loss budget",
+    )
+    journal.risk_check(Decimal(daily_budget), Decimal(bankroll))
+    with pytest.raises(ValueError, match="daily"):
+        journal.risk_check(Decimal(daily_budget) + Decimal(".01"), Decimal(bankroll))
+    journal.settle_market(
+        settled_fifo_market.slug,
+        Decimal(rows[0]["settlement"]["yes_value"]),
+        resolution=rows[0]["settlement"]["resolution"],
+    )
+    assert journal.records() == rows
+    journal.close()
+    reopened = TradeJournal(tmp_path / "risk.sqlite")
+    try:
+        assert reopened.exposure() == 0
+        assert reopened.entry_budget(Decimal(bankroll), Decimal("100"))[0] == Decimal(daily_budget)
+        assert reopened.records() == rows
+    finally:
+        reopened.close()
+
+
+def test_settled_policies_can_switch_outcome_after_complete_exit(venue, journal, clock):
+    market = parse_market(venue.market)
+    up = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("3"))
+    earlier = market.slug + ":earlier"
+    journal.reserve_entry(up, market.end, settings={"timing_preset": "earlier"})
+    journal.finish_order(earlier, Decimal("1.79"), Decimal("1.3962"), Decimal(".02"))
+    clock.current += timedelta(seconds=1)
+    journal.reserve_exit(earlier, replace(up, action="SELL", quantity=Decimal("1.79")))
+    journal.finish_order(earlier, Decimal("1.79"), Decimal("1.7363"), Decimal("0"))
+    clock.current += timedelta(seconds=1)
+    down = venue.client.buy_plan(market, venue.client.book(market), "down", Decimal("3"))
+    journal.reserve_entry(down, market.end, settings={"timing_preset": "current"})
+    journal.finish_order(market.slug, Decimal("1.60"), Decimal("1.36"), Decimal(".01"))
+    journal.settle_market(
+        market.slug,
+        Decimal("0"),
+        resolution={
+            "beforePosition": {
+                "netPositionDecimal": "-1.60",
+                "fees": None,
+                "cost": {"value": "1.36", "currency": "USD"},
+                "realized": {"value": ".3401", "currency": "USD"},
+            },
+            "afterPosition": {
+                "netPositionDecimal": "0",
+                "realized": {"value": ".5801", "currency": "USD"},
+            },
+        },
+    )
+    assert {row["outcome"] for row in journal.records()} == {"up", "down"}
+    assert all(row["pnl"] is None for row in journal.records())
+    assert journal.exposure() == 0
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+
+
+@pytest.mark.parametrize("fee", ["0", None])
+def test_zero_fill_policy_does_not_hide_settled_cashflows(venue, journal, settled_fifo_market, fee):
+    market = settled_fifo_market
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    journal.reserve_entry(plan, market.end, settings={"timing_preset": "minute-five"})
+    journal.finish_order(
+        market.slug + ":minute-five",
+        Decimal("0"),
+        Decimal("0"),
+        None if fee is None else Decimal(fee),
+    )
+    if fee is None:
+        with pytest.raises(RuntimeError, match="unknown or disputed"):
+            journal.entry_budget(Decimal("100"), Decimal("100"))
+    else:
+        assert journal.exposure() == 0
+        assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal(".1808")
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "cash_shortfall",
+        "mixed_fee_basis",
+        "provider_quantity",
+        "unknown_provider_realized",
+        "unknown_fee",
+        "entry_cost",
+        "proceeds",
+        "missing_member",
+        "delayed_fill",
+        "pending_order",
+        "open_position",
+        "unrelated_issue",
+        "conflicting_resolution",
+    ],
+)
+def test_market_cashflow_admission_keeps_unexplained_or_incomplete_evidence_blocking(
+    journal, settled_fifo_market, fault
+):
+    rows = journal.records()
+    row = rows[1]
+    if fault in {
+        "cash_shortfall",
+        "mixed_fee_basis",
+        "provider_quantity",
+        "unknown_provider_realized",
+    }:
+        for item in rows:
+            resolution = item["settlement"]["resolution"]
+            if fault in {"cash_shortfall", "mixed_fee_basis"}:
+                # Both provider realized values move together, so the provider's
+                # own before/after identity still holds; actual fills must agree too.
+                difference = Decimal(".01" if fault == "cash_shortfall" else ".03")
+                for position in ["beforePosition", "afterPosition"]:
+                    amount = resolution[position]["realized"]
+                    amount["value"] = str(Decimal(amount["value"]) - difference)
+            elif fault == "provider_quantity":
+                resolution["beforePosition"]["netPositionDecimal"] = "-3.11"
+            else:
+                resolution["afterPosition"].pop("realized")
+    elif fault == "unknown_fee":
+        row["orders"][0]["fee"] = None
+    elif fault == "entry_cost":
+        row["entry_cost"] = "1.36"
+    elif fault == "proceeds":
+        row["proceeds"] = "1.61"
+    elif fault == "missing_member":
+        row["slug"] += "-other"
+    elif fault == "delayed_fill":
+        row["orders"][0]["readback_delayed"] = True
+    elif fault == "pending_order":
+        row["pending"] = {"action": "BUY"}
+    elif fault == "open_position":
+        row.update(state="open", quantity=".01")
+    elif fault == "unrelated_issue":
+        row["accounting_issues"].append("Unresolved partial exit")
+    else:
+        row["settlement"]["yes_value"] = "1"
+    for item in rows:
+        journal.update(item["trade_id"], **{k: v for k, v in item.items() if k != "trade_id"})
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.exposure()
+    with pytest.raises(RuntimeError, match="unknown or disputed|unresolved"):
+        journal.entry_budget(Decimal("100"), Decimal("100"))
+
+
 def _record_buy(journal, plan, cost):
     plan = replace(plan, quantity=Decimal("10"), notional=cost, fee_bound=Decimal("0"))
     journal.reserve_entry(plan, plan.expires_at)
