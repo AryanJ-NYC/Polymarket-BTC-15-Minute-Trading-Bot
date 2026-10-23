@@ -517,6 +517,8 @@ def settled_fifo_market(venue, journal, clock, request):
         (("0", "2.9064", "-.3111", "-.0975"), "10", ".1808"),
         (("0", "2.91715", "-.36035", "-.1575"), "10", ".1808"),
         (("1", "2.9064", "-.3111", "-3.2175"), "40", ".4024"),
+        (("0.0", "2.9064", "-.3111", "-.0975"), "10", ".1808"),
+        (("1.00", "2.9064", "-.3111", "-3.2175"), "40", ".4024"),
     ],
     indirect=["settled_fifo_market"],
 )
@@ -551,6 +553,41 @@ def test_settled_provider_basis_does_not_block_reconciled_cashflows(
         assert reopened.records() == rows
     finally:
         reopened.close()
+
+
+def test_settled_policies_can_switch_outcome_after_complete_exit(venue, journal, clock):
+    market = parse_market(venue.market)
+    up = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("3"))
+    earlier = market.slug + ":earlier"
+    journal.reserve_entry(up, market.end, settings={"timing_preset": "earlier"})
+    journal.finish_order(earlier, Decimal("1.79"), Decimal("1.3962"), Decimal(".02"))
+    clock.current += timedelta(seconds=1)
+    journal.reserve_exit(earlier, replace(up, action="SELL", quantity=Decimal("1.79")))
+    journal.finish_order(earlier, Decimal("1.79"), Decimal("1.7363"), Decimal("0"))
+    clock.current += timedelta(seconds=1)
+    down = venue.client.buy_plan(market, venue.client.book(market), "down", Decimal("3"))
+    journal.reserve_entry(down, market.end, settings={"timing_preset": "current"})
+    journal.finish_order(market.slug, Decimal("1.60"), Decimal("1.36"), Decimal(".01"))
+    journal.settle_market(
+        market.slug,
+        Decimal("0"),
+        resolution={
+            "beforePosition": {
+                "netPositionDecimal": "-1.60",
+                "fees": None,
+                "cost": {"value": "1.36", "currency": "USD"},
+                "realized": {"value": ".3401", "currency": "USD"},
+            },
+            "afterPosition": {
+                "netPositionDecimal": "0",
+                "realized": {"value": ".5801", "currency": "USD"},
+            },
+        },
+    )
+    assert {row["outcome"] for row in journal.records()} == {"up", "down"}
+    assert all(row["pnl"] is None for row in journal.records())
+    assert journal.exposure() == 0
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
 
 
 @pytest.mark.parametrize("fee", ["0", None])

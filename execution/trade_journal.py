@@ -741,10 +741,10 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
     resolution = settlement.get("resolution") or {}
     before = resolution.get("beforePosition") or {}
     after = resolution.get("afterPosition") or {}
+    yes_value = number(settlement.get("yes_value", "-1"))
     if (
         settlement.get("scope") != "market"
-        or settlement.get("yes_value") not in {"0", "1"}
-        or len({row["outcome"] for row in rows}) != 1
+        or yes_value not in {0, 1}
         or before.get("cost") is None
         or before.get("realized") is None
         or after.get("realized") is None
@@ -753,9 +753,6 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
         or after.get("fees") is not None
     ):
         return False
-    value = number(settlement["yes_value"])
-    if rows[0]["outcome"] == "down":
-        value = 1 - value
     quantity = payout = gross = fees = Decimal("0")
     for row in rows:
         saved = row.get("settlement") or {}
@@ -767,7 +764,8 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
             or row["proceeds"] is None
             or set(row.get("accounting_issues", [])) - {MARKET_RESOLUTION_ISSUE}
             or saved.get("scope") != "market"
-            or saved.get("yes_value") != settlement["yes_value"]
+            or number(saved.get("yes_value", "-1")) != yes_value
+            or row["outcome"] not in {"up", "down"}
             or saved.get("resolution") != resolution
             or (saved.get("market_check") or {}).get("status") == "unconfirmed_chronology"
         ):
@@ -792,7 +790,7 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
                 gross += notional
             else:
                 return False
-        row_payout = retained * value
+        row_payout = retained * (yes_value if row["outcome"] == "up" else 1 - yes_value)
         if (
             entry != number(row["entry_cost"])
             or proceeds + row_payout != number(row["proceeds"])
@@ -802,13 +800,12 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
             )
         ):
             return False
-        quantity += retained
+        quantity += retained * (1 if row["outcome"] == "up" else -1)
         payout += row_payout
-    sign = 1 if rows[0]["outcome"] == "up" else -1
     provider_cost = amount(before["cost"])
     realized = amount(after["realized"])
     return (
-        number(before["netPositionDecimal"]) == sign * quantity
+        number(before["netPositionDecimal"]) == quantity
         and number(after["netPositionDecimal"]) == 0
         and (after.get("cost") is None or amount(after["cost"]) == 0)
         and provider_cost >= 0
