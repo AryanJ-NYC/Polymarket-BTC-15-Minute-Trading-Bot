@@ -1,4 +1,4 @@
-"""Continuously archive BTC 5m/15m books, reference candles and Kraken spot trades.
+"""Continuously archive BTC 5m/15m books/trades, reference candles and Kraken trades.
 
 Run ``python -m tools.collect_research_data --env-file PATH --output DIRECTORY``.
 Reference candles are NOT licensed raw BRTI. No trading journal is opened.
@@ -108,6 +108,8 @@ class Collector:
         self.last_reference = None
         self.last_metadata = None
         self.last_book = {}
+        self.last_market_trade = {}
+        self.last_market_trade_timestamp = {}
         self.connected = False
         self.generation = 0
         self.spot_connected = False
@@ -276,34 +278,77 @@ class Collector:
             broken = asyncio.Event()
             self.generation += 1
             generation = self.generation
-            last_message = time.monotonic()
+            connection = {"active": True, "last_message": time.monotonic()}
 
-            def message(payload):
-                nonlocal last_message
-                last_message = time.monotonic()
-                request = payload.get("requestId") if isinstance(payload, dict) else None
-                slug = bindings.get(request)
-                self.archive.emit(
-                    "market_message",
-                    source="polymarket_market_ws",
-                    generation=generation,
-                    request_id=request,
-                    slug=slug,
-                    payload=payload,
-                )
-                if isinstance(payload, dict) and "marketData" in payload and slug is not None:
-                    self.last_book[slug] = utc()
-                if isinstance(payload, dict) and "error" in payload:
-                    broken.set()
-
-            def failed(*args):
+            def failed(*args, generation=generation, connection=connection, broken=broken):
+                if not connection["active"]:
+                    return
+                connection["active"] = False
+                broken.set()
                 self.archive.emit(
                     "connection_gap",
                     source="polymarket_market_ws",
                     generation=generation,
                     reason="socket_closed_or_error",
                 )
-                broken.set()
+
+            def message(
+                payload,
+                bindings=bindings,
+                generation=generation,
+                connection=connection,
+                failed=failed,
+            ):
+                received_at = utc()
+                envelope = payload if isinstance(payload, dict) else {}
+                request = envelope.get("requestId")
+                binding = bindings.get(request) if isinstance(request, str) else None
+                slug, subscription_type = binding if binding else (None, None)
+                actual_type = envelope.get("subscriptionType")
+                trade_message = (
+                    subscription_type == TRADE_SUBSCRIPTION
+                    or binding is None
+                    and (actual_type == TRADE_SUBSCRIPTION or "trade" in envelope)
+                )
+                field = "trade" if subscription_type == TRADE_SUBSCRIPTION else "marketData"
+                data = envelope.get(field)
+                if not connection["active"]:
+                    binding_status = "inactive_generation"
+                elif binding is None:
+                    binding_status = "unbound_request"
+                elif actual_type != subscription_type:
+                    binding_status = "subscription_type_mismatch"
+                elif field not in envelope:
+                    binding_status = "control_message"
+                elif not isinstance(data, dict):
+                    binding_status = "invalid_payload"
+                elif data.get("marketSlug") != slug:
+                    binding_status = "market_slug_mismatch"
+                elif "error" in envelope or ("marketData" in envelope and "trade" in envelope):
+                    binding_status = "invalid_payload"
+                else:
+                    binding_status = "valid"
+                receipt = self.archive.emit(
+                    "market_trade_message" if trade_message else "market_message",
+                    source="polymarket_market_ws",
+                    generation=generation,
+                    request_id=request,
+                    slug=slug,
+                    subscription_type=subscription_type,
+                    binding_status=binding_status,
+                    received_at=received_at,
+                    payload=payload,
+                )
+                if receipt is not None and binding_status == "valid":
+                    if subscription_type == TRADE_SUBSCRIPTION:
+                        self.last_market_trade[slug] = received_at
+                        self.last_market_trade_timestamp[slug] = data.get("tradeTime")
+                    else:
+                        self.last_book[slug] = received_at
+                if connection["active"]:
+                    connection["last_message"] = time.monotonic()
+                if connection["active"] and "error" in envelope:
+                    failed()
 
             try:
                 self.archive.emit(
@@ -325,7 +370,7 @@ class Collector:
                         if stamp(market["assetPriceTerms"]["windowStart"]) <= now + 60
                         and stamp(market["assetPriceTerms"]["windowEnd"]) > now
                     }
-                    for request, slug in list(bindings.items()):
+                    for request, (slug, subscription_type) in list(bindings.items()):
                         if slug not in desired:
                             await asyncio.wait_for(socket.unsubscribe(request), 10)
                             self.archive.emit(
@@ -334,21 +379,30 @@ class Collector:
                                 generation=generation,
                                 request_id=request,
                                 slug=slug,
+                                subscription_type=subscription_type,
                             )
                             del bindings[request]
-                    for slug in sorted(desired - set(bindings.values())):
-                        request = f"research-{generation}-{uuid.uuid4().hex[:12]}"
-                        bindings[request] = slug
-                        # SDK full-book subscription omits responsesDebounced.
-                        await asyncio.wait_for(socket.subscribe_market_data(request, [slug]), 10)
-                        self.archive.emit(
-                            "subscribed",
-                            source="polymarket_market_ws",
-                            generation=generation,
-                            request_id=request,
-                            slug=slug,
-                        )
-                    if time.monotonic() - last_message > 35:
+                    for slug in sorted(desired):
+                        for subscription_type, subscribe in (
+                            (BOOK_SUBSCRIPTION, socket.subscribe_market_data),
+                            (TRADE_SUBSCRIPTION, socket.subscribe_trades),
+                        ):
+                            if (slug, subscription_type) in bindings.values():
+                                continue
+                            request = f"research-{generation}-{uuid.uuid4().hex[:12]}"
+                            # Bind before awaiting: the SDK can deliver immediately.
+                            bindings[request] = (slug, subscription_type)
+                            # SDK full-book subscription omits responsesDebounced.
+                            await asyncio.wait_for(subscribe(request, [slug]), 10)
+                            self.archive.emit(
+                                "subscribed",
+                                source="polymarket_market_ws",
+                                generation=generation,
+                                request_id=request,
+                                slug=slug,
+                                subscription_type=subscription_type,
+                            )
+                    if connection["active"] and time.monotonic() - connection["last_message"] > 35:
                         self.archive.emit(
                             "connection_gap",
                             source="polymarket_market_ws",
@@ -360,13 +414,16 @@ class Collector:
                 if time.monotonic() - started >= 30:
                     delay = 1
             except Exception as exc:
-                self.archive.emit(
-                    "connection_gap",
-                    source="polymarket_market_ws",
-                    generation=generation,
-                    error_class=type(exc).__name__,
-                )
+                if connection["active"]:
+                    connection["active"] = False
+                    self.archive.emit(
+                        "connection_gap",
+                        source="polymarket_market_ws",
+                        generation=generation,
+                        error_class=type(exc).__name__,
+                    )
             finally:
+                connection["active"] = False
                 self.connected = False
                 if socket is not None:
                     try:
@@ -521,6 +578,8 @@ class Collector:
                 "last_reference_received_at": self.last_reference,
                 "last_metadata_refresh_at": self.last_metadata,
                 "last_book_received_at": self.last_book,
+                "last_market_trade_received_at": self.last_market_trade,
+                "last_market_trade_provider_timestamp": self.last_market_trade_timestamp,
                 "spot": {
                     "source": SPOT_SOURCE,
                     "connected": self.spot_connected,
@@ -539,6 +598,16 @@ class Collector:
             atomic_json(self.archive.directory / "status.json", status)
             self.last_book = {
                 slug: value for slug, value in self.last_book.items() if slug in self.markets
+            }
+            self.last_market_trade = {
+                slug: value
+                for slug, value in self.last_market_trade.items()
+                if slug in self.markets
+            }
+            self.last_market_trade_timestamp = {
+                slug: value
+                for slug, value in self.last_market_trade_timestamp.items()
+                if slug in self.markets
             }
             await pause(self.stop, 5)
 
@@ -763,6 +832,8 @@ def file_hash(path):
 
 
 BASE = "https://gateway.polymarket.us"
+BOOK_SUBSCRIPTION = "SUBSCRIPTION_TYPE_MARKET_DATA"
+TRADE_SUBSCRIPTION = "SUBSCRIPTION_TYPE_TRADE"
 SPOT_SOURCE = "kraken_spot_btcusd_trade"
 SPOT_ACK_SECONDS = 10
 SPOT_IDLE_SECONDS = 35

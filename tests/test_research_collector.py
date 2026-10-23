@@ -464,6 +464,9 @@ def test_delayed_resolution_backlog_does_not_delay_current_subscriptions(tmp_pat
                 if len(subscriptions) == 2:
                     subscribed.set()
 
+            async def subscribe_trades(self, request, slugs):
+                pass
+
             async def close(self):
                 pass
 
@@ -628,6 +631,9 @@ def test_socket_reconnects_and_retains_even_empty_duplicate_messages(tmp_path, m
                 self.callbacks["message"](message)
                 stop.set()
 
+            async def subscribe_trades(self, request, slugs):
+                pass
+
             async def close(self):
                 self.closed = True
 
@@ -666,6 +672,330 @@ def test_http_write_methods_are_blocked_before_network():
             client.post("https://api.polymarket.us/v1/orders", json={})
 
 
+def test_both_horizons_bind_immediate_trades_and_preserve_every_raw_version(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = collector.Archive(tmp_path), asyncio.Event()
+        instance = collector.Collector(None, None, archive, stop)
+
+        def receive(socket, request, slug, subscription_type):
+            payload = market_message(request, slug, subscription_type)
+            socket.callbacks["message"](payload)
+            if subscription_type == collector.TRADE_SUBSCRIPTION:
+                book_receipt = dict(instance.last_book)
+                socket.callbacks["message"](payload)
+                payload["trade"].update(state="TRADE_STATE_CANCELLED")
+                socket.callbacks["message"](payload)
+                assert instance.last_book == book_receipt
+
+        socket = MarketSocket(receive)
+        instance.socket_factory = lambda: socket
+        now = datetime.now(timezone.utc)
+        for horizon, duration in [("5m", 300), ("15m", 900)]:
+            value = market(horizon, duration)
+            value["assetPriceTerms"].update(
+                windowStart=(now - timedelta(seconds=30)).isoformat(),
+                windowEnd=(now + timedelta(seconds=duration - 30)).isoformat(),
+            )
+            instance.markets[value["slug"]] = value
+
+        async def stop_after_subscriptions(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", stop_after_subscriptions)
+        try:
+            await instance.book_loop()
+            stop.clear()
+            await instance.monitor_loop()
+        finally:
+            archive.close()
+        rows = read_rows(tmp_path)
+        books = [row for row in rows if row["kind"] == "market_message"]
+        trades = [row for row in rows if row["kind"] == "market_trade_message"]
+        assert len(books) == 2 and len(trades) == 6
+        assert len(socket.subscriptions) == 4 and socket.closed
+        assert all(row["binding_status"] == "valid" for row in books + trades)
+        for slug in instance.markets:
+            group = [row for row in trades if row["slug"] == slug]
+            assert [row["payload"]["trade"]["state"] for row in group] == [
+                "TRADE_STATE_NEW",
+                "TRADE_STATE_NEW",
+                "TRADE_STATE_CANCELLED",
+            ]
+            assert group[0]["payload"] == group[1]["payload"]
+            assert group[0]["payload"]["trade"]["quantity"]["value"] == "0.340000000000000001"
+            assert group[0]["payload"]["trade"]["id"] == "D9E23SPG91KP"
+            assert group[0]["payload"]["trade"]["maker"]["intent"] == "ORDER_INTENT_UNDEFINED"
+            assert instance.last_market_trade[slug] == group[-1]["received_at"]
+        status = json.loads((tmp_path / "status.json").read_text())
+        assert status["last_market_trade_received_at"] == instance.last_market_trade
+        assert status["last_book_received_at"] == instance.last_book
+        assert set(status["last_market_trade_provider_timestamp"].values()) == {
+            "2026-10-23T21:32:12.379531769Z"
+        }
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        ({"requestId": "not-bound"}, "unbound_request"),
+        ({"requestId": []}, "unbound_request"),
+        ({"subscriptionType": collector.BOOK_SUBSCRIPTION}, "subscription_type_mismatch"),
+        ({"subscriptionType": None}, "subscription_type_mismatch"),
+        ({"trade": {"marketSlug": "other-contract"}}, "market_slug_mismatch"),
+        ({"trade": None}, "invalid_payload"),
+        ({"marketData": {}}, "invalid_payload"),
+        ({"error": {"code": "UNAVAILABLE"}}, "invalid_payload"),
+        ({"trade": "remove"}, "control_message"),
+    ],
+)
+def test_invalid_trade_binding_is_archived_without_refreshing_health(
+    tmp_path, monkeypatch, change, expected
+):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        instance = collector.Collector(None, None, archive, stop)
+
+        def receive(socket, request, slug, subscription_type):
+            payload = market_message(request, slug, subscription_type)
+            socket.callbacks["message"](payload)
+            if subscription_type == collector.TRADE_SUBSCRIPTION:
+                before = (dict(instance.last_book), dict(instance.last_market_trade))
+                payload.update(deepcopy(change))
+                if payload.get("trade") == "remove":
+                    del payload["trade"]
+                socket.callbacks["message"](payload)
+                assert (instance.last_book, instance.last_market_trade) == before
+                row = next(row for row in reversed(archive.rows) if "payload" in row)
+                assert row["payload"] == payload
+                assert row["kind"] == "market_trade_message"
+                assert row["binding_status"] == expected
+
+        socket = MarketSocket(receive)
+        instance.socket_factory = lambda: socket
+        instance.markets = {"fixture-5m": market("5m", 300)}
+        monkeypatch.setattr(collector.time, "time", lambda: collector.stamp(utc_at(120)))
+
+        async def finish(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", finish)
+        await instance.book_loop()
+        assert len(socket.subscriptions) == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "rejected_type", [collector.BOOK_SUBSCRIPTION, collector.TRADE_SUBSCRIPTION]
+)
+def test_rejected_queue_record_does_not_advance_that_feed_health(
+    tmp_path, monkeypatch, rejected_type
+):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        accepted_emit = archive.emit
+
+        def reject(kind, **fields):
+            if kind in ("market_message", "market_trade_message"):
+                if fields["subscription_type"] == rejected_type:
+                    return None
+            return accepted_emit(kind, **fields)
+
+        archive.emit = reject
+        socket = MarketSocket(
+            lambda socket, request, slug, kind: socket.callbacks["message"](
+                market_message(request, slug, kind)
+            )
+        )
+        instance = collector.Collector(None, lambda: socket, archive, stop)
+        instance.markets = {"fixture-5m": market("5m", 300)}
+        monkeypatch.setattr(collector.time, "time", lambda: collector.stamp(utc_at(120)))
+
+        async def finish(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", finish)
+        await instance.book_loop()
+        assert bool(instance.last_book) == (rejected_type != collector.BOOK_SUBSCRIPTION)
+        assert bool(instance.last_market_trade) == (rejected_type != collector.TRADE_SUBSCRIPTION)
+        assert bool(instance.last_market_trade_timestamp) == bool(instance.last_market_trade)
+
+    asyncio.run(scenario())
+
+
+def test_trade_on_book_request_preserves_book_kind_and_cannot_refresh_book_health(
+    tmp_path, monkeypatch
+):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        instance = collector.Collector(None, None, archive, stop)
+
+        def receive(socket, request, slug, kind):
+            if kind == collector.BOOK_SUBSCRIPTION:
+                socket.callbacks["message"](market_message(request, slug, kind))
+                before = dict(instance.last_book)
+                socket.callbacks["message"](
+                    market_message(request, slug, collector.TRADE_SUBSCRIPTION)
+                )
+                assert instance.last_book == before and not instance.last_market_trade
+                row = archive.rows[-1]
+                assert row["kind"] == "market_message"
+                assert row["subscription_type"] == collector.BOOK_SUBSCRIPTION
+                assert row["binding_status"] == "subscription_type_mismatch"
+
+        socket = MarketSocket(receive)
+        instance.socket_factory = lambda: socket
+        instance.markets = {"fixture-5m": market("5m", 300)}
+        monkeypatch.setattr(collector.time, "time", lambda: collector.stamp(utc_at(120)))
+
+        async def finish(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", finish)
+        await instance.book_loop()
+        assert not instance.last_market_trade
+
+    asyncio.run(scenario())
+
+
+def test_quiet_trade_subscription_stays_open_while_books_arrive(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        received_books = []
+        clock = [0]
+        instance = collector.Collector(None, None, archive, stop)
+
+        def receive(socket, request, slug, kind):
+            if kind == collector.BOOK_SUBSCRIPTION:
+                received_books.append((request, slug))
+                socket.callbacks["message"](market_message(request, slug, kind))
+
+        socket = MarketSocket(receive)
+        instance.socket_factory = lambda: socket
+        instance.markets = {"fixture-5m": market("5m", 300)}
+        monkeypatch.setattr(collector.time, "time", lambda: collector.stamp(utc_at(120)))
+        monkeypatch.setattr(collector.time, "monotonic", lambda: clock[0])
+
+        async def advance(event, seconds):
+            if event.is_set():
+                return
+            assert seconds == 0.25
+            clock[0] += 10
+            for request, slug in received_books:
+                socket.callbacks["message"](
+                    market_message(request, slug, collector.BOOK_SUBSCRIPTION)
+                )
+            if clock[0] >= 70:
+                event.set()
+
+        monkeypatch.setattr(collector, "pause", advance)
+        await instance.book_loop()
+        assert instance.generation == 1
+        assert instance.last_book and not instance.last_market_trade
+        assert not any(row["kind"] == "connection_gap" for row in archive.rows)
+
+    asyncio.run(scenario())
+
+
+def test_reconnect_isolates_old_callbacks_and_resubscribes_both_types(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        sockets = []
+        instance = collector.Collector(None, None, archive, stop)
+        instance.markets = {"fixture-5m": market("5m", 300)}
+        monkeypatch.setattr(collector.time, "time", lambda: collector.stamp(utc_at(120)))
+
+        def receive(socket, request, slug, kind):
+            if len(sockets) == 2:
+                old = sockets[0]
+                for old_request, (old_slug, old_kind) in old.subscriptions.items():
+                    previous = (dict(instance.last_book), dict(instance.last_market_trade))
+                    old.callbacks["message"](market_message(old_request, old_slug, old_kind))
+                    old.callbacks["close"]()
+                    assert (instance.last_book, instance.last_market_trade) == previous
+                    assert archive.rows[-1]["binding_status"] == "inactive_generation"
+                    assert archive.rows[-1]["generation"] == 1
+            socket.callbacks["message"](market_message(request, slug, kind))
+
+        def factory():
+            socket = MarketSocket(receive)
+            sockets.append(socket)
+            return socket
+
+        async def advance(event, seconds):
+            if seconds == 0.25:
+                if len(sockets) == 1:
+                    sockets[0].callbacks["close"]()
+                else:
+                    event.set()
+            await asyncio.sleep(0)
+
+        instance.socket_factory = factory
+        monkeypatch.setattr(collector, "pause", advance)
+        await instance.book_loop()
+        assert len(sockets) == 2 and all(socket.closed for socket in sockets)
+        assert all(len(socket.subscriptions) == 2 for socket in sockets)
+        assert len([row for row in archive.rows if row["kind"] == "connection_gap"]) == 1
+        fresh = [row for row in archive.rows if row.get("binding_status") == "valid"]
+        assert [row["generation"] for row in fresh] == [1, 1, 2, 2]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["close", "error", "error_envelope"])
+def test_socket_failure_fences_immediately_buffered_messages_and_records_one_gap(
+    tmp_path, monkeypatch, failure
+):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        instance = collector.Collector(None, None, archive, stop)
+
+        def receive(socket, request, slug, kind):
+            socket.callbacks["message"](market_message(request, slug, kind))
+            if kind != collector.TRADE_SUBSCRIPTION:
+                return
+            before = (dict(instance.last_book), dict(instance.last_market_trade))
+            if failure == "error_envelope":
+                envelope = {
+                    "requestId": request,
+                    "subscriptionType": kind,
+                    "error": {"code": "UNAVAILABLE"},
+                }
+                socket.callbacks["message"](envelope)
+                assert archive.rows[-2]["payload"] == envelope
+            else:
+                socket.callbacks[failure]()
+            assert archive.rows[-1]["kind"] == "connection_gap"
+            # The reader can invoke all these callbacks before book_loop resumes.
+            for bound_request, (bound_slug, bound_kind) in socket.subscriptions.items():
+                payload = market_message(bound_request, bound_slug, bound_kind)
+                socket.callbacks["message"](payload)
+                assert archive.rows[-1]["binding_status"] == "inactive_generation"
+                assert archive.rows[-1]["payload"] == payload
+                assert archive.rows[-1]["generation"] == 1
+            socket.callbacks["error"]()
+            socket.callbacks["close"]()
+            socket.callbacks["message"]({"error": {"code": "UNAVAILABLE"}})
+            assert (instance.last_book, instance.last_market_trade) == before
+            assert len([row for row in archive.rows if row["kind"] == "connection_gap"]) == 1
+
+        socket = MarketSocket(receive)
+        instance.socket_factory = lambda: socket
+        instance.markets = {"fixture-5m": market("5m", 300)}
+        monkeypatch.setattr(collector.time, "time", lambda: collector.stamp(utc_at(120)))
+
+        async def finish(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", finish)
+        await instance.book_loop()
+        assert socket.closed and instance.generation == 1
+
+    asyncio.run(scenario())
+
+
 def test_five_minute_rollover_keeps_fifteen_minute_subscription(tmp_path, monkeypatch):
     async def scenario():
         archive, stop = FakeArchive(tmp_path), asyncio.Event()
@@ -680,7 +1010,10 @@ def test_five_minute_rollover_keeps_fifteen_minute_subscription(tmp_path, monkey
                 pass
 
             async def subscribe_market_data(self, request, slugs):
-                subscriptions[request] = slugs[0]
+                subscriptions[request] = (slugs[0], collector.BOOK_SUBSCRIPTION)
+
+            async def subscribe_trades(self, request, slugs):
+                subscriptions[request] = (slugs[0], collector.TRADE_SUBSCRIPTION)
 
             async def unsubscribe(self, request):
                 removed.append(subscriptions[request])
@@ -703,8 +1036,17 @@ def test_five_minute_rollover_keeps_fifteen_minute_subscription(tmp_path, monkey
         fifteen = market("15m", 900, "fifteen")
         instance.markets = {m["slug"]: m for m in (first, next_five, fifteen)}
         await instance.book_loop()
-        assert sorted(subscriptions.values()) == ["fifteen", "first-five", "next-five"]
-        assert removed == ["first-five"]
+        assert set(subscriptions.values()) == {
+            (slug, kind)
+            for slug in ("fifteen", "first-five", "next-five")
+            for kind in (collector.BOOK_SUBSCRIPTION, collector.TRADE_SUBSCRIPTION)
+        }
+        assert len(subscriptions) == 6
+        assert set(removed) == {
+            ("first-five", kind)
+            for kind in (collector.BOOK_SUBSCRIPTION, collector.TRADE_SUBSCRIPTION)
+        }
+        assert len(removed) == 2
         assert instance.generation == 1
 
     asyncio.run(scenario())
@@ -956,6 +1298,30 @@ def test_spot_writer_failure_is_fatal_without_provider_retry(tmp_path, monkeypat
     asyncio.run(scenario())
 
 
+class MarketSocket:
+    def __init__(self, receive):
+        self.receive, self.callbacks, self.subscriptions, self.closed = receive, {}, {}, False
+
+    def on(self, name, callback):
+        self.callbacks[name] = callback
+
+    async def connect(self):
+        pass
+
+    async def subscribe_market_data(self, request, slugs):
+        self.subscribe(request, slugs, collector.BOOK_SUBSCRIPTION)
+
+    async def subscribe_trades(self, request, slugs):
+        self.subscribe(request, slugs, collector.TRADE_SUBSCRIPTION)
+
+    def subscribe(self, request, slugs, kind):
+        self.subscriptions[request] = (slugs[0], kind)
+        self.receive(self, request, slugs[0], kind)
+
+    async def close(self):
+        self.closed = True
+
+
 class SpotSocket:
     def __init__(self, messages=()):
         self.messages, self.sent, self.closed = list(messages), [], False
@@ -1008,6 +1374,28 @@ def market(horizon, seconds, slug=None):
             "indexSymbol": "BRTI",
             "priceToBeat": {"value": "81000.00", "currency": "USD"},
         },
+    }
+
+
+def market_message(request, slug, subscription_type):
+    body = (
+        {
+            "marketSlug": slug,
+            "price": {"value": "0.2500", "currency": "USD"},
+            "quantity": {"value": "0.340000000000000001", "currency": "USD"},
+            "tradeTime": "2026-10-23T21:32:12.379531769Z",
+            "maker": {"side": "ORDER_SIDE_BUY", "intent": "ORDER_INTENT_UNDEFINED"},
+            "taker": {"side": "ORDER_SIDE_SELL", "intent": "ORDER_INTENT_BUY_SHORT"},
+            "id": "D9E23SPG91KP",
+            "state": "TRADE_STATE_NEW",
+        }
+        if subscription_type == collector.TRADE_SUBSCRIPTION
+        else {"marketSlug": slug, "bids": [], "offers": []}
+    )
+    return {
+        "requestId": request,
+        "subscriptionType": subscription_type,
+        "trade" if subscription_type == collector.TRADE_SUBSCRIPTION else "marketData": body,
     }
 
 
