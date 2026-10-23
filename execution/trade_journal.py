@@ -734,12 +734,16 @@ def _risk_entry_costs(rows: list[dict]) -> dict[str, Decimal | None]:
     for row in rows:
         markets.setdefault(row["slug"], []).append(row)
     for market in markets.values():
-        if any(costs[row["trade_id"]] is None for row in market) and _settled_cashflows_match(
-            market
-        ):
-            for row in market:
-                if costs[row["trade_id"]] is None:
-                    costs[row["trade_id"]] = number(row["entry_cost"])
+        if not any(costs[row["trade_id"]] is None for row in market):
+            continue
+        try:
+            if not _settled_cashflows_match(market):
+                continue
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            continue  # Malformed saved evidence remains blocked, never a proof.
+        for row in market:
+            if costs[row["trade_id"]] is None:
+                costs[row["trade_id"]] = number(row["entry_cost"])
     return costs
 
 

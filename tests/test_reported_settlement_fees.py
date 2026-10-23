@@ -99,6 +99,37 @@ def test_reported_fee_proof_preserves_unexplained_evidence(journal, reported_fee
     assert summarize(journal.records())["pnl_confirmations"] == {}
 
 
+@pytest.mark.parametrize(
+    "position,field",
+    [
+        ("beforePosition", "baseCost"),
+        ("beforePosition", "fees"),
+        ("afterPosition", "baseCost"),
+        ("afterPosition", "fees"),
+    ],
+)
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"value": ".0288"},
+        {"currency": "USD"},
+        "bad",
+        {"value": "bad", "currency": "USD"},
+    ],
+)
+def test_malformed_provider_amount_remains_blocked_without_crashing(
+    journal, reported_fee_market, position, field, malformed
+):
+    for row in journal.records()[:2]:
+        row["settlement"]["resolution"][position][field] = malformed
+        journal.update(row["trade_id"], settlement=row["settlement"])
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.exposure()
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.entry_budget(Decimal("100"), Decimal("100"))
+    assert summarize(journal.records())["pnl_confirmations"] == {}
+
+
 @pytest.mark.parametrize("fee", ["0", ".0003"])
 def test_zero_or_positive_reported_fee_is_counted_once(journal, reported_fee_market, fee):
     rows = journal.records()
