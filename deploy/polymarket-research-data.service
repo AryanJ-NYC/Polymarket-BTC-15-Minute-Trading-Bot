@@ -1,0 +1,33 @@
+[Unit]
+Description=Polymarket US continuous BTC research data collector
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+ConditionPathExists=/etc/polymarket-us/.env.us
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=polymarket-us
+Group=polymarket-us
+WorkingDirectory=/opt/polymarket-us/research-collector/current
+ExecStart=/opt/polymarket-us/research-collector/current/.venv/bin/python -m tools.collect_research_data --env-file /etc/polymarket-us/.env.us --output /var/lib/polymarket-us/research-data
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+Restart=on-failure
+RestartSec=15s
+KillSignal=SIGINT
+TimeoutStopSec=60
+MemoryMax=192M
+CPUQuota=25%
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/polymarket-us/research-data
+InaccessiblePaths=-/var/lib/polymarket-us/us-live.sqlite -/var/lib/polymarket-us/us-live.sqlite-wal -/var/lib/polymarket-us/us-live.sqlite-shm
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
