@@ -777,6 +777,13 @@ def test_transient_account_or_discovery_outage_keeps_runner_alive(
     monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
     trader = TradingBot(venue.client, journal, books, live=True)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: None)
+    if path == "/v1/markets":
+        # Keep this recovery case bound to the fifteen-minute contract when
+        # five-minute discovery has priority in ordinary runs.
+        discover_market = venue.client.discover_market
+        venue.client.discover_market = lambda horizon_seconds=900: (
+            discover_market(horizon_seconds) if horizon_seconds == 900 else None
+        )
     venue.failures[("GET", path)] = [failure]
     trader.tick()
     assert journal.records() == []

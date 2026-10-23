@@ -1113,14 +1113,21 @@ class TradingBot:
             return
         # Separate retry clocks keep an absent or ambiguous horizon from pausing
         # the other horizon's discovery, books or admissions.
-        for horizon, attribute, retry_attribute in (
+        discoveries = [
             (900, "market", "next_discovery"),
             (300, "five_minute_market", "next_five_minute_discovery"),
-        ):
+        ]
+        if self.model is None or self.simultaneous:
+            discoveries.reverse()
+        for horizon, attribute, retry_attribute in discoveries:
             market = getattr(self, attribute)
             if market is not None and datetime.now(timezone.utc) < market.end:
                 continue
             setattr(self, attribute, None)
+            if horizon == 900 and self._five_minute_admission is not None:
+                # A newly found five-minute decision runs before another
+                # discovery request. Its durable claim permits retry next tick.
+                continue
             if monotonic() < getattr(self, retry_attribute):
                 continue
             setattr(self, retry_attribute, monotonic() + 30)
@@ -1142,6 +1149,8 @@ class TradingBot:
                 logger.warning("{}-second discovery unavailable ({})", horizon, type(exc).__name__)
                 continue
             setattr(self, attribute, market)
+            if horizon == 300:
+                self._claim_five_minute()
             if market is not None:
                 logger.info(
                     "Following {} | measurement window ends {} UTC",

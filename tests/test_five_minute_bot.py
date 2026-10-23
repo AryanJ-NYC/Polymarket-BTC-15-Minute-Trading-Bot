@@ -27,11 +27,114 @@ def test_five_minute_entry_uses_its_own_book_without_warming_fifteen_minute_stra
     assert row["outcome"] == "up"
     assert Decimal(row["entry_cost"]) == Decimal("0.46")
     assert len(actual_fills) == 1
+    assert len(trader.strategy.ticks) == 0
+    # Startup admits five-minute trading first; the next tick discovers and
+    # samples the fifteen-minute contract without admitting five-minute again.
+    clock.current += timedelta(seconds=1)
+    trader.tick()
+    wait_for(lambda: venue.market["slug"] in stream_feed.books.health()["subscriptions"])
+    venue.markets[venue.market["slug"]] = venue.market
+    publish_five(venue, stream_feed, clock, parse_market(venue.market), bid="0.63", ask="0.65")
+    trader.tick()
     assert trader.strategy.slug == venue.market["slug"]
     assert len(trader.strategy.ticks) == 1
+    assert len(actual_fills) == 1
     assert {five_minute_market.slug, venue.market["slug"]} == set(
         stream_feed.books.health()["subscriptions"]
     )
+
+
+@pytest.mark.parametrize("discovery_result", ["slow", "timeout"])
+def test_startup_five_minute_entry_precedes_slow_optional_fifteen_minute_discovery(
+    venue, journal, stream_feed, clock, five_minute_market, actual_fills, discovery_result
+):
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    discover = venue.client.discover_market
+    handler = venue.on_request
+    horizon = None
+    fifteen_reads = []
+
+    def discover_horizon(horizon_seconds=900):
+        nonlocal horizon
+        horizon = horizon_seconds
+        try:
+            return discover(horizon_seconds)
+        finally:
+            horizon = None
+
+    def delayed_fifteen_market_list(request):
+        if request.url.path == "/v1/markets" and horizon == 900:
+            fifteen_reads.append(clock.current)
+            clock.current += timedelta(seconds=10)
+            if discovery_result == "timeout":
+                raise httpx.ReadTimeout("fifteen-minute discovery timed out", request=request)
+        return handler(request)
+
+    venue.client.discover_market = discover_horizon
+    venue.on_request = delayed_fifteen_market_list
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    decision_time = five_minute_market.start + timedelta(seconds=100)
+    trader.tick()
+    assert fifteen_reads == []
+    assert len(actual_fills) == 1
+    entry = journal.get(five_minute_market.slug + ":five-minute")
+    assert entry["orders"][0]["recorded_at"] == decision_time.isoformat()
+    assert trader.five_minute_market == five_minute_market
+    assert trader.market is None
+
+    clock.current = decision_time + timedelta(seconds=1)
+    trader.tick()
+    assert fifteen_reads == [decision_time + timedelta(seconds=1)]
+    assert (trader.market is not None) is (discovery_result == "slow")
+    assert journal.get(entry["trade_id"]) == entry
+    assert len(actual_fills) == 1
+    assert sum(row["decision"] == "decision_started" for row in journal.opportunities()) == 1
+
+
+@pytest.mark.parametrize("five_minute_status", ["missing", "ambiguous"])
+def test_missing_or_ambiguous_five_minute_discovery_preserves_fifteen_minute_entry(
+    venue, journal, stream_feed, clock, five_minute_market, actual_fills, five_minute_status
+):
+    start = clock.current - timedelta(seconds=300)
+    venue.market["assetPriceTerms"].update(
+        windowStart=start.isoformat(), windowEnd=(start + timedelta(seconds=900)).isoformat()
+    )
+    fifteen = parse_market(venue.market)
+    venue.markets[fifteen.slug] = venue.market
+    before = len(stream_feed.socket.subscriptions)
+    stream_feed.books.set_markets([fifteen, five_minute_market])
+    wait_for(lambda: len(stream_feed.socket.subscriptions) > before)
+    publish_five(venue, stream_feed, clock, fifteen)
+    rows = [venue.market]
+    if five_minute_status == "ambiguous":
+        row = venue.markets[five_minute_market.slug]
+        rows += [row, {**row, "slug": "second-current-five-minute"}]
+    venue.pages = {0: rows}
+    bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
+    row = journal.get(fifteen.slug + ":minute-five")
+    assert row["settings"]["policy_version"] == "btc-15m-minute-five-v1"
+    assert len(actual_fills) == 1
+    assert not journal.entry_observed(five_minute_market.slug, "five-minute")
+
+
+@pytest.mark.parametrize("assigned", [False, True])
+def test_disabled_five_minute_modes_do_not_defer_startup_fifteen_minute_discovery(
+    venue, journal, stream_feed, clock, five_minute_market, actual_fills, tmp_path, assigned
+):
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    trader = bot.TradingBot(
+        venue.client,
+        journal,
+        stream_feed.books,
+        live=True,
+        model=saved_model(tmp_path, 0.8),
+        experiment_id="assigned-startup" if assigned else None,
+    )
+    trader.tick()
+    assert trader.market == parse_market(venue.market)
+    assert trader.five_minute_market == five_minute_market
+    assert not journal.entry_observed(five_minute_market.slug, "five-minute")
+    assert not actual_fills
 
 
 @pytest.mark.parametrize("change", ["deadline", "upper_band", "side", "depth"])
@@ -313,9 +416,14 @@ def test_five_minute_rollover_preserves_fifteen_minute_history_and_subscription(
     before = len(stream_feed.socket.subscriptions)
     stream_feed.books.set_markets([fifteen, five_minute_market])
     wait_for(lambda: len(stream_feed.socket.subscriptions) > before)
+    clock.current = five_minute_market.start + timedelta(seconds=99)
     publish_five(venue, stream_feed, clock, fifteen, bid="0.63", ask="0.65")
     publish_five(venue, stream_feed, clock, five_minute_market, bid="0.63", ask="0.65")
     trader = bot.TradingBot(venue.client, journal, stream_feed.books)
+    trader.tick()
+    clock.current += timedelta(seconds=1)
+    publish_five(venue, stream_feed, clock, fifteen, bid="0.63", ask="0.65")
+    publish_five(venue, stream_feed, clock, five_minute_market, bid="0.63", ask="0.65")
     trader.tick()
     history = list(trader.strategy.ticks)
     assert len(history) == 1
@@ -410,10 +518,16 @@ def test_concurrent_horizon_partial_fills_hold_and_settle_each_provider_contract
     before = len(stream_feed.socket.subscriptions)
     stream_feed.books.set_markets([fifteen, five_minute_market])
     wait_for(lambda: len(stream_feed.socket.subscriptions) > before)
+    clock.current = five_minute_market.start + timedelta(seconds=99)
     publish_five(venue, stream_feed, clock, fifteen)
     publish_five(venue, stream_feed, clock, five_minute_market)
     venue.fill_quantity = 0.25
     trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    assert journal.records() == []
+    clock.current += timedelta(seconds=1)
+    publish_five(venue, stream_feed, clock, fifteen)
+    publish_five(venue, stream_feed, clock, five_minute_market)
     trader.tick()
     five_id = five_minute_market.slug + ":five-minute"
     fifteen_id = fifteen.slug + ":minute-five"
