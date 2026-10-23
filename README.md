@@ -120,7 +120,8 @@ Temporary read failures retain known order IDs and recover automatically.
   preview. Known preflight rejections safely release the reserved order;
   ambiguous create outcomes remain pending and are never retried automatically.
 - Reserves a UTC daily loss budget of **10% of current bankroll** against recorded
-  losses plus the full cost of still-open positions and the next order. This is
+  net realized losses plus the full cost of still-open positions and the next order.
+  Realized profits replenish this budget. This is
   the bot's own ledger, not
   a claim about account-wide daily P&L or strategy profitability.
 - Checks for 30% stop loss and 20% take profit using available exit depth and
@@ -150,7 +151,7 @@ All amounts are USD:
 bankroll = credited currentBalance + sum(signed YES quantity * fresh YES midpoint)
 exposure = sum(entry cost including fees * remaining quantity / filled entry quantity)
            + still-unaccounted BUY reservations
-daily loss budget remaining = 0.10 * bankroll - realized losses today (UTC)
+daily loss budget remaining = 0.10 * bankroll + realized net P&L today (UTC)
                               - original full entry cost of open trades
 entry budget = max(0, min(0.02 * bankroll, buyingPower,
                           0.10 * bankroll - exposure, daily loss budget remaining))
@@ -179,8 +180,9 @@ $100 bankroll targets $2 with a $10 daily loss budget; $500 targets $10 with a
 $50 daily loss budget, before tighter limits. The five-open-position guard and
 remaining exposure/daily capacity can limit entries further. The daily percentage
 uses the same current account snapshot as entry and exposure sizing, rather than
-a balance frozen at the start of the day. Realized losses are counted by UTC
-calendar day; realized gains do not offset them. The daily guard conservatively
+a balance frozen at the start of the day. Realized gains and losses are netted by UTC
+closing day, after collected fees. Only closed trades replenish the budget;
+unrealized gains and partial-exit proceeds do not. The daily guard conservatively
 keeps each open trade's original full entry cost reserved even after a partial
 exit; aggregate exposure releases cost
 proportionally. Falling quotes do not release funded cost. Unresolved orders
@@ -420,7 +422,7 @@ quote quality. There is no fusion, warmup, model fitting or timing/threshold swe
 Five-minute admission precedes fifteen-minute admission within a tick, recorded as
 `five-minute-first-v1`; existing ordering within the fifteen-minute comparison is
 preserved. Every admission rechecks the shared 10% funded exposure, 10% UTC daily
-gross-loss capacity and five-open-trade limit, including pending and legacy lots.
+net-loss capacity and five-open-trade limit, including pending and legacy lots.
 Opposite-side conflicts concern the same provider contract, not all BTC horizons.
 Existing exits cannot sell the five-minute policy's settlement-only shares. The
 usual `--duration`, `--one-trade`, paper and live controls remain in force; adding
@@ -635,7 +637,7 @@ rounded-fee/positive-EV checks apply. Any `--extra-cost-usd` allowance is deduct
 from the target before sizing and remains part of the EV check.
 
 Sizing uses the refreshed account bankroll and available buying power. The
-existing shared 10% funded exposure, 10% daily gross-loss budget and five-position
+existing shared 10% funded exposure, 10% daily net-loss budget and five-position
 limits still apply. Final quote checks, including after preview, also reject a
 planned stake if the refreshed probability no longer supports its size.
 

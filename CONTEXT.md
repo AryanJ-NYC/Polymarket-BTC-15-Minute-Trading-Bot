@@ -17,7 +17,7 @@ _Avoid_: Position, when referring to an individual experiment's trade.
 
 **Five-minute policy**: `btc-5m-strong-favorite-100-v1` makes one durable decision at elapsed 100–105 seconds in a five-minute contract, buys the favorite with midpoint above .80 and at most .95 at its executable side price, and holds its owned shares to settlement. A skip, crash or zero fill consumes the decision. No tick in the interval produces one missed-window skip. It uses neither fifteen-minute history nor a fitted model.
 
-**Horizon admission priority**: Five-minute decisions are admitted first in the serial runner, followed by the existing fifteen-minute policy order. Every reservation shares the same account, funded-exposure and UTC gross-loss limits. The new policy runs in ordinary and simultaneous modes; assigned-comparison and model-only mode selection stays unchanged. Five-minute lots are outside the frozen comparison arm definitions.
+**Horizon admission priority**: Five-minute decisions are admitted first in the serial runner, followed by the existing fifteen-minute policy order. Every reservation shares the same account, funded-exposure and UTC net-loss limits. The new policy runs in ordinary and simultaneous modes; assigned-comparison and model-only mode selection stays unchanged. Five-minute lots are outside the frozen comparison arm definitions.
 
 **Same-contract comparison**: The three baseline timing experiments plus one model experiment at 13:00–14:00, with the ordinary minute-five policy, admitted serially under the shared account limits. Saved priority alternates the overlapping policies; shared holdings and conflicts can affect coverage. Minute-five results have their own policy cohort outside the baseline/model arm totals.
 

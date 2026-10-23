@@ -103,21 +103,98 @@ def test_daily_guard_keeps_full_original_cost_reserved_after_partial_exit(venue,
         journal.risk_check(Decimal("0.51"), Decimal("50"))
 
 
-def test_realized_daily_losses_still_limit_entries_without_netting_gains(venue, journal):
+def test_realized_daily_profit_replenishes_loss_budget(venue, journal):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
-    _record_buy(journal, plan, Decimal("4.75"))
+    _record_buy(journal, plan, Decimal("9.75"))
     journal.settle(market.slug, Decimal("0"))
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.25")
     profitable = replace(plan, slug="profitable-contract")
-    _record_buy(journal, profitable, Decimal("1"))
+    _record_buy(journal, profitable, Decimal("9"))
     journal.settle(profitable.slug, Decimal("1"))
     assert journal.exposure() == Decimal("0")
-    assert journal.entry_budget(Decimal("50"), Decimal("50")) == (
-        Decimal("0.25"),
+    assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
+        Decimal("1.25"),
         "daily 10% loss budget",
     )
+    journal.risk_check(Decimal("1.25"), Decimal("100"))
     with pytest.raises(ValueError, match="loss budget"):
-        journal.risk_check(Decimal("0.26"), Decimal("50"))
+        journal.risk_check(Decimal("1.26"), Decimal("100"))
+
+
+def test_only_closed_trade_profit_replenishes_budget_after_partial_exit(venue, journal):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    _record_buy(journal, plan, Decimal("9.50"))
+    journal.settle(plan.slug, Decimal("0"))
+    profitable = replace(plan, slug="partially-sold")
+    _record_buy(journal, profitable, Decimal("0.30"))
+    journal.reserve_exit(profitable.slug, replace(profitable, action="SELL", quantity=Decimal("5")))
+    journal.finish_order(profitable.slug, Decimal("5"), Decimal("1"), Decimal("0"))
+    # Even proceeds above the whole entry cost do not release an open trade's reserve.
+    assert journal.get(profitable.slug)["state"] == "open"
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.20")
+    journal.reserve_exit(profitable.slug, replace(profitable, action="SELL", quantity=Decimal("5")))
+    journal.finish_order(profitable.slug, Decimal("5"), Decimal("0.10"), Decimal("0"))
+    assert journal.get(profitable.slug)["pnl"] == "0.80"
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("1.30")
+
+
+def test_closed_sale_replenishes_only_profit_after_both_order_fees(venue, journal):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    _record_buy(journal, plan, Decimal("9.75"))
+    journal.settle(plan.slug, Decimal("0"))
+    profitable = replace(plan, slug="fee-inclusive-sale", quantity=Decimal("10"))
+    journal.reserve_entry(profitable, market.end)
+    journal.finish_order(profitable.slug, Decimal("10"), Decimal("9"), Decimal("0.10"))
+    journal.reserve_exit(profitable.slug, replace(profitable, action="SELL"))
+    journal.finish_order(profitable.slug, Decimal("10"), Decimal("9.50"), Decimal("0.20"))
+    assert journal.get(profitable.slug)["pnl"] == "0.20"
+    assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
+        Decimal("0.45"),
+        "daily 10% loss budget",
+    )
+
+
+def test_prior_utc_day_profit_does_not_replenish_todays_budget(venue, journal, clock):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    _record_buy(journal, plan, Decimal("1"))
+    journal.settle(plan.slug, Decimal("1"))
+    clock.current += timedelta(days=1)
+    losing = replace(plan, slug="todays-loss")
+    _record_buy(journal, losing, Decimal("9.75"))
+    journal.settle(losing.slug, Decimal("0"))
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.25")
+
+
+def test_profit_credit_uses_conservative_settled_cost_instead_of_raw_pnl(venue, journal):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
+    _record_buy(journal, plan, Decimal("9.75"))
+    journal.settle(plan.slug, Decimal("0"))
+    profitable = replace(plan, slug="tolerated-winning-cost")
+    journal.reserve_entry(profitable, market.end)
+    journal.finish_order(profitable.slug, Decimal("1.35"), Decimal("0.9585"), Decimal("0.02"))
+    journal.settle(
+        profitable.slug,
+        Decimal("1"),
+        resolution={
+            "beforePosition": {
+                "cost": {"value": "0.9885", "currency": "USD"},
+                "fees": {"value": "0.03", "currency": "USD"},
+            }
+        },
+    )
+    row = journal.get(profitable.slug)
+    assert row["pnl"] is None and row["accounting_issues"]
+    # A legacy raw result must not replace the higher fee-inclusive risk cost.
+    journal.update(profitable.slug, pnl="0.3715")
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.6115")
+    journal.risk_check(Decimal("0.6115"), Decimal("100"))
+    with pytest.raises(ValueError, match="loss budget"):
+        journal.risk_check(Decimal("0.6116"), Decimal("100"))
 
 
 @pytest.mark.parametrize("loss,room", [("9.75", "0.25"), ("10", "0"), ("10.25", "0")])
@@ -388,7 +465,7 @@ def settled_market_without_provider_fee(venue, journal, clock, request):
 
 @pytest.mark.parametrize(
     "settled_market_without_provider_fee,daily_budget",
-    [("0", "0.28"), ("1", "0.0032")],
+    [("0", "0.24"), ("1", "0.1503")],
     indirect=["settled_market_without_provider_fee"],
 )
 def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidence(
@@ -404,7 +481,7 @@ def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidenc
     )
     assert journal.exposure() == 0
     assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
-    assert journal.entry_budget(Decimal("14"), Decimal("100"))[0] == Decimal(daily_budget)
+    assert journal.entry_budget(Decimal("12"), Decimal("100"))[0] == Decimal(daily_budget)
     journal.risk_check(Decimal("2"), Decimal("100"))
     journal.settle_market(market.slug, yes_value, resolution=rows[0]["settlement"]["resolution"])
     assert journal.records() == rows
@@ -413,7 +490,7 @@ def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidenc
     try:
         assert reopened.exposure() == 0
         assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
-        assert reopened.entry_budget(Decimal("14"), Decimal("100"))[0] == Decimal(daily_budget)
+        assert reopened.entry_budget(Decimal("12"), Decimal("100"))[0] == Decimal(daily_budget)
         assert reopened.records() == rows
     finally:
         reopened.close()
@@ -514,11 +591,11 @@ def settled_fifo_market(venue, journal, clock, request):
 @pytest.mark.parametrize(
     "settled_fifo_market,bankroll,daily_budget",
     [
-        (("0", "2.9064", "-.3111", "-.0975"), "10", ".1808"),
-        (("0", "2.91715", "-.36035", "-.1575"), "10", ".1808"),
-        (("1", "2.9064", "-.3111", "-3.2175"), "40", ".4024"),
-        (("0.0", "2.9064", "-.3111", "-.0975"), "10", ".1808"),
-        (("1.00", "2.9064", "-.3111", "-3.2175"), "40", ".4024"),
+        (("0", "2.9064", "-.3111", "-.0975"), "1.75", ".0175"),
+        (("0", "2.91715", "-.36035", "-.1575"), "1.75", ".0175"),
+        (("1", "2.9064", "-.3111", "-3.2175"), "40", ".7225"),
+        (("0.0", "2.9064", "-.3111", "-.0975"), "1.75", ".0175"),
+        (("1.00", "2.9064", "-.3111", "-3.2175"), "40", ".7225"),
     ],
     indirect=["settled_fifo_market"],
 )
@@ -606,7 +683,7 @@ def test_zero_fill_policy_does_not_hide_settled_cashflows(venue, journal, settle
             journal.entry_budget(Decimal("100"), Decimal("100"))
     else:
         assert journal.exposure() == 0
-        assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal(".1808")
+        assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal(".20")
 
 
 @pytest.mark.parametrize(
