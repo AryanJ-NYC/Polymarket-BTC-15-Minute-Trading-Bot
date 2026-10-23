@@ -373,6 +373,12 @@ def test_report_separates_actual_model_and_baseline_results(venue, clock, tmp_pa
         ("baseline", {"policy_version": "baseline-v1"}, "0.20", []),
         ("model-win", {"model_tag": "logistic-abc", "model": {"version": 1}}, "0.30", []),
         ("model-disputed", {"model_tag": "logistic-abc"}, "0.50", ["Unknown fee"]),
+        (
+            "kelly",
+            {"model_tag": "logistic-abc", "sizing_policy": "quarter-kelly-v3"},
+            "0.10",
+            [],
+        ),
     ]
     for index, (slug, settings, pnl, issues) in enumerate(examples):
         trade = replace(plan, slug=slug)
@@ -400,10 +406,16 @@ def test_report_separates_actual_model_and_baseline_results(venue, clock, tmp_pa
         check=True,
     )
     result = json.loads(report.stdout)
-    assert result["trade_count"] == 3
-    assert result["known_realized_net_pnl"] == "0.50"
+    assert result["trade_count"] == 4
+    assert result["known_realized_net_pnl"] == "0.60"
     assert result["total_net_pnl"] is None
-    assert set(result["by_policy"]) == {"baseline-v1", "logistic-abc", "legacy"}
+    assert set(result["by_policy"]) == {
+        "baseline-v1",
+        "logistic-abc",
+        "logistic-abc:quarter-kelly-v3",
+        "legacy",
+    }
+    assert result["by_policy"]["logistic-abc:quarter-kelly-v3"]["total_net_pnl"] == "0.10"
     baseline = result["by_policy"]["baseline-v1"]
     assert baseline["trade_count"] == baseline["known_closed_count"] == 1
     assert baseline["total_net_pnl"] == "0.20"

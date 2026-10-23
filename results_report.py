@@ -534,7 +534,10 @@ def _comparison_settings(row: dict) -> dict:
 
 def _policy(row: dict) -> str:
     settings = row.get("settings") or {}
-    return settings.get("model_tag") or settings.get("policy_version") or "legacy"
+    key = settings.get("model_tag") or settings.get("policy_version") or "legacy"
+    if settings.get("sizing_policy") == "quarter-kelly-v3":
+        return f"{key}:quarter-kelly-v3"
+    return key
 
 
 FIVE_MINUTE_POLICY = "btc-5m-strong-favorite-100-v1"

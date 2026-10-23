@@ -62,6 +62,7 @@ def test_assigned_ab_keeps_original_single_window_spot_warmup(
         stream_feed.books,
         context=context,
         model=saved_model(tmp_path, 0.8),
+        kelly=False,
         experiment_id="test-baseline",
     )
     trader.strategy.processors = [PriceDivergenceProcessor()]
@@ -148,6 +149,7 @@ def test_known_model_policy_labels_do_not_rewrite_frozen_ab_configuration(
         journal,
         stream_feed.books,
         model=saved_model(tmp_path, 0.8),
+        kelly=False,
         experiment_id=experiment_id,
     )
     trader.market = future_market

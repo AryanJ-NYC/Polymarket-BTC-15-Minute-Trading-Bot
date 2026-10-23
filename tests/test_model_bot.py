@@ -57,7 +57,7 @@ def test_model_enters_up_with_fee_bound_and_records_actual_partial_fill(
     model = saved_model(tmp_path, 0.8)
     journal = TradeJournal(tmp_path / "model.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, books, live=True, model=model)
+        trader = TradingBot(venue.client, journal, books, live=True, model=model, kelly=False)
         warm_up(trader, venue, clock, stream_feed)
         trader.tick()
         row = journal.records()[0]
@@ -83,7 +83,7 @@ def test_preview_crossing_cutoff_skips_without_unknown_submission(
     journal = TradeJournal(tmp_path / "cutoff.sqlite")
     try:
         trader = TradingBot(
-            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8), kelly=False
         )
         warm_up(trader, venue, clock, stream_feed)
         clock.current += timedelta(seconds=50)
@@ -128,6 +128,7 @@ def test_nonpositive_ev_never_submits(
             books,
             live=True,
             model=saved_model(tmp_path, q),
+            kelly=False,
             extra_cost=Decimal(extra_cost),
         )
         warm_up(trader, venue, clock, stream_feed)
@@ -149,7 +150,7 @@ def test_model_can_select_down_against_baseline_direction(
     journal = TradeJournal(tmp_path / "down.sqlite")
     try:
         trader = TradingBot(
-            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.2)
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.2), kelly=False
         )
         warm_up(trader, venue, clock, stream_feed)
         trader.tick()
@@ -172,7 +173,7 @@ def test_refreshed_book_removes_apparent_edge(venue, tmp_path, clock, books, str
     journal = TradeJournal(tmp_path / "refresh.sqlite")
     try:
         trader = TradingBot(
-            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8), kelly=False
         )
         warm_up(trader, venue, clock, stream_feed)
         balances = 0
@@ -218,7 +219,7 @@ def test_account_reads_crossing_cutoff_do_not_reserve(venue, tmp_path, clock, bo
     journal = TradeJournal(tmp_path / "account-cutoff.sqlite")
     try:
         trader = TradingBot(
-            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8), kelly=False
         )
         warm_up(trader, venue, clock, stream_feed)
         clock.current += timedelta(seconds=50)
@@ -252,7 +253,7 @@ def test_insufficient_executable_depth_skips_both_candidates(
     journal = TradeJournal(tmp_path / "depth.sqlite")
     try:
         trader = TradingBot(
-            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8), kelly=False
         )
         warm_up(trader, venue, clock, stream_feed)
         publish_book(stream_feed, venue, clock, quantity="0.001")
@@ -360,7 +361,7 @@ def test_model_uses_refreshed_bankroll_and_buying_power(
     journal = TradeJournal(tmp_path / "bankroll-model.sqlite")
     try:
         trader = TradingBot(
-            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8), kelly=False
         )
         warm_up(trader, venue, clock, stream_feed)
         venue.balance_snapshots = [
@@ -405,7 +406,7 @@ def test_optional_history_cannot_rate_limit_current_warmup_or_entry(
         venue.sdk._http.close()
         venue.sdk._http = httpx.Client(transport=httpx.MockTransport(rate_limited_history))
         trader = TradingBot(
-            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8)
+            venue.client, journal, books, live=True, model=saved_model(tmp_path, 0.8), kelly=False
         )
         warm_up(trader, venue, clock, stream_feed)
         trader.tick()
@@ -578,7 +579,7 @@ def test_preview_rejects_model_edge_lost_when_opposite_quote_changes(
     model = saved_model(tmp_path, 0.8, coefficients=[5.0, 0.0, 0.0], intercept=math.log(4) - 7)
     journal = TradeJournal(tmp_path / "preview-edge.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, books, live=True, model=model)
+        trader = TradingBot(venue.client, journal, books, live=True, model=model, kelly=False)
         warm_up(trader, venue, clock, stream_feed)
 
         def changed_opposite_quote(request):

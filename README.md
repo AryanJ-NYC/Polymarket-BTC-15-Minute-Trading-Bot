@@ -113,7 +113,8 @@ Temporary read failures retain known order IDs and recover automatically.
   rounded down to the market increment and visible depth. **Targets at most 2%
   of current account bankroll per entry, including a conservative fee reserve,
   with 10% aggregate funded exposure.** Never increases spend to meet minimum
-  quantity. Maximum five open positions.
+  quantity. Maximum five open positions. The default model Kelly policy below
+  uses an edge-dependent target capped at 4% instead of the baseline's 2% target.
 - Rechecks eligible book generation, executable price/depth, freshness, and entry
   deadline after slow work and immediately before submission, including after
   preview. Known preflight rejections safely release the reserved order;
@@ -139,9 +140,11 @@ Temporary read failures retain known order IDs and recover automatically.
 
 ### Bankroll sizing
 
-The shared Decimal fractions in `execution/risk.py` are `0.02` (2% per entry),
+The shared Decimal fractions in `execution/risk.py` are `0.02` (2% per baseline entry),
 `0.10` (10% aggregate exposure), and `0.10` (10% daily loss budget).
-All amounts below are USD:
+The formula and examples in this section describe baseline/`--no-kelly` sizing;
+default model sizing replaces the 2% target with the quarter-Kelly target below.
+All amounts are USD:
 
 ```text
 bankroll = credited currentBalance + sum(signed YES quantity * fresh YES midpoint)
@@ -498,16 +501,20 @@ python bot.py --live --model logs/candidate.json --experiment-id btc-four-compar
 
 The three baseline timing entries and minute-five policy run alongside one model
 entry at 13:00–14:00. Each slot has its own durable attempt and saved policy, including a `model-current`
-trade key. Model entries retain the existing 2% bankroll sizing, fee-aware EV gate,
-and +20%/-30% exits. There is no additional allowance: all five share the same
-10% exposure/daily-loss fractions and five-open-trade guard. Five eligible entries
-can fund roughly 10% of bankroll before exits; actual limits can block later slots.
+trade key. Model entries use fee-aware quarter Kelly capped at 4% and hold to
+settlement; baseline entries keep their 2% target and saved exits. There is no
+additional allowance: all five share the same 10% exposure/daily-loss fractions
+and five-open-trade guard. These shared limits can block later slots.
 
+Model comparisons default to quarter Kelly. The supplied ID becomes a separate
+Kelly cohort ending in `.kelly-v3`; a restart of the same command reuses it.
+`--no-kelly` retains the original ID and legacy fixed-percentage model behavior.
 Registration pins `same-contract-v1`, all timing windows, baseline/model settings,
 minute-five settings, model tag and the admission-order rule. A comparison enrolled
 before minute-five was added needs a new ID; its immutable definition is preserved.
-New enrollment waits for a whole contract; restarts retain it. Existing assigned A/B comparisons keep their original behavior
-and records, and their IDs cannot be reused with this configuration.
+New enrollment waits for a whole contract; restarts retain it. Existing assigned
+A/B records remain separate. Switching between assigned and simultaneous modes
+requires a new supplied ID because their definitions differ.
 
 At 13:00, the same SHA-256 comparison-ID/NUL/contract rule chooses whether baseline
 or model is evaluated first. Each admission rereads funds and executable quotes;
@@ -566,21 +573,78 @@ For the refreshed book and Decimal-sized executable quantity Q, entries compare
 both `Q*(q - YES ask) - F` for Up and `Q*(YES bid - q) - F` for Down. F is the
 existing conservative rounded fee bound, counted once. `--extra-cost-usd` may
 subtract one additional nonnegative modeled dollar cost per entry. Only a
-strictly positive result may enter. Both policies use the current bankroll
-limits: 2% entry target, 10% funded exposure and 10% daily loss budget, with
-existing depth and five-position checks. Slow account reads and order
+strictly positive result may enter. Baseline and `--no-kelly` model entries use
+a 2% target; default model entries use quarter Kelly capped at 4%, as below.
+All policies share 10% funded exposure and 10% daily loss budgets, with existing
+depth and five-position checks. Slow account reads and order
 preview cannot extend the minute-14 cutoff.
 
 Decision settings retain the full model JSON, its SHA-256 tag, q, candidate
 quantities, prices, fee bounds and EV. `results_report.py` adds `by_policy` metrics
 for each model tag and baseline policy, using actual fills, fees and P&L; it does
-not treat prediction scores as trading returns. Existing exit settings remain
-in effect, so entry EV is a settlement-payoff estimate, not a promise about the
-realized result of earlier exits.
+not treat prediction scores as trading returns. Default model entries hold to
+settlement. Baseline and `--no-kelly` entries retain price exits, so their entry
+EV is a settlement-payoff estimate, not a promise about earlier exit returns.
 
 Track each experiment's sample counts, checks, deployed revision, prediction
 metrics and actual execution results in its GitHub issue or PR. Automated fixture
 coverage, deployed behavior and live execution are separate evidence.
+
+### Quarter Kelly with a 4% ceiling
+
+Selecting a model automatically uses quarter Kelly:
+
+```bash
+python bot.py --model logs/model.json
+```
+
+Add `--live` to place real orders. The bot runs continuously until stopped;
+there is no automatic experiment end or timed promotion. `--kelly` is an
+optional explicit spelling of the default. `--no-kelly` selects the legacy
+2% model sizing and price exits.
+
+Assigned and simultaneous comparisons automatically use a separate immutable
+Kelly cohort: the supplied `--experiment-id` gains `.kelly-v3`. IDs longer than
+55 characters use a readable prefix and stable hash to stay within 64 characters;
+the original ID is saved in the configuration. Logs show both IDs. Pass the
+original supplied ID again on restart. `--no-kelly` uses that original ID and
+configuration. Model/cost changes still require a new supplied ID.
+
+The existing DigitalOcean command already selects a model and runs without
+duration/trade-count limits. When this release reaches passing main CI, the
+enabled updater deploys it at the next flat-account quiet window and resumes the
+active service with default Kelly. No additional service flag is needed. Its
+current comparison becomes `btc-five-20261022-a0201afd.kelly-v3`, preserving the
+old results. The updater checks every five minutes; merge does not bypass its
+CI, flat-account or reconciliation requirements. Existing recoverable-failure
+restart behavior and operator/reconciliation stops remain intact.
+
+For each side's estimated settlement probability `q`, the target is:
+
+```text
+c = executable side price + feeCoefficient / 4
+fraction = min(0.04, 0.25 * max(0, (q - c) / (1 - c)))
+```
+
+No bet is placed when `c >= 1` or the estimated edge is nonpositive. The 4% is
+a ceiling, not a fixed bet: at a fee-inclusive cost of $0.50, probabilities of
+0.52 and 0.58 target 1% and 4% of bankroll respectively. This is approximate
+fractional Kelly, not an exact optimum with uncertain probabilities and rounded
+fees. The fee reserve is conservative; quantity flooring and the existing
+rounded-fee/positive-EV checks apply. Any `--extra-cost-usd` allowance is deducted
+from the target before sizing and remains part of the EV check.
+
+Sizing uses the refreshed account bankroll and available buying power. The
+existing shared 10% funded exposure, 10% daily gross-loss budget and five-position
+limits still apply. Final quote checks, including after preview, also reject a
+planned stake if the refreshed probability no longer supports its size.
+
+New Kelly model trades **hold to official settlement**, because this formula
+models a $1-or-zero settlement payoff. Their saved exit policy survives restart,
+including a restart with `--no-kelly`. Earlier trades retain their own saved exit
+policy. Reports separate Kelly results from legacy sizing for the same model
+tag. The sizing change does not retrain or replace the selected probability
+model. Baseline-only operation is unchanged.
 
 ### Run baseline and model together
 
@@ -599,16 +663,17 @@ period, on different contracts. They do not compete for the same account positio
 This is an interleaved A/B experiment, rather than two traders placing orders on
 the same contract. A skipped model opportunity stays with the model arm.
 
-The experiment ID pins the candidate model tag, assignment version, baseline
+The effective experiment ID pins the candidate model tag, assignment version, baseline
 settings and extra modeled cost in the journal. Reusing an ID with changed
 configuration fails startup. Restarting the same configuration preserves its
 original start and assignments. New enrollment begins with the first whole
 15-minute contract after registration. Existing positions continue to be managed
 using their saved settings, including positions opened before the experiment.
 
-Both arms share the same account, journal and unchanged limits: 2% per-entry
-target, five open positions, 10% aggregate funded exposure and the 10% daily loss
-budget. Existing losses, legacy positions and pending orders count toward those
+Both arms share the same account and journal. Baseline targets 2% per entry;
+default model entries use quarter Kelly capped at 4%. Both share five open
+positions, 10% aggregate funded exposure and the 10% daily loss budget.
+Existing losses, legacy positions and pending orders count toward those
 limits across both arms. There is no separate allowance for the model. Do not
 start a second runner or use a second journal for the same account.
 
@@ -630,8 +695,8 @@ different numbers of fills. Compare their observed opportunities as well as thei
 financial results. Prediction scores, simulated fills and actual trading returns
 are separate evidence.
 
-Without `--experiment-id`, the existing baseline-only and model-only modes keep
-their behavior. Adding the flag requires an explicitly selected model; it never
+Without `--experiment-id`, baseline-only mode stays unchanged and model-only
+mode uses default Kelly. Adding the flag requires an explicitly selected model; it never
 activates from an environment variable or automatically selects a new artifact.
 
 ## Fee reconciliation

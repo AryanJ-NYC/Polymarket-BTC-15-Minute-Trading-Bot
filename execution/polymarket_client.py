@@ -713,6 +713,7 @@ QUOTE_REASONS = {
     "favorite_no_longer_eligible": "Minute-five favorite is no longer eligible",
     "direction_no_longer_eligible": "Entry direction is no longer eligible",
     "model_edge_nonpositive": "Model edge is no longer positive",
+    "model_stake_exceeds_refreshed_edge": "Order exceeds the refreshed Kelly stake",
     "executable_price_changed": "Executable price changed",
     "executable_depth_changed": "Executable depth changed",
     "missing_bids": "Market book has no positive bids",

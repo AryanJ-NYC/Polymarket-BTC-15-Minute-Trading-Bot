@@ -41,7 +41,14 @@ from execution.polymarket_client import (
     retryable_api_error,
     validate_book,
 )
-from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
+from execution.risk import (
+    DAILY_LOSS_FRACTION,
+    ENTRY_BANKROLL_FRACTION,
+    KELLY_MAX_BANKROLL_FRACTION,
+    KELLY_MULTIPLIER,
+    MAX_EXPOSURE_FRACTION,
+    kelly_fraction,
+)
 from execution.trade_journal import TradeJournal, entry_key, pending_plan
 from probability_model import ProbabilityModel, load_model
 
@@ -65,6 +72,12 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env.us")
     parser.add_argument(
         "--model", type=Path, help="Use a fitted probability model JSON for entries"
+    )
+    parser.add_argument(
+        "--kelly",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use 4%%-capped quarter Kelly with --model (default); --no-kelly restores legacy sizing",
     )
     parser.add_argument(
         "--experiment-id",
@@ -94,6 +107,8 @@ def main() -> int:
     try:
         model = load_model(args.model) if args.model is not None else None
         _validate_experiment(args.experiment_id, model, args.simultaneous)
+        if args.kelly and model is None:
+            raise ValueError("--kelly requires --model")
         extra_cost = number(args.extra_cost_usd)
         if extra_cost < 0 or (model is None and extra_cost != 0):
             raise ValueError("Extra cost must be nonnegative and requires --model")
@@ -145,6 +160,7 @@ def main() -> int:
             live=args.live,
             one_trade=args.one_trade,
             model=model,
+            kelly=args.kelly,
             extra_cost=extra_cost,
             context=context,
             experiment_id=args.experiment_id,
@@ -212,8 +228,12 @@ class TradingBot:
         context: ContextRefresher | None = None,
         experiment_id: str | None = None,
         simultaneous: bool = False,
+        kelly: bool | None = None,
     ):
         _validate_experiment(experiment_id, model, simultaneous)
+        kelly = model is not None if kelly is None else kelly
+        if kelly and model is None:
+            raise ValueError("Kelly sizing requires a model")
         extra_cost = number(extra_cost)
         if extra_cost < 0 or (model is None and extra_cost != 0):
             raise ValueError("Extra cost must be nonnegative and requires a model")
@@ -277,7 +297,18 @@ class TradingBot:
                 exit_policy="price-thresholds-v1",
                 sizing_policy="bankroll-percentage-v1",
             )
+        if kelly:
+            self._model_settings.update(
+                policy_version="btc-15m-model-kelly-v1",
+                sizing_policy="quarter-kelly-v3",
+                exit_policy="model-settlement-v1",
+                entry_bankroll_fraction=str(KELLY_MAX_BANKROLL_FRACTION),
+                kelly_multiplier=str(KELLY_MULTIPLIER),
+            )
         if experiment_id is not None:
+            requested_id = experiment_id
+            if kelly:
+                experiment_id = _kelly_experiment_id(requested_id)
             self.experiment = journal.start_experiment(
                 experiment_id,
                 {
@@ -287,6 +318,14 @@ class TradingBot:
                     "model_tag": model.tag,
                     "extra_cost_usd": str(extra_cost),
                     "baseline_settings": self._baseline_settings,
+                    **(
+                        {
+                            "model_settings": self._model_settings,
+                            "requested_experiment_id": requested_id,
+                        }
+                        if kelly
+                        else {}
+                    ),
                     **(
                         {
                             "baseline_windows": TIMING_WINDOWS,
@@ -300,8 +339,9 @@ class TradingBot:
                 },
             )
             logger.info(
-                "Experiment {} | model {} | whole contracts from {} | shared bankroll limits | simultaneous={}",
+                "Experiment {} (requested {}) | model {} | whole contracts from {} | shared bankroll limits | simultaneous={}",
                 experiment_id,
+                requested_id,
                 model.tag,
                 self.experiment["eligible_from"],
                 simultaneous,
@@ -826,7 +866,11 @@ class TradingBot:
                 )
             return None, settings
         try:
-            budget, reason = self.journal.entry_budget(account.bankroll, account.buying_power)
+            budget, reason = self.journal.entry_budget(
+                account.bankroll,
+                account.buying_power,
+                entry_fraction=number(settings["entry_bankroll_fraction"]),
+            )
         except (ValueError, RuntimeError) as exc:
             logger.info("Entry skipped: {}", exc)
             if settings.get("timing_preset") == "five-minute":
@@ -849,7 +893,7 @@ class TradingBot:
             "Entry sizing | bankroll=${} | target=${} | budget=${} | exposure=${} | "
             "buying power=${} | limit={}",
             account.bankroll,
-            account.bankroll * ENTRY_BANKROLL_FRACTION,
+            account.bankroll * number(settings["entry_bankroll_fraction"]),
             budget,
             self.journal.exposure(),
             account.buying_power,
@@ -875,7 +919,9 @@ class TradingBot:
                     deadline=market.start + timedelta(seconds=settings["entry_end_seconds"]),
                 )
             else:
-                plan, prediction = self._model_plan(market, book, budget, settings)
+                plan, prediction = self._model_plan(
+                    market, book, budget, settings, account.bankroll
+                )
                 settings = {**settings, "prediction": prediction}
                 if plan is None:
                     self.journal.record_opportunity(
@@ -889,14 +935,18 @@ class TradingBot:
                 self.journal.record_opportunity(market, book, "plan_rejected", outcome, settings)
             return None, settings
         try:
-            self.journal.risk_check(plan.budget, account.bankroll)
+            self.journal.risk_check(
+                plan.budget,
+                account.bankroll,
+                entry_fraction=number(settings["entry_bankroll_fraction"]),
+            )
         except (ValueError, RuntimeError):
             if capture:
                 self.journal.record_opportunity(market, book, "risk_rejected", outcome, settings)
             return None, settings
         return plan, settings
 
-    def _model_plan(self, market, book, budget, settings):
+    def _model_plan(self, market, book, budget, settings, bankroll):
         if market.horizon_seconds != 900:
             raise ValueError("The fitted model requires a fifteen-minute contract")
         seconds_remaining = (market.end - datetime.now(timezone.utc)).total_seconds()
@@ -907,24 +957,44 @@ class TradingBot:
         )
         prediction = {
             "q_up": str(q),
+            "sizing_bankroll": str(bankroll),
             "seconds_remaining": seconds_remaining,
             "quote_timestamp": book.timestamp.isoformat(),
             "candidates": {},
         }
         candidates = []
         for outcome in ("up", "down"):
+            payout_probability = q if outcome == "up" else 1 - q
+            target = budget
+            sizing = {}
+            if settings.get("sizing_policy") == "quarter-kelly-v3":
+                price = book.asks[0][0] if outcome == "up" else 1 - book.bids[0][0]
+                unit_cost = price + market.fee_coefficient / 4
+                fraction = kelly_fraction(payout_probability, unit_cost)
+                target = max(Decimal("0"), min(budget, bankroll * fraction) - self.extra_cost)
+                sizing = {
+                    "fraction": str(fraction),
+                    "unit_cost": str(unit_cost),
+                    "target": str(bankroll * fraction),
+                    "budget": str(target),
+                }
+                if target <= 0:
+                    prediction["candidates"][outcome] = {**sizing, "skip": "nonpositive_edge"}
+                    continue
             try:
                 plan = self.exchange.buy_plan(
                     market,
                     book,
                     outcome,
-                    budget,
+                    target,
                     deadline=market.start + timedelta(seconds=settings["entry_end_seconds"]),
                 )
             except ValueError:
-                prediction["candidates"][outcome] = {"skip": "insufficient_depth_or_invalid_plan"}
+                prediction["candidates"][outcome] = {
+                    **sizing,
+                    "skip": "insufficient_depth_or_invalid_plan",
+                }
                 continue
-            payout_probability = q if outcome == "up" else 1 - q
             ev = (
                 plan.quantity * payout_probability
                 - plan.notional
@@ -932,6 +1002,7 @@ class TradingBot:
                 - self.extra_cost
             )
             prediction["candidates"][outcome] = {
+                **sizing,
                 "quantity": str(plan.quantity),
                 "yes_price": str(plan.yes_price),
                 "fee_bound": str(plan.fee_bound),
@@ -1012,7 +1083,10 @@ class TradingBot:
     ) -> None:
 
         def record_rejection(exc):
-            if plan.action == "BUY" and (settings or {}).get("exit_policy") == "settlement-only-v1":
+            if plan.action == "BUY" and (settings or {}).get("exit_policy") in {
+                "settlement-only-v1",
+                "model-settlement-v1",
+            }:
                 self.journal.record_opportunity(
                     market,
                     book,
@@ -1281,6 +1355,14 @@ class TradingBot:
                     <= 0
                 ):
                     raise ExecutionRejected("model_edge_nonpositive", plan, book, latest)
+                if settings.get("sizing_policy") == "quarter-kelly-v3":
+                    price = latest.asks[0][0] if plan.outcome == "up" else 1 - latest.bids[0][0]
+                    fraction = kelly_fraction(probability, price + market.fee_coefficient / 4)
+                    bankroll = number(settings["prediction"]["sizing_bankroll"])
+                    if plan.budget + self.extra_cost > bankroll * fraction:
+                        raise ExecutionRejected(
+                            "model_stake_exceeds_refreshed_edge", plan, book, latest
+                        )
             # The reserved fee-rounded budget already binds this quantity. Sizing
             # it again can round a valid minimum order down below the increment.
             yes_price, available = latest.asks[0] if plan.outcome == "up" else latest.bids[0]
@@ -1397,7 +1479,10 @@ class TradingBot:
                     continue
                 if row["state"] != "open":
                     continue
-                if (row.get("settings") or {}).get("exit_policy") == "settlement-only-v1":
+                if (row.get("settings") or {}).get("exit_policy") in {
+                    "settlement-only-v1",
+                    "model-settlement-v1",
+                }:
                     continue
                 if row["entry_cost"] is None or row["proceeds"] is None:
                     logger.warning(
@@ -1597,6 +1682,15 @@ def _validate_experiment(
 def _experiment_arm(experiment_id: str, slug: str) -> str:
     digest = hashlib.sha256((experiment_id + "\0" + slug).encode()).digest()
     return ("baseline", "model")[digest[0] % 2]
+
+
+def _kelly_experiment_id(requested_id: str) -> str:
+    """Keep legacy results separate when the unchanged service adopts Kelly."""
+    suffix = ".kelly-v3"
+    if len(requested_id) + len(suffix) <= 64:
+        return requested_id + suffix
+    digest = hashlib.sha256(requested_id.encode()).hexdigest()[:16]
+    return requested_id[:38] + "." + digest + suffix
 
 
 MINUTE_FIVE_SETTINGS = {
