@@ -663,6 +663,170 @@ def test_due_history_waits_until_after_the_five_minute_decision_and_order(
 
 
 @pytest.mark.parametrize(
+    "until_entry,polled_before_entry", [(14, False), (30, False), (43, False), (43.001, True)]
+)
+def test_history_cooldown_buffer_protects_entry_and_preserves_shared_429_backoff(
+    venue,
+    journal,
+    stream_feed,
+    clock,
+    five_minute_market,
+    actual_fills,
+    monkeypatch,
+    until_entry,
+    polled_before_entry,
+):
+    elapsed = [0.0]
+    monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+    venue.pages = {0: [venue.markets[five_minute_market.slug]]}
+    archived = replace(
+        five_minute_market,
+        slug="history-with-shared-quota",
+        start=five_minute_market.start - timedelta(seconds=300),
+        end=five_minute_market.start,
+    )
+    journal.record_opportunity(
+        archived, None, "outside_favorite_band", settings=bot.FIVE_MINUTE_SETTINGS
+    )
+    handler = venue.on_request
+    history_reads = []
+
+    def throttled_history(request):
+        if request.url.path == f"/v1/markets/{archived.slug}/settlement":
+            history_reads.append(clock.current)
+            clock.current += timedelta(seconds=10)
+            elapsed[0] += 10
+            return httpx.Response(429, headers={"Retry-After": "30"})
+        return handler(request)
+
+    venue.on_request = throttled_history
+    clock.current = five_minute_market.start + timedelta(seconds=100 - until_entry)
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    assert len(history_reads) == int(polled_before_entry)
+    assert trader.next_data_attempt == (40 if polled_before_entry else 0)
+    assert not actual_fills
+
+    elapsed[0] = until_entry
+    clock.current = five_minute_market.start + timedelta(seconds=100)
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    trader.tick()
+    assert len(actual_fills) == 1
+    entry = journal.get(five_minute_market.slug + ":five-minute")
+    assert entry["created_at"] == (five_minute_market.start + timedelta(seconds=100)).isoformat()
+    assert history_reads[-1] == five_minute_market.start + timedelta(seconds=100)
+    assert trader.next_data_attempt == until_entry + 40
+    count = len(venue.calls)
+    elapsed[0] = trader.next_data_attempt - 0.001
+    clock.current = five_minute_market.start + timedelta(seconds=139.999)
+    trader.tick()
+    assert len(venue.calls) == count
+
+
+def test_long_history_retry_after_remains_global_even_when_polled_before_the_buffer(
+    venue, journal, stream_feed, clock, five_minute_market, actual_fills, monkeypatch
+):
+    elapsed = [0.0]
+    monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+    venue.pages = {0: [venue.markets[five_minute_market.slug]]}
+    archived = replace(
+        five_minute_market,
+        slug="long-quota-history",
+        start=five_minute_market.start - timedelta(seconds=300),
+        end=five_minute_market.start,
+    )
+    journal.record_opportunity(
+        archived, None, "outside_favorite_band", settings=bot.FIVE_MINUTE_SETTINGS
+    )
+    handler = venue.on_request
+
+    def long_retry_after(request):
+        if request.url.path == f"/v1/markets/{archived.slug}/settlement":
+            return httpx.Response(429, headers={"Retry-After": "120"})
+        return handler(request)
+
+    venue.on_request = long_retry_after
+    clock.current = five_minute_market.start + timedelta(seconds=50)
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    assert trader.next_data_attempt == 120
+    count = len(venue.calls)
+    elapsed[0] = 50
+    clock.current = five_minute_market.start + timedelta(seconds=100)
+    trader.tick()
+    assert len(venue.calls) == count
+    assert not actual_fills
+    assert journal.entry_decided(five_minute_market.slug, "five-minute")
+    assert journal.opportunities()[-1]["decision"] == "exchange_backoff"
+
+
+@pytest.mark.parametrize("recovery", ["terminal", "working", "pending", "unknown"])
+def test_order_recovery_precedes_optional_discovery_and_its_rate_limit(
+    venue, journal, stream_feed, clock, five_minute_market, monkeypatch, recovery
+):
+    monkeypatch.setattr("execution.polymarket_client.sleep", lambda _: None)
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    plan = venue.client.buy_plan(
+        five_minute_market,
+        stream_feed.books.book(five_minute_market),
+        "up",
+        Decimal("2"),
+        deadline=five_minute_market.start + timedelta(seconds=105),
+    )
+    journal.reserve_entry(plan, five_minute_market.end, settings=dict(bot.FIVE_MINUTE_SETTINGS))
+    identity = five_minute_market.slug + ":five-minute"
+    if recovery != "unknown":
+        journal.update(identity, order_id="bot-order-1")
+        venue.order = {
+            **plan.request,
+            "id": "bot-order-1",
+            "state": "ORDER_STATE_CANCELED" if recovery == "terminal" else "ORDER_STATE_NEW",
+            "cumQuantity": 0,
+            "leavesQuantity": 0,
+            "avgPx": {"value": "0.90", "currency": "USD"},
+            "commissionNotionalTotalCollected": {"value": "0", "currency": "USD"},
+        }
+    before = journal.get(identity)
+
+    def readback_and_quota(request):
+        if recovery == "pending" and request.url.path == "/v1/order/bot-order-1":
+            return httpx.Response(404, json={"error": "Readback not available"})
+        if request.url.path == "/v1/markets":
+            return httpx.Response(429, headers={"Retry-After": "60"})
+        return None
+
+    venue.on_request = readback_and_quota
+    venue.calls.clear()
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    if recovery == "unknown":
+        with pytest.raises(RuntimeError, match="unknown outcome"):
+            trader.tick()
+        assert venue.calls == []
+        assert journal.get(identity) == before
+        return
+    trader.tick()
+    paths = [path for _, path, _ in venue.calls]
+    assert paths[0] == "/v1/order/bot-order-1"
+    assert paths[-1] == "/v1/markets"
+    if recovery == "pending":
+        assert journal.get(identity) == before
+    else:
+        assert journal.get(identity)["state"] == "unfilled"
+        assert journal.get(identity)["pending"] is None
+        if recovery == "working":
+            assert ("POST", "/v1/order/bot-order-1/cancel") in [
+                (method, path) for method, path, _ in venue.calls
+            ]
+    assert trader.next_data_attempt > 0
+    count = len(venue.calls)
+    trader.tick()
+    assert len(venue.calls) == count
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+
+
+@pytest.mark.parametrize(
     "live,retained,settlement,expected_entry",
     [(False, True, 1, True), (True, False, 1, True), (True, True, None, False)],
     ids=["paper-retained", "live-fully-sold", "live-unresolved-retained"],

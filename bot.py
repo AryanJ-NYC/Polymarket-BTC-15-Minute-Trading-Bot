@@ -396,14 +396,16 @@ class TradingBot:
         if monotonic() < self.next_data_attempt:
             self._record_pause("exchange_backoff")
             return
+        # Recover owned orders before optional discovery can spend the shared
+        # REST quota. Discovery still records coverage while readback is pending.
+        reconciled = self._reconcile()
+        if monotonic() < self.next_data_attempt:
+            self._record_pause("exchange_backoff")
+            return
         self._discover()
         self._select_timing()
         self._claim_minute_five()
         self._claim_five_minute()
-        if monotonic() < self.next_data_attempt:
-            self._record_pause("exchange_backoff")
-            return
-        reconciled = self._reconcile()
         if monotonic() < self.next_data_attempt:
             self._record_pause("exchange_backoff")
             return
@@ -957,9 +959,10 @@ class TradingBot:
                     + timedelta(seconds=settings["entry_start_seconds"])
                     - datetime.now(timezone.utc)
                 ).total_seconds()
-                # A historical GET can use the SDK's ten-second timeout. Keep
-                # that and the three-second loop delay clear of a one-shot entry.
-                if 0 < until_entry <= 13:
+                # Leave room for the ten-second GET, thirty-second minimum
+                # shared 429 cooldown and three-second loop before entry.
+                # Longer provider Retry-After values still pause all requests.
+                if 0 < until_entry <= 43:
                     return
         self.next_outcome_attempt = monotonic() + 30
         pending = self.journal.pending_contracts(after_slug=self.outcome_cursor)

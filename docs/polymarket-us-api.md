@@ -235,9 +235,16 @@ transient reads; a 429 returns immediately to the runner's cooldown. Treat
 transient connection, timeout, 404 and 5xx responses as unavailable data without
 inventing prices, liquidity, fees or outcomes.
 
-Optional historical outcome lookup runs only after the known current contract's
-entry cutoff, while flat, at most once per 30-second pass. Rotate past missing
-outcomes. This leaves warmup and entry free of optional historical requests;
-a genuinely long shared backoff can still affect a later contract.
+Pending-order reconciliation runs before optional current-market discovery.
+Discovery continues to record comparison coverage while readback is pending;
+an active shared cooldown still pauses REST work.
+
+Ordinary and simultaneous runs rotate at most one historical outcome per
+30-second pass after current trading work, including while lots remain held.
+Defer these optional reads during baseline entry windows and within 43 seconds
+before an unconsumed one-shot decision: ten seconds for the request, the minimum
+30-second shared cooldown, and three seconds for the loop. Model-only and assigned
+comparisons keep their existing restrictions on entry windows and open trades.
+Longer provider `Retry-After` values remain mandatory and can still affect later entries.
 
 Reference: [rate limits](https://docs.polymarket.us/api-reference/rate-limits).
