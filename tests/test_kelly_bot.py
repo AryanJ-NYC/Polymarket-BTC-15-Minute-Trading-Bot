@@ -1,3 +1,4 @@
+import hashlib
 from datetime import timedelta
 from decimal import Decimal
 
@@ -54,13 +55,14 @@ def test_kelly_live_order_uses_edge_and_four_percent_ceiling(
             row = journal.records()[0]
             assert row["outcome"] == outcome
             assert row["settings"]["entry_bankroll_fraction"] == "0.04"
-            assert row["settings"]["exit_policy"] == "model-settlement-v1"
+            assert row["settings"]["exit_policy"] == "model-loss-15-v1"
+            assert row["settings"]["stop_loss"] == "-0.15"
             assert row["settings"]["sizing_policy"] == "quarter-kelly-v3"
     finally:
         journal.close()
 
 
-def test_kelly_holds_through_price_stop_and_preserves_exit_policy_on_restart(
+def test_saved_settlement_only_kelly_holds_through_price_stop_on_restart(
     venue, tmp_path, clock, books, stream_feed
 ):
     journal = TradeJournal(tmp_path / "hold.sqlite")
@@ -70,6 +72,15 @@ def test_kelly_holds_through_price_stop_and_preserves_exit_policy_on_restart(
         warm_up(trader, venue, clock, stream_feed)
         trader.tick()
         row = journal.records()[0]
+        # This is a trade persisted by the previous quarter-Kelly release.
+        journal.update(
+            row["trade_id"],
+            settings={
+                **row["settings"],
+                "exit_policy": "model-settlement-v1",
+                "stop_loss": "-0.30",
+            },
+        )
         quantity = Decimal(row["quantity"])
         assert quantity > 0
         venue.bid, venue.ask = "0.01", "0.03"
@@ -137,6 +148,15 @@ def test_default_kelly_creates_separate_stable_cohort_without_changing_legacy(
         experiment_id=identifier,
         simultaneous=simultaneous,
     ).experiment
+    suffix = ".kelly-v3"
+    old_id = (
+        identifier + suffix
+        if len(identifier) + len(suffix) <= 64
+        else (identifier[:38] + "." + hashlib.sha256(identifier.encode()).hexdigest()[:16] + suffix)
+    )
+    saved_settlement = journal.start_experiment(
+        old_id, {"sizing_policy": "quarter-kelly-v3", "exit_policy": "model-settlement-v1"}
+    )
     current = TradingBot(
         venue.client,
         journal,
@@ -145,9 +165,10 @@ def test_default_kelly_creates_separate_stable_cohort_without_changing_legacy(
         experiment_id=identifier,
         simultaneous=simultaneous,
     ).experiment
-    assert current["id"].endswith(".kelly-v3")
+    assert current["id"].endswith(".kelly-v3.stop15-v1")
     assert len(current["id"]) <= 64
-    assert current["id"] != legacy["id"]
+    assert current["id"] not in {legacy["id"], saved_settlement["id"]}
+    assert journal.start_experiment(old_id, saved_settlement["configuration"]) == saved_settlement
     assert current["configuration"]["requested_experiment_id"] == identifier
     assert current["configuration"]["model_settings"]["entry_bankroll_fraction"] == "0.04"
     clock.current += timedelta(hours=1)
@@ -214,8 +235,9 @@ def test_kelly_rechecks_funds_and_reserves_fees_within_buying_power(
 
 
 @pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("mode", ["model-only", "assigned", "simultaneous"])
 def test_deployed_cli_selects_default_sizing_and_runs_until_operator_stops(
-    venue, tmp_path, books, monkeypatch, legacy
+    venue, tmp_path, books, monkeypatch, legacy, mode
 ):
     import signal
 
@@ -239,14 +261,14 @@ def test_deployed_cli_selects_default_sizing_and_runs_until_operator_stops(
             return self.stopped
 
         def wait(self, delay):
-            elapsed[0] += 86400
+            elapsed[0] += 86401
 
     monkeypatch.setattr(bot, "Event", StopEvent)
     policies = []
 
     def tick(trader):
         assert trader.live and not trader.one_trade
-        policies.append(trader.experiment)
+        policies.append((trader.experiment, trader.settings))
         if len(policies) == 2:
             signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
 
@@ -260,17 +282,52 @@ def test_deployed_cli_selects_default_sizing_and_runs_until_operator_stops(
             "/etc/polymarket-us/.env.us",
             "--model",
             str(tmp_path / "model.json"),
-            "--experiment-id",
-            "btc-five-20261022-a0201afd",
-            "--simultaneous",
+            *(["--experiment-id", "btc-five-20261022-a0201afd"] if mode != "model-only" else []),
+            *(["--simultaneous"] if mode == "simultaneous" else []),
             *(["--no-kelly"] if legacy else []),
         ],
     )
     assert bot.main() == 0
-    assert len(policies) == 2 and elapsed[0] == 86400
-    configuration = policies[0]["configuration"]
-    assert configuration["model_settings"]["sizing_policy"] == (
-        "bankroll-percentage-v1" if legacy else "quarter-kelly-v3"
-    )
-    assert policies[0]["id"] == "btc-five-20261022-a0201afd" + ("" if legacy else ".kelly-v3")
+    assert len(policies) == 2 and elapsed[0] == 86401
+    experiment, settings = policies[0]
+    if experiment is not None:
+        settings = experiment["configuration"].get("model_settings", settings)
+        assert experiment["id"] == "btc-five-20261022-a0201afd" + (
+            "" if legacy else ".kelly-v3.stop15-v1"
+        )
+    assert settings["sizing_policy"] == ("bankroll-percentage-v1" if legacy else "quarter-kelly-v3")
+    assert settings["exit_policy"] == ("price-thresholds-v1" if legacy else "model-loss-15-v1")
+    if not legacy:
+        assert settings["stop_loss"] == "-0.15"
+        assert "take_profit" not in settings
     assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize("mode", ["model-only", "assigned", "simultaneous"])
+def test_new_model_entries_persist_stop_policy_in_every_runner_mode(
+    venue, journal, books, stream_feed, clock, tmp_path, mode
+):
+    late = clock.current
+    clock.current = parse_market(venue.market).start
+    trader = TradingBot(
+        venue.client,
+        journal,
+        books,
+        model=saved_model(tmp_path, 0.8),
+        experiment_id=None if mode == "model-only" else "stop-policy",
+        simultaneous=mode == "simultaneous",
+    )
+    clock.current = late
+    warm_up(trader, venue, clock, stream_feed)
+    trader.tick()
+
+    model_trades = [row for row in journal.records() if "model_tag" in row["settings"]]
+    assert len(model_trades) == 1
+    settings = model_trades[0]["settings"]
+    assert settings["exit_policy"] == "model-loss-15-v1"
+    assert settings["sizing_policy"] == "quarter-kelly-v3"
+    assert settings["stop_loss"] == "-0.15"
+    assert "take_profit" not in settings
+    if mode != "model-only":
+        assert settings["experiment"]["arm"] == "model"
+        assert settings["experiment"]["id"] == "stop-policy.kelly-v3.stop15-v1"

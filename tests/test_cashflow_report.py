@@ -20,6 +20,8 @@ def test_report_confirms_complete_market_cashflows_without_rewriting_lot_evidenc
     assert result["known_closed_count"] == 4
     assert result["confirmed_cashflow_count"] == 4
     assert result["unresolved_closed_count"] == 0
+    assert result["disputed_trade_count"] == 0
+    assert result["disputed_entry_quantity"] == result["unresolved_entry_quantity"] == "0"
     assert Decimal(result["total_net_pnl"]) == Decimal("-0.1575")
     assert Decimal(result["confirmed_entry_cost"]) == Decimal("5.6006")
     assert result["win_rate"] == "0.75"

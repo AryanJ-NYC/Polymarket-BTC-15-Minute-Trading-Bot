@@ -255,6 +255,7 @@ def _summarize(rows: list[dict], cashflow_pnls: dict[str, Decimal]) -> dict:
     losses = [value for value in values if value < 0]
     pending = [row for row in rows if row["state"] in {"open", "reserved"}]
     unresolved = [row for row in closed if row not in known]
+    disputed = [row for row in pending + unresolved if row.get("accounting_issues")]
     net = sum(values, Decimal("0"))
     equity = peak = drawdown = Decimal("0")
     for value in values:
@@ -271,6 +272,17 @@ def _summarize(rows: list[dict], cashflow_pnls: dict[str, Decimal]) -> dict:
         "known_collected_fees": str(known_fees),
         "total_collected_fees": str(known_fees) if all(fee is not None for fee in fees) else None,
         "unknown_fee_count": sum(fee is None for fee in fees),
+        "execution_mode_counts": dict(
+            sorted(
+                Counter(
+                    (row.get("settings") or {}).get("execution_mode", "unknown") for row in rows
+                ).items()
+            )
+        ),
+        "execution_basis": (
+            "Recorded journal cashflows; paper rows are simulated and unknown mode lacks "
+            "execution provenance. Mixed-mode totals are not verified live results."
+        ),
         "trade_count": sum(
             any(
                 Decimal(order["quantity"]) > 0
@@ -290,25 +302,90 @@ def _summarize(rows: list[dict], cashflow_pnls: dict[str, Decimal]) -> dict:
         "losses": len(losses),
         "breakeven_count": sum(value == 0 for value in values),
         "pending_count": len(pending),
+        "pending_order_count": sum(bool(row.get("pending")) for row in rows),
         "unresolved_closed_count": len(unresolved),
+        "disputed_trade_count": len(disputed),
+        "remaining_quantity": _remaining_quantity(rows),
+        "unresolved_entry_quantity": str(
+            sum((_filled_quantity(row, "BUY") for row in pending + unresolved), Decimal("0"))
+        ),
+        "unresolved_remaining_quantity": _remaining_quantity(pending + unresolved),
+        "disputed_entry_quantity": str(
+            sum((_filled_quantity(row, "BUY") for row in disputed), Decimal("0"))
+        ),
+        "disputed_remaining_quantity": _remaining_quantity(disputed),
+        "quantity_basis": (
+            "Remaining quantities use last reconciled fills; pending orders may change them. "
+            "Unresolved entry quantities count all bought shares of pending/unresolved trades. "
+            "Disputed quantities are the subset with unconfirmed accounting issues."
+        ),
+        "exit_outcome_counts": dict(sorted(Counter(_exit_outcome(row) for row in rows).items())),
+        "stop_exit_trade_count": sum(
+            (row.get("settings") or {}).get("exit_policy") == "model-loss-15-v1"
+            and _filled_quantity(row, "SELL") > 0
+            for row in rows
+        ),
+        "settlement_trade_count": sum(
+            bool(row.get("settlement"))
+            and _filled_quantity(row, "BUY") > _filled_quantity(row, "SELL")
+            for row in rows
+        ),
         "known_realized_net_pnl": str(net),
         "total_net_pnl": str(net) if not pending and not unresolved else None,
         "win_rate": str(Decimal(len(wins)) / len(values)) if values else None,
         "average_win": str(sum(wins) / len(wins)) if wins else None,
         "average_loss": str(sum(losses) / len(losses)) if losses else None,
+        "known_closed_max_drawdown": str(drawdown),
         "max_drawdown": str(drawdown) if not unresolved else None,
-        "metrics_basis": "Known closed trades only; drawdown uses closing-time order, USD",
+        "metrics_basis": (
+            "Known closed trades only; win rate includes breakevens. Drawdown is the largest "
+            "peak-to-trough loss of cumulative net P&L from zero in closing-time order, USD; "
+            "pending/unresolved trades and unrealized marks are excluded. max_drawdown is "
+            "unknown when any closed trade is unresolved."
+        ),
         "unresolved": [
             {
                 "slug": row["slug"],
                 "trade_id": row.get("trade_id", row["slug"]),
                 "state": row["state"],
                 "order_id": row.get("order_id"),
+                "remaining_quantity": row.get("quantity"),
+                "pending_action": (row.get("pending") or {}).get("action"),
+                "pending_order_quantity": (row.get("pending") or {}).get("quantity"),
                 "issues": row.get("accounting_issues", []),
             }
             for row in pending + unresolved
         ],
     }
+
+
+def _filled_quantity(row: dict, action: str) -> Decimal:
+    return sum(
+        (Decimal(order["quantity"]) for order in row["orders"] if order["action"] == action),
+        Decimal("0"),
+    )
+
+
+def _remaining_quantity(rows: list[dict]) -> str | None:
+    if any(row.get("quantity") is None for row in rows):
+        return None
+    return str(sum((Decimal(row["quantity"]) for row in rows), Decimal("0")))
+
+
+def _exit_outcome(row: dict) -> str:
+    if row["state"] == "unfilled":
+        return "unfilled"
+    if row["state"] != "closed":
+        return "pending"
+    sold = _filled_quantity(row, "SELL")
+    sale = (
+        "stop" if (row.get("settings") or {}).get("exit_policy") == "model-loss-15-v1" else "sale"
+    )
+    if sold and sold == _filled_quantity(row, "BUY"):
+        return sale
+    if row.get("settlement"):
+        return f"partial_{sale}_and_settlement" if sold else "settlement"
+    return "unknown_closed"
 
 
 def _coverage(rows: list[dict], opportunities: list[dict]) -> dict:
@@ -536,7 +613,9 @@ def _policy(row: dict) -> str:
     settings = row.get("settings") or {}
     key = settings.get("model_tag") or settings.get("policy_version") or "legacy"
     if settings.get("sizing_policy") == "quarter-kelly-v3":
-        return f"{key}:quarter-kelly-v3"
+        key = f"{key}:quarter-kelly-v3"
+    if settings.get("exit_policy") == "model-loss-15-v1":
+        key = f"{key}:model-loss-15-v1"
     return key
 
 
