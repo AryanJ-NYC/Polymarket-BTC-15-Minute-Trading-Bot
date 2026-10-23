@@ -44,7 +44,9 @@ a profitable strategy by itself.
 Output contains daily `YYYY-MM-DD-SESSION.jsonl.gz` files, `status.json`,
 `pending-markets.json` and a `collector.lock`. Files are private under the service
 umask. Gzip files contain appended complete members, flushed and synced by one
-bounded writer. Each restart uses a new session file, so a damaged tail in an
+bounded writer, batching up to one second or 256 records before compression.
+Receipt timestamps are captured before this delay. Each restart uses a new
+session file, so a damaged tail in an
 older file cannot corrupt later capture. A second collector cannot use the same
 directory. Official resolved identities are retired from pending tracking only
 after their final metadata has been synced to the archive. Queue overflow
@@ -57,7 +59,8 @@ Preserve and inspect any damaged tail before consuming that archive.
 written, queued and dropped record counts, and unavailable BRTI status. Its own
 `checked_at` must be recent: a stopped process leaves its last status on disk.
 Socket connectivity alone does not prove either horizon is delivering books.
-Counters are per process session; the archive persists across restarts.
+Counters are per process session; the archive persists across restarts. Sort
+replay by record receipt time and sequence, not by the random session filename.
 
 No archive is deleted automatically. Capture fails when less than 512 MiB of disk
 space remains, protecting the trading service's remaining space. The service

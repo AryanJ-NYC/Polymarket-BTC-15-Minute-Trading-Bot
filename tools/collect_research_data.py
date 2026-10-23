@@ -490,14 +490,22 @@ class Archive:
             while not self.stop.is_set() or not self.queue.empty() or self.gap is not None:
                 batch = []
                 try:
-                    batch.append(self.queue.get(timeout=0.5))
+                    batch.append(self.queue.get(timeout=0.05))
                 except queue.Empty:
                     pass
-                while len(batch) < 256:
-                    try:
-                        batch.append(self.queue.get_nowait())
-                    except queue.Empty:
+                deadline = time.monotonic() + BATCH_SECONDS
+                while batch and len(batch) < 256:
+                    remaining = deadline - time.monotonic()
+                    if not self.stop.is_set() and remaining <= 0:
                         break
+                    # Brief waits collect nearby messages while allowing stop to
+                    # drain immediately, without changing source receipt times.
+                    timeout = 0 if self.stop.is_set() else min(0.05, remaining)
+                    try:
+                        batch.append(self.queue.get(timeout=timeout))
+                    except queue.Empty:
+                        if self.stop.is_set():
+                            break
                 with self.lock:
                     gap, self.gap = self.gap, None
                 if gap is not None:
@@ -599,6 +607,7 @@ def file_hash(path):
 BASE = "https://gateway.polymarket.us"
 HORIZONS = {"5m": 300, "15m": 900}
 QUEUE_SIZE = 4096
+BATCH_SECONDS = 1.0
 DISK_RESERVE = 512 * 1024 * 1024
 
 

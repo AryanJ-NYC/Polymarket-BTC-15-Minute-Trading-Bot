@@ -52,6 +52,63 @@ def test_archive_preserves_raw_payload_and_local_causality(tmp_path):
     assert datetime.fromisoformat(row["received_at"]).utcoffset() == timedelta(0)
 
 
+def test_archive_batches_nearby_records_without_changing_receipts(tmp_path, monkeypatch):
+    batches = []
+    compress = gzip.compress
+
+    def capture_batch(data, **kwargs):
+        batches.append([json.loads(line) for line in data.splitlines()])
+        return compress(data, **kwargs)
+
+    monkeypatch.setattr(collector.gzip, "compress", capture_batch)
+
+    async def scenario():
+        archive = collector.Archive(tmp_path)
+        receipts = []
+        try:
+            for value in ("first", "second"):
+                before = time.monotonic_ns()
+                receipt = archive.emit("market_message", payload={"value": value})
+                receipts.append((receipt, before, time.monotonic_ns()))
+                await asyncio.sleep(0.05)
+            await asyncio.wait_for(archive.flush(receipts[-1][0]), 3)
+        finally:
+            archive.close()
+        assert len(batches) == 1
+        assert [row["payload"]["value"] for row in batches[0]] == ["first", "second"]
+        for row, (receipt, before, after) in zip(batches[0], receipts, strict=True):
+            assert row["sequence"] == receipt
+            assert before <= row["received_monotonic_ns"] <= after
+        assert read_rows(tmp_path) == batches[0]
+
+    asyncio.run(scenario())
+
+
+def test_archive_record_limit_and_stop_bypass_batch_interval(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector, "BATCH_SECONDS", 60)
+    sizes = []
+    compress = gzip.compress
+
+    def capture_batch(data, **kwargs):
+        sizes.append(len(data.splitlines()))
+        return compress(data, **kwargs)
+
+    monkeypatch.setattr(collector.gzip, "compress", capture_batch)
+
+    async def scenario():
+        archive = collector.Archive(tmp_path)
+        try:
+            receipts = [archive.emit("market_message", payload={"value": n}) for n in range(257)]
+            # The record cap flushes a full batch without waiting for its timer.
+            await asyncio.wait_for(archive.flush(receipts[255]), 3)
+        finally:
+            archive.close()
+        assert sizes == [256, 1]
+        assert [row["payload"]["value"] for row in read_rows(tmp_path)] == list(range(257))
+
+    asyncio.run(scenario())
+
+
 def test_duplicate_directory_owner_is_rejected_and_restart_preserves_sessions(tmp_path):
     first = collector.Archive(tmp_path)
     first.emit("first")
