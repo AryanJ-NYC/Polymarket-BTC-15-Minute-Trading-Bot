@@ -1,4 +1,5 @@
 polymarket-us==2.4.1
 python-dotenv==1.2.4
 httpx==0.28.1
+websockets==17.3
 loguru==0.7.3

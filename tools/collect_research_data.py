@@ -1,4 +1,4 @@
-"""Continuously archive read-only BTC 5m/15m books and public reference candles.
+"""Continuously archive BTC 5m/15m books, reference candles and Kraken spot trades.
 
 Run ``python -m tools.collect_research_data --env-file PATH --output DIRECTORY``.
 Reference candles are NOT licensed raw BRTI. No trading journal is opened.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import fcntl
 import gzip
 import hashlib
@@ -24,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
+from websockets.asyncio.client import connect
 
 from execution.polymarket_client import PolymarketClient
 
@@ -66,6 +68,7 @@ async def collect(env_file: Path, output: Path) -> None:
                 asyncio.create_task(collector.metadata_loop()),
                 asyncio.create_task(collector.reference_loop()),
                 asyncio.create_task(collector.book_loop()),
+                asyncio.create_task(collector.spot_loop()),
                 asyncio.create_task(collector.monitor_loop()),
                 asyncio.create_task(stop.wait()),
             ]
@@ -107,6 +110,13 @@ class Collector:
         self.last_book = {}
         self.connected = False
         self.generation = 0
+        self.spot_connected = False
+        self.spot_subscribed = False
+        self.spot_generation = 0
+        self.last_spot_message = None
+        self.last_spot_snapshot = None
+        self.last_spot_trade = None
+        self.last_spot_trade_timestamp = None
 
     async def metadata_loop(self):
         delay = 1
@@ -366,6 +376,140 @@ class Collector:
             await pause(self.stop, delay)
             delay = min(30, delay * 2)
 
+    async def spot_loop(self):
+        delay = 1
+        while not self.stop.is_set():
+            self.archive.check()
+            self.spot_generation += 1
+            generation = self.spot_generation
+            healthy_since = None
+            gap_reason = "connection_closed_or_error"
+            self.archive.emit("spot_connection_attempt", source=SPOT_SOURCE, generation=generation)
+            try:
+                async with connect(
+                    "wss://ws.kraken.com/v2",
+                    open_timeout=10,
+                    close_timeout=5,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_size=1024 * 1024,
+                    max_queue=16,
+                ) as socket:
+                    self.spot_connected = True
+                    self.archive.emit("spot_connected", source=SPOT_SOURCE, generation=generation)
+                    await asyncio.wait_for(
+                        socket.send(
+                            json.dumps(
+                                {
+                                    "method": "subscribe",
+                                    "params": {
+                                        "channel": "trade",
+                                        "symbol": ["BTC/USD"],
+                                        "snapshot": True,
+                                    },
+                                }
+                            )
+                        ),
+                        10,
+                    )
+                    ack_deadline = time.monotonic() + SPOT_ACK_SECONDS
+                    while not self.stop.is_set():
+                        self.archive.check()
+                        timeout = (
+                            SPOT_IDLE_SECONDS
+                            if self.spot_subscribed
+                            else max(0, min(SPOT_IDLE_SECONDS, ack_deadline - time.monotonic()))
+                        )
+                        try:
+                            raw = await asyncio.wait_for(socket.recv(), timeout)
+                        except asyncio.TimeoutError:
+                            gap_reason = (
+                                "idle_timeout" if self.spot_subscribed else "subscription_timeout"
+                            )
+                            break
+                        payload = self.record_spot_message(raw, generation)
+                        if not isinstance(payload, dict):
+                            gap_reason = "malformed_message"
+                            break
+                        if payload.get("success") is False:
+                            gap_reason = "subscription_rejected"
+                            self.archive.emit(
+                                "spot_error",
+                                source=SPOT_SOURCE,
+                                generation=generation,
+                                reason=gap_reason,
+                            )
+                            break
+                        result = payload.get("result")
+                        if (
+                            payload.get("method") == "subscribe"
+                            and payload.get("success") is True
+                            and isinstance(result, dict)
+                            and result.get("channel") == "trade"
+                            and result.get("symbol") == "BTC/USD"
+                        ):
+                            self.spot_subscribed = True
+                            if healthy_since is None:
+                                healthy_since = time.monotonic()
+            except Exception as exc:
+                # Provider failures retry independently; a failed writer remains fatal.
+                self.archive.check()
+                self.archive.emit(
+                    "spot_error",
+                    source=SPOT_SOURCE,
+                    generation=generation,
+                    error_class=type(exc).__name__,
+                )
+            finally:
+                self.spot_connected = self.spot_subscribed = False
+                self.archive.emit(
+                    "spot_connection_gap",
+                    source=SPOT_SOURCE,
+                    generation=generation,
+                    reason="collector_stopping" if self.stop.is_set() else gap_reason,
+                )
+            if healthy_since is not None and time.monotonic() - healthy_since >= 30:
+                delay = 1
+            await pause(self.stop, delay)
+            delay = min(30, delay * 2)
+
+    def record_spot_message(self, raw, generation):
+        received_at, monotonic_ns = utc(), time.monotonic_ns()
+        fields = (
+            {"raw_text": raw}
+            if isinstance(raw, str)
+            else {"raw_bytes_base64": base64.b64encode(raw).decode("ascii")}
+        )
+        payload = None
+        try:
+            # Preserve decimal precision without inventing a normalized trade schema.
+            payload = json.loads(raw, parse_float=str, parse_constant=reject_json_constant)
+            fields["payload"] = payload
+        except (ValueError, UnicodeError, RecursionError):
+            fields["parse_error"] = "invalid_json"
+        self.archive.emit(
+            "spot_message",
+            source=SPOT_SOURCE,
+            generation=generation,
+            received_at=received_at,
+            received_monotonic_ns=monotonic_ns,
+            **fields,
+        )
+        self.last_spot_message = received_at
+        if isinstance(payload, dict) and payload.get("channel") == "trade":
+            if payload.get("type") == "snapshot":
+                self.last_spot_snapshot = received_at
+            elif payload.get("type") == "update" and isinstance(payload.get("data"), list):
+                for trade in payload["data"]:
+                    if (
+                        isinstance(trade, dict)
+                        and trade.get("symbol") == "BTC/USD"
+                        and isinstance(trade.get("timestamp"), str)
+                    ):
+                        self.last_spot_trade = received_at
+                        self.last_spot_trade_timestamp = trade["timestamp"]
+        return payload
+
     async def monitor_loop(self):
         while not self.stop.is_set():
             self.archive.check()
@@ -377,6 +521,16 @@ class Collector:
                 "last_reference_received_at": self.last_reference,
                 "last_metadata_refresh_at": self.last_metadata,
                 "last_book_received_at": self.last_book,
+                "spot": {
+                    "source": SPOT_SOURCE,
+                    "connected": self.spot_connected,
+                    "subscribed": self.spot_subscribed,
+                    "generation": self.spot_generation,
+                    "last_message_received_at": self.last_spot_message,
+                    "last_snapshot_received_at": self.last_spot_snapshot,
+                    "last_trade_received_at": self.last_spot_trade,
+                    "last_trade_provider_timestamp": self.last_spot_trade_timestamp,
+                },
                 "unresolved_market_count": len(self.pending),
                 "true_brti_available": False,
                 "brti_reason": "licensed_api_access_not_configured",
@@ -589,6 +743,10 @@ def encoded(value):
     return json.dumps(value, separators=(",", ":"), allow_nan=False).encode()
 
 
+def reject_json_constant(value):
+    raise ValueError("Non-finite JSON number")
+
+
 def stamp(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.utcoffset() is None:
@@ -605,6 +763,9 @@ def file_hash(path):
 
 
 BASE = "https://gateway.polymarket.us"
+SPOT_SOURCE = "kraken_spot_btcusd_trade"
+SPOT_ACK_SECONDS = 10
+SPOT_IDLE_SECONDS = 35
 HORIZONS = {"5m": 300, "15m": 900}
 QUEUE_SIZE = 4096
 BATCH_SECONDS = 1.0

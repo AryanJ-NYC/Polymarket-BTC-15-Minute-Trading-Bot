@@ -1,6 +1,7 @@
 """Continuous research capture keeps source evidence separate from trading state."""
 
 import asyncio
+import base64
 import gzip
 import json
 import signal
@@ -486,10 +487,10 @@ def test_delayed_resolution_backlog_does_not_delay_current_subscriptions(tmp_pat
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("trigger", ["signal", "failure"])
+@pytest.mark.parametrize("trigger", ["signal", "failure", "spot_failure"])
 def test_collect_cancels_blocked_metadata_and_drains_archive(tmp_path, monkeypatch, trigger):
     async def scenario():
-        blocked, cancelled = asyncio.Event(), asyncio.Event()
+        blocked, cancelled, spot_failed = asyncio.Event(), asyncio.Event(), asyncio.Event()
         signal_callbacks, closed = {}, []
         loop = asyncio.get_running_loop()
         monkeypatch.setattr(
@@ -528,6 +529,15 @@ def test_collect_cancels_blocked_metadata_and_drains_archive(tmp_path, monkeypat
             close=lambda: closed.append("exchange"),
         )
         monkeypatch.setattr(collector.PolymarketClient, "connect", lambda _: exchange)
+        spot = SpotSocket()
+        if trigger == "spot_failure":
+
+            def fail_spot():
+                spot_failed.set()
+                raise OSError("spot provider unavailable")
+
+            spot.messages = [fail_spot]
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: spot)
         async_client = httpx.AsyncClient
         monkeypatch.setattr(
             collector.httpx,
@@ -543,7 +553,11 @@ def test_collect_cancels_blocked_metadata_and_drains_archive(tmp_path, monkeypat
             monkeypatch.setattr(collector.Collector, "monitor_loop", failing_monitor)
         task = asyncio.create_task(collector.collect(tmp_path / "unused.env", tmp_path))
         await asyncio.wait_for(blocked.wait(), 1)
-        if trigger == "signal":
+        if trigger == "spot_failure":
+            await asyncio.wait_for(spot_failed.wait(), 1)
+            assert not task.done() and not cancelled.is_set()
+            assert not closed
+        if trigger != "failure":
             signal_callbacks[signal.SIGTERM]()
             await asyncio.wait_for(task, 2)
         else:
@@ -551,6 +565,7 @@ def test_collect_cancels_blocked_metadata_and_drains_archive(tmp_path, monkeypat
                 await asyncio.wait_for(task, 2)
         assert cancelled.is_set()
         assert set(closed) == {"socket", "exchange"}
+        assert spot.closed
         assert not signal_callbacks
         assert read_rows(tmp_path)[-1]["kind"] == "collector_stopped"
 
@@ -695,6 +710,274 @@ def test_five_minute_rollover_keeps_fifteen_minute_subscription(tmp_path, monkey
     asyncio.run(scenario())
 
 
+def test_spot_archive_preserves_frames_precision_duplicates_and_receipt_health(
+    tmp_path, monkeypatch
+):
+    archive, stop = collector.Archive(tmp_path), asyncio.Event()
+    instance = collector.Collector(None, None, archive, stop)
+    snapshot = (
+        '{"channel":"trade","type":"snapshot","data":'
+        '[{"symbol":"BTC/USD","trade_id":1,"timestamp":"2026-10-22T00:00:00Z"}]}'
+    )
+    update = (
+        '{"channel":"trade","type":"update","data":['
+        '{"symbol":"BTC/USD","trade_id":9007199254740993,'
+        '"price":81000.123456789123456789,"qty":0.000000001234567891,'
+        '"timestamp":"2026-10-23T00:00:00.123456789Z"},'
+        '{"symbol":"BTC/USD","trade_id":9007199254740994,"price":81001,'
+        '"timestamp":"2026-10-23T00:00:00.123456790Z"}]}'
+    )
+    frames = [snapshot, update, update, '{"channel":"heartbeat"}', "broken", b"\xff\x00"]
+    try:
+        instance.record_spot_message(snapshot, 1)
+        assert instance.last_spot_snapshot and instance.last_spot_trade is None
+        for raw in frames[1:]:
+            instance.record_spot_message(raw, 1)
+        live_receipt = instance.last_spot_trade
+        instance.record_spot_message(snapshot, 1)
+        assert instance.last_spot_trade == live_receipt
+        assert instance.last_spot_trade_timestamp == "2026-10-23T00:00:00.123456790Z"
+
+        async def stop_after_status(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", stop_after_status)
+        asyncio.run(instance.monitor_loop())
+        status = json.loads((tmp_path / "status.json").read_text())
+        assert status["spot"]["last_trade_received_at"] == live_receipt
+        assert status["spot"]["last_snapshot_received_at"] == instance.last_spot_snapshot
+        assert status["spot"]["subscribed"] is False
+        assert status["true_brti_available"] is False
+    finally:
+        archive.close()
+    rows = read_rows(tmp_path)
+    assert [row["sequence"] for row in rows] == list(range(1, 8))
+    assert all(row["source"] == "kraken_spot_btcusd_trade" for row in rows)
+    assert all(row["kind"] == "spot_message" and row["generation"] == 1 for row in rows)
+    assert all(row["session_id"] == archive.session for row in rows)
+    assert [row["received_monotonic_ns"] for row in rows] == sorted(
+        row["received_monotonic_ns"] for row in rows
+    )
+    assert rows[1]["raw_text"] == rows[2]["raw_text"] == update
+    trades = rows[1]["payload"]["data"]
+    assert len(trades) == 2
+    assert trades[0]["trade_id"] == 9007199254740993
+    assert trades[0]["price"] == "81000.123456789123456789"
+    assert trades[0]["qty"] == "0.000000001234567891"
+    assert rows[4]["raw_text"] == "broken" and rows[4]["parse_error"] == "invalid_json"
+    assert base64.b64decode(rows[5]["raw_bytes_base64"]) == b"\xff\x00"
+    assert rows[5]["parse_error"] == "invalid_json"
+
+
+@pytest.mark.parametrize("raw", ['{"price":NaN}', '{"price":Infinity}', "[" * 2000])
+def test_spot_nonstandard_or_deep_json_is_retained_as_malformed(tmp_path, raw):
+    archive = FakeArchive(tmp_path)
+    instance = collector.Collector(None, None, archive, asyncio.Event())
+    assert instance.record_spot_message(raw, 1) is None
+    assert archive.rows[0]["raw_text"] == raw
+    assert archive.rows[0]["parse_error"] == "invalid_json"
+    assert "payload" not in archive.rows[0]
+
+
+def test_spot_reconnects_with_backoff_and_independent_subscription_state(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        instance = collector.Collector(None, None, archive, stop)
+        instance.connected, instance.generation = True, 42
+        created, delays, options = [], [], []
+
+        def finish():
+            assert instance.spot_connected and instance.spot_subscribed
+            assert instance.connected and instance.generation == 42
+            stop.set()
+            return '{"channel":"heartbeat"}'
+
+        scripts = [
+            [SPOT_ACK, ConnectionError("lost provider")],
+            ['{"method":"subscribe","success":false,"error":"unavailable"}'],
+            [SPOT_ACK, finish],
+        ]
+
+        def factory(url, **kwargs):
+            assert url == "wss://ws.kraken.com/v2"
+            assert not instance.spot_subscribed
+            options.append(kwargs)
+            socket = SpotSocket(scripts[len(created)])
+            created.append(socket)
+            return socket
+
+        async def immediate(event, seconds):
+            delays.append(seconds)
+            await asyncio.sleep(0)
+
+        monkeypatch.setattr(collector, "connect", factory)
+        monkeypatch.setattr(collector, "pause", immediate)
+        await instance.spot_loop()
+        assert delays[:2] == [1, 2]
+        assert len(created) == 3 and all(socket.closed for socket in created)
+        assert all(socket.sent == [SPOT_SUBSCRIPTION] for socket in created)
+        assert all(
+            value["max_queue"] == 16 and value["max_size"] == 1024 * 1024 for value in options
+        )
+        assert instance.spot_generation == 3
+        assert not instance.spot_connected and not instance.spot_subscribed
+        messages = [row for row in archive.rows if row["kind"] == "spot_message"]
+        assert [row["generation"] for row in messages] == [1, 2, 3, 3]
+        assert not any(row["kind"] == "connection_gap" for row in archive.rows)
+        assert [
+            row["generation"] for row in archive.rows if row["kind"] == "spot_connection_gap"
+        ] == [1, 2, 3]
+        assert any(row.get("reason") == "subscription_rejected" for row in archive.rows)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_spot_ack_deadline_and_idle_timeout_reconnect(tmp_path, monkeypatch, acknowledged):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        socket = SpotSocket([SPOT_ACK] if acknowledged else [])
+        if not acknowledged:
+
+            async def heartbeat_only():
+                await asyncio.sleep(0.001)
+                return '{"channel":"heartbeat"}'
+
+            socket.recv = heartbeat_only
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+        monkeypatch.setattr(collector, "SPOT_ACK_SECONDS", 0.01)
+        monkeypatch.setattr(collector, "SPOT_IDLE_SECONDS", 0.02)
+        delays = []
+
+        async def stop_on_backoff(event, seconds):
+            delays.append(seconds)
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", stop_on_backoff)
+        instance = collector.Collector(None, None, archive, stop)
+        await asyncio.wait_for(instance.spot_loop(), 1)
+        assert delays == [1] and socket.closed
+        gaps = [row for row in archive.rows if row["kind"] == "spot_connection_gap"]
+        assert gaps[0]["reason"] == ("idle_timeout" if acknowledged else "subscription_timeout")
+        assert instance.last_spot_trade is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("raw", ["broken", "null", "[]"])
+def test_spot_malformed_stream_is_archived_then_reconnected(tmp_path, monkeypatch, raw):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        socket = SpotSocket([SPOT_ACK, raw])
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+
+        async def stop_on_backoff(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", stop_on_backoff)
+        instance = collector.Collector(None, None, archive, stop)
+        await asyncio.wait_for(instance.spot_loop(), 1)
+        assert socket.closed
+        messages = [row for row in archive.rows if row["kind"] == "spot_message"]
+        assert messages[-1]["raw_text"] == raw
+        gaps = [row for row in archive.rows if row["kind"] == "spot_connection_gap"]
+        assert gaps[0]["reason"] == "malformed_message"
+        assert not instance.spot_subscribed
+        assert not any(row["kind"] == "connection_gap" for row in archive.rows)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stage", ["connect", "receive", "backoff"])
+def test_spot_cancellation_closes_socket_and_does_not_retry(tmp_path, monkeypatch, stage):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        blocked, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def block():
+            blocked.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        class BlockingSocket(SpotSocket):
+            async def __aenter__(self):
+                if stage == "connect":
+                    await block()
+                return self
+
+            async def recv(self):
+                if stage == "backoff":
+                    raise OSError("provider unavailable")
+                await block()
+
+        socket = BlockingSocket()
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+        if stage == "backoff":
+
+            async def blocked_pause(event, seconds):
+                await block()
+
+            monkeypatch.setattr(collector, "pause", blocked_pause)
+        instance = collector.Collector(None, None, archive, stop)
+        task = asyncio.create_task(instance.spot_loop())
+        await asyncio.wait_for(blocked.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cancelled.is_set() and instance.spot_generation == 1
+        assert not instance.spot_connected and not instance.spot_subscribed
+        if stage != "connect":
+            assert socket.closed
+
+    asyncio.run(scenario())
+
+
+def test_spot_writer_failure_is_fatal_without_provider_retry(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = collector.Archive(tmp_path), asyncio.Event()
+
+        def fail_writer():
+            archive.error = OSError("disk failure")
+            return '{"channel":"heartbeat"}'
+
+        socket = SpotSocket([fail_writer])
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+        instance = collector.Collector(None, None, archive, stop)
+        try:
+            with pytest.raises(RuntimeError, match="Research archive writer stopped"):
+                await instance.spot_loop()
+            assert socket.closed and instance.spot_generation == 1
+        finally:
+            archive.error = None
+            archive.close()
+
+    asyncio.run(scenario())
+
+
+class SpotSocket:
+    def __init__(self, messages=()):
+        self.messages, self.sent, self.closed = list(messages), [], False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        self.closed = True
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+    async def recv(self):
+        if self.messages:
+            value = self.messages.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value() if callable(value) else value
+        await asyncio.Event().wait()
+
+
 class FakeArchive:
     def __init__(self, directory):
         self.directory, self.rows = directory, []
@@ -704,6 +987,9 @@ class FakeArchive:
         return len(self.rows)
 
     async def flush(self, receipt):
+        pass
+
+    def check(self):
         pass
 
 
@@ -735,3 +1021,10 @@ def read_rows(directory):
         for path in sorted(directory.glob("*.jsonl.gz"))
         for line in gzip.decompress(path.read_bytes()).splitlines()
     ]
+
+
+SPOT_ACK = '{"method":"subscribe","success":true,"result":{"channel":"trade","symbol":"BTC/USD"}}'
+SPOT_SUBSCRIPTION = {
+    "method": "subscribe",
+    "params": {"channel": "trade", "symbol": ["BTC/USD"], "snapshot": True},
+}
