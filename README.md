@@ -607,6 +607,12 @@ warnings and unknown exact policy P&L. Daily risk still counts each losing
 policy conservatively. Missing evidence, pending/open holdings, delayed fills,
 and unexplained cashflow differences remain blocking; this adds no tolerance.
 
+Reported residual fees also reconcile when explicit `baseCost` plus those fees
+equals provider cost, the fees fit within known collected order fees, and gross
+realized cashflows bridge exactly using `baseCost`. Flat after-settlement costs
+and fees must be zero when reported. Collected fees are deducted once from each
+policy's result; raw provider evidence remains unchanged.
+
 ### Confirmed results from saved settlement cashflows
 
 The read-only results report can confirm a closed policy lot from the strict
