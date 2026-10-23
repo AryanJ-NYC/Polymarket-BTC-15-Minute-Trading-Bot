@@ -136,6 +136,21 @@ def test_final_preflight_rejection_is_terminal(
     assert journal.opportunities()[-1]["decision"] == (
         "submission_window_closed" if change == "deadline" else "submission_preflight_rejected"
     )
+    rejection = journal.opportunities()[-1]
+    assert (
+        rejection["quote_reason"]
+        == {
+            "deadline": "plan_expired",
+            "upper_band": "favorite_no_longer_eligible",
+            "side": "favorite_no_longer_eligible",
+            "depth": "executable_depth_changed",
+        }[change]
+    )
+    check = rejection["execution_check"]
+    assert check["planned"]["yes_price"] == "0.90"
+    assert Decimal(check["planned"]["quantity"]) > 0
+    if change == "depth":
+        assert check["latest"]["ask_quantity"] == "0.01"
     venue.on_request = handler
     clock.current = future_market.start + timedelta(seconds=304)
     venue.bid, venue.ask = "0.88", "0.90"
@@ -356,3 +371,32 @@ def test_candidate_uses_fee_reserve_and_depth_within_two_percent(
     order = next(iter(actual_fills.values()))
     assert Decimal(str(order["quantity"])) == Decimal(quantity)
     assert Decimal(journal.records()[0]["entry_cost"]) <= Decimal("2")
+
+
+def test_local_price_race_is_explained_without_submission_or_retry(
+    venue, journal, stream_feed, clock, future_market, actual_fills, monkeypatch
+):
+    clock.current = future_market.start + timedelta(seconds=300)
+    venue.bid, venue.ask = "0.88", "0.90"
+    publish(venue, stream_feed, clock)
+    check_risk = journal.risk_check
+
+    def change_quote_after_sizing(*args, **kwargs):
+        check_risk(*args, **kwargs)
+        stream_feed.publish(offers=[{"px": {"value": "0.91", "currency": "USD"}, "qty": "100"}])
+
+    monkeypatch.setattr(journal, "risk_check", change_quote_after_sizing)
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    rejection = journal.opportunities()[-1]
+    assert rejection["decision"] == "plan_rejected"
+    assert rejection["quote_reason"] == "executable_price_changed"
+    assert rejection["execution_check"]["planned"]["yes_price"] == "0.90"
+    assert rejection["execution_check"]["latest"]["ask"] == "0.91"
+    assert journal.records() == []
+    assert not actual_fills
+    assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
+    clock.current = future_market.start + timedelta(seconds=304)
+    trader.tick()
+    assert len(journal.opportunities()) == 2
+    assert not actual_fills

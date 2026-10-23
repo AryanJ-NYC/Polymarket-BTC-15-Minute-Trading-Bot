@@ -402,8 +402,12 @@ strictly above .80 and at most .95, and holds its owned lot to official settleme
 Up buys at the YES ask; Down buys at one minus the YES bid. Visible side quantity,
 quantity increments, limit IOC execution and the fee-inclusive 2% bankroll ceiling
 still apply. Skips, invalid quotes, risk blocks and zero fills consume the decision;
-missing the interval records `missed_window`. Crashes and restarts cannot resample
-that contract. A reservation with an ambiguous create remains pending for recovery.
+missing the interval records `missed_window`. A newly subscribed contract waits
+for its first snapshot within that interval before consuming its decision; if no
+snapshot arrives before 105 seconds, it records `missed_window`. Once a snapshot
+has arrived, an invalid or unavailable quote still consumes the decision. Crashes
+and restarts cannot resample a consumed decision. A reservation with an ambiguous
+create remains pending for recovery.
 
 The policy inherits the existing **35-second** provider/local freshness limit.
 That setting has not been optimized for five-minute trading. Evidence retains the
@@ -651,3 +655,58 @@ when the collected order fees and both cost amounts are known. The report keeps
 the dispute and unknown exact P&L; the daily loss budget uses the higher entry
 cost. Unknown order costs or collected fees, unsettled orders, other accounting
 issues, and larger differences still require review.
+
+For a market shared by multiple policy lots, an omitted settlement fee also
+allows admission when the provider's remaining cost matches the known order
+cost exactly and collected fees and execution order are known. This applies
+to already saved checks without rewriting journal evidence. Raw warnings and
+unknown exact P&L remain.
+
+A fully closed multi-policy market can also pass admission when its combined
+fills, known collected fees, retained-share payout and provider realized totals
+reconcile exactly. This compares complete cashflows instead of requiring the
+provider to allocate its remaining cost like the journal's average-cost pool.
+Provider realized totals must match either gross cashflows or cashflows net of
+all collected fees, with consistent before/after cost and quantities. This
+read-time check also covers existing saved records; it preserves their raw
+warnings and unknown exact policy P&L. Daily risk still counts each losing
+policy conservatively. Missing evidence, pending/open holdings, delayed fills,
+and unexplained cashflow differences remain blocking; this adds no tolerance.
+
+Reported residual fees also reconcile when explicit `baseCost` plus those fees
+equals provider cost, the fees fit within known collected order fees, and gross
+realized cashflows bridge exactly using `baseCost`. Flat after-settlement costs
+and fees must be zero when reported. Collected fees are deducted once from each
+policy's result; raw provider evidence remains unchanged.
+
+### Confirmed results from saved settlement cashflows
+
+The read-only results report can confirm a closed policy lot from the strict
+whole-market cashflow reconciliation above, even when its raw journal `pnl`
+remains null. This requires complete known fills and collected fees, exact owned
+quantities and payouts, consistent saved resolution evidence, and matching
+provider realized cashflows. Admission tolerance alone never confirms a result.
+
+`pnl_confirmations` identifies each derived result, its market and the captured
+settlement timestamp. `confirmed_cashflow_count` distinguishes these results
+from already-known journal P&L. Confirmed results are included in every policy,
+settings and experiment summary; each lot retains its own result. The CLI's
+`trades` list preserves raw nulls and warnings. The report uses saved evidence;
+it does not refresh provider records, repair the journal or prove an account
+cash debit. Conflicting fees/basis outside the strict proof remain unresolved.
+
+`confirmed_entry_cost`, `return_on_entry_cost` (a fraction, not percent) and
+`average_net_pnl` use the same confirmed completed trades. Wins and losses use
+fee-net P&L; `breakeven_count` is separate. Open trades and unfilled attempts do
+not become realized returns.
+
+### Execution rejection diagnostics
+
+Local and minute-five submission preflight failures retain bounded reason codes
+such as `executable_price_changed`, `executable_depth_changed`, `plan_expired`
+and `favorite_no_longer_eligible`. Their `execution_check` records planned price,
+quantity and expiry alongside the current top-of-book prices/depth, timestamps
+and stream generation when available. It excludes raw provider errors, order
+payloads and credentials. Old or unrecognized errors still report `unknown`.
+Minute-five continues to make one durable decision per contract: a rejected
+plan consumes the decision and does not introduce a retry.

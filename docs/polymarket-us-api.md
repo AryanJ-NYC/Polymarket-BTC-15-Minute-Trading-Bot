@@ -39,11 +39,16 @@ page. Ambiguity is rejected within the requested horizon. A missing five-minute
 contract does not suppress discovery of the fifteen-minute contract. Owned
 contracts of either supported horizon use the same parser after restart.
 
-Ordinary and simultaneous runs discover five-minute contracts first. When a
-five-minute decision is claimed, discovery of a new fifteen-minute contract waits
-until the next tick; known fifteen-minute contracts and history remain available.
-Model-only and assigned modes retain their discovery order. Pending-order
-reconciliation and shared cooldowns still precede discovery.
+Ordinary and simultaneous runs discover five-minute contracts first. A newly
+subscribed five-minute contract waits for its first stream snapshot during the
+100–105-second entry window before consuming its decision. Missing the interval
+records one `missed_window`; a received invalid snapshot consumes the decision.
+Optional fifteen-minute discovery, ended-lot settlement reads and outcome history
+wait while that initial snapshot is pending in the entry window. After a decision,
+new fifteen-minute discovery resumes on the next tick; known fifteen-minute
+contracts and history remain available. Model-only and assigned modes retain
+their discovery order. Pending-order reconciliation and shared cooldowns still
+precede discovery.
 
 Up/YES pays when the closing reference is at or above the opening reference.
 Both reference prices use CF Benchmarks BRTI averages over the 60 seconds before

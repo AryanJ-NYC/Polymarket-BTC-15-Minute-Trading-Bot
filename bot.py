@@ -25,6 +25,7 @@ from core.strategy_brain.strategies.btc_15min_strategy import (
 )
 from execution.market_stream import MarketStream, StreamUnavailable
 from execution.polymarket_client import (
+    ExecutionRejected,
     OrderNotSubmitted,
     OrderPending,
     OrderPreflightError,
@@ -316,6 +317,8 @@ class TradingBot:
         self.last_health = None
         self._minute_five_admission = None
         self._five_minute_admission = None
+        self._five_minute_waiting_snapshot = False
+        self._five_minute_snapshot_contract = None
 
     @property
     def settings(self) -> dict:
@@ -391,6 +394,7 @@ class TradingBot:
         # The receiver only publishes immutable books on its own thread.
         self._minute_five_admission = None
         self._five_minute_admission = None
+        self._five_minute_waiting_snapshot = False
         self._claim_minute_five()
         self._claim_five_minute()
         if monotonic() < self.next_data_attempt:
@@ -410,6 +414,7 @@ class TradingBot:
             self._record_pause("exchange_backoff")
             return
         self._sync_subscriptions()
+        self._claim_five_minute()
         health = self.books.health()
         state = (
             health["connected"],
@@ -427,8 +432,11 @@ class TradingBot:
             self._record_pause("exchange_backoff")
             return
         self._sync_subscriptions()
+        self._claim_five_minute()
         if not reconciled or any(row["pending"] for row in self.journal.records()):
             self._record_pause("reconciliation_pending")
+            return
+        if self._five_minute_waiting_snapshot:
             return
         if self.live and unavailable:
             try:
@@ -562,6 +570,7 @@ class TradingBot:
             or (self.one_trade and self.trade_id is not None)
         ):
             return
+        self._five_minute_waiting_snapshot = False
         settings = dict(FIVE_MINUTE_SETTINGS)
         settings["execution_mode"] = "live" if self.live else "paper"
         if not self.journal.entry_observed(market.slug, "five-minute"):
@@ -569,11 +578,26 @@ class TradingBot:
         if self.journal.entry_decided(market.slug, "five-minute"):
             return
         elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
-        if elapsed < settings["entry_start_seconds"]:
-            return
         if elapsed >= settings["entry_end_seconds"]:
             self.journal.record_opportunity(market, None, "missed_window", settings=settings)
             return
+        health = self.books.health()
+        reason = health["book_reasons"].get(market.slug, "book_unavailable")
+        if (
+            health["connected"]
+            and market.slug in health["subscriptions"]
+            and reason
+            not in {"book_unavailable", "subscription_unavailable", "connection_unavailable"}
+        ):
+            # Bound invalid snapshots count as a first input too. Readiness is
+            # sticky for this contract, so later disconnects do not reopen it.
+            self._five_minute_snapshot_contract = market.slug
+        if elapsed < settings["entry_start_seconds"]:
+            return
+        if self._five_minute_snapshot_contract != market.slug:
+            self._five_minute_waiting_snapshot = True
+            return
+        self._five_minute_waiting_snapshot = False
         # Commit before account reconciliation or book retrieval. A restart,
         # invalid quote or capacity skip never opens another decision slot.
         self.journal.record_opportunity(market, None, "decision_started", settings=settings)
@@ -719,6 +743,7 @@ class TradingBot:
                 outcome,
                 settings,
                 quote_reason=quote_reason(exc),
+                execution_check=getattr(exc, "execution_check", None),
             )
             logger.info(
                 "Entry skipped: executable quote or account unavailable ({}, reason {})",
@@ -919,7 +944,7 @@ class TradingBot:
         ] if candidates else None, prediction
 
     def _capture_outcomes(self) -> None:
-        if monotonic() < self.next_outcome_attempt:
+        if self._five_minute_waiting_snapshot or monotonic() < self.next_outcome_attempt:
             return
         elapsed = (
             (datetime.now(timezone.utc) - self.market.start).total_seconds()
@@ -997,6 +1022,7 @@ class TradingBot:
                     plan.outcome,
                     settings,
                     quote_reason=quote_reason(exc),
+                    execution_check=getattr(exc, "execution_check", None),
                 )
 
         def validate():
@@ -1124,9 +1150,12 @@ class TradingBot:
             if market is not None and datetime.now(timezone.utc) < market.end:
                 continue
             setattr(self, attribute, None)
-            if horizon == 900 and self._five_minute_admission is not None:
-                # A newly found five-minute decision runs before another
-                # discovery request. Its durable claim permits retry next tick.
+            if horizon == 900 and (
+                self._five_minute_admission is not None or self._five_minute_waiting_snapshot
+            ):
+                # Initial snapshot readiness and its five-minute decision run
+                # before another discovery request. Resume after the decision
+                # or when its window expires.
                 continue
             if monotonic() < getattr(self, retry_attribute):
                 continue
@@ -1208,7 +1237,7 @@ class TradingBot:
         self, plan, market, book, *, streamed: bool, settings: dict | None
     ) -> None:
         if datetime.now(timezone.utc) >= plan.expires_at:
-            raise ValueError("Order plan has expired")
+            raise ExecutionRejected("plan_expired", plan, book)
         latest = self.books.book(market) if streamed else self.exchange.book(market)
         if plan.action == "BUY" and (settings or {}).get("timing_preset") == "five-minute":
             self.journal.record_opportunity(
@@ -1221,7 +1250,7 @@ class TradingBot:
             )
         validate_book(market, latest)
         if streamed and latest.generation != book.generation:
-            raise ValueError("Order book connection/subscription generation changed")
+            raise ExecutionRejected("stream_generation_changed", plan, book, latest)
         if plan.action == "BUY":
             if settings is None:
                 raise ValueError("Entry settings are required")
@@ -1229,17 +1258,17 @@ class TradingBot:
                 raise QuoteUnavailable(latest.entry_reason)
             elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
             if not settings["entry_start_seconds"] <= elapsed < settings["entry_end_seconds"]:
-                raise ValueError("Entry deadline elapsed")
+                raise ExecutionRejected("entry_deadline_elapsed", plan, book, latest)
             if market.horizon_seconds != settings.get("horizon_seconds", 900):
                 raise ValueError("Entry policy does not match its contract horizon")
             if settings.get("exit_policy") == "settlement-only-v1":
                 if _minute_five_outcome(latest, settings) != plan.outcome:
-                    raise ValueError("Minute-five favorite is no longer eligible")
+                    raise ExecutionRejected("favorite_no_longer_eligible", plan, book, latest)
             elif "model_tag" not in settings:
                 if (plan.outcome == "up" and latest.mid <= number(settings["up_midpoint"])) or (
                     plan.outcome == "down" and latest.mid >= number(settings["down_midpoint"])
                 ):
-                    raise ValueError("Entry direction is no longer eligible")
+                    raise ExecutionRejected("direction_no_longer_eligible", plan, book, latest)
             else:
                 q = self.model.predict(
                     midpoint=latest.mid,
@@ -1251,7 +1280,7 @@ class TradingBot:
                     plan.quantity * probability - plan.notional - plan.fee_bound - self.extra_cost
                     <= 0
                 ):
-                    raise ValueError("Model edge is no longer positive")
+                    raise ExecutionRejected("model_edge_nonpositive", plan, book, latest)
             # The reserved fee-rounded budget already binds this quantity. Sizing
             # it again can round a valid minimum order down below the increment.
             yes_price, available = latest.asks[0] if plan.outcome == "up" else latest.bids[0]
@@ -1259,8 +1288,10 @@ class TradingBot:
             current = self.exchange.sell_plan(market, latest, plan.outcome, plan.quantity)
             yes_price = current.yes_price
             available = current.quantity
-        if yes_price != plan.yes_price or available < plan.quantity:
-            raise ValueError("Executable price or depth changed")
+        if yes_price != plan.yes_price:
+            raise ExecutionRejected("executable_price_changed", plan, book, latest)
+        if available < plan.quantity:
+            raise ExecutionRejected("executable_depth_changed", plan, book, latest)
 
     def _valuation_book(self, slug):
         market = next(
@@ -1353,8 +1384,11 @@ class TradingBot:
             try:
                 if datetime.now(timezone.utc) >= parse_time(row["end"]):
                     if not row.get("settlement"):
-                        if self._five_minute_admission is not None:
-                            # Settle on the next tick, after this one-shot decision.
+                        if (
+                            self._five_minute_admission is not None
+                            or self._five_minute_waiting_snapshot
+                        ):
+                            # Settle after initial snapshot waiting and this decision.
                             # Retained live shares still pause entry; paper lots
                             # remain funded in the unchanged shared risk checks.
                             unavailable = (self.live and number(row["quantity"]) > 0) or unavailable

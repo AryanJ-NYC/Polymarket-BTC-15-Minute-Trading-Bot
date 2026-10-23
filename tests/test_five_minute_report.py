@@ -1,7 +1,9 @@
+from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from test_trade_journal import settled_fifo_market as settled_fifo_market
 
 from results_report import summarize
 
@@ -162,6 +164,33 @@ def test_assumed_fill_never_uses_a_skewed_quote_observed_after_decision_deadline
     assumed = report["by_policy"][POLICY]["quote_based_evaluation"]
     assert assumed["labeled_count"] == 0
     assert assumed["outcomes"] == []
+
+
+@pytest.mark.parametrize("mode", ["live", "paper"])
+def test_cashflow_confirmation_survives_five_minute_policy_and_execution_mode_views(
+    journal, settled_fifo_market, mode
+):
+    rows = journal.records()
+    # The complete market proof includes sibling policy lots. A cohort must
+    # inherit that proof rather than try to prove a partial market on its own.
+    selected = next(row for row in rows if row["settings"]["timing_preset"] == "model-current")
+    selected["settings"] = {
+        **selected["settings"],
+        "policy_version": POLICY,
+        "execution_mode": mode,
+        "horizon_seconds": 300,
+    }
+    original = deepcopy(rows)
+    result = summarize(rows)
+    cohort = result["by_policy"][POLICY]
+    execution = cohort["by_execution_mode"][mode]
+    assert result["confirmed_cashflow_count"] == 4
+    for report in (cohort, execution):
+        assert report["known_closed_count"] == report["confirmed_cashflow_count"] == 1
+        assert Decimal(report["total_net_pnl"]) == Decimal("0.2300")
+        assert report["unresolved_closed_count"] == 0
+    assert selected["pnl"] is None and selected["accounting_issues"]
+    assert rows == original
 
 
 POLICY = "btc-5m-strong-favorite-100-v1"

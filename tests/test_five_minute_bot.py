@@ -91,6 +91,127 @@ def test_startup_five_minute_entry_precedes_slow_optional_fifteen_minute_discove
     assert sum(row["decision"] == "decision_started" for row in journal.opportunities()) == 1
 
 
+@pytest.mark.parametrize("restart", [False, True])
+def test_unsubscribed_startup_waits_for_first_snapshot_then_decides_once(
+    venue, journal, stream_feed, clock, unsubscribed_five_minute_market, actual_fills, restart
+):
+    market = unsubscribed_five_minute_market
+    assert market.slug not in stream_feed.books.health()["desired"]
+    assert market.slug not in stream_feed.books.health()["book_reasons"]
+    discover = venue.client.discover_market
+    handler = venue.on_request
+    horizon = None
+    fifteen_reads = []
+
+    def discover_horizon(horizon_seconds=900):
+        nonlocal horizon
+        horizon = horizon_seconds
+        try:
+            return discover(horizon_seconds)
+        finally:
+            horizon = None
+
+    def slow_optional_discovery(request):
+        if request.url.path == "/v1/markets" and horizon == 900:
+            fifteen_reads.append(clock.current)
+            clock.current += timedelta(seconds=10)
+        return handler(request)
+
+    venue.client.discover_market = discover_horizon
+    venue.on_request = slow_optional_discovery
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    wait_for(lambda: market.slug in stream_feed.books.health()["subscriptions"])
+    assert not journal.entry_decided(market.slug, "five-minute")
+    assert not actual_fills
+    assert not fifteen_reads
+    clock.current = market.start + timedelta(seconds=101)
+    if restart:
+        path = Path(journal.db.execute("PRAGMA database_list").fetchone()[2])
+        journal.close()
+        journal.__init__(path)
+        trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    assert not journal.entry_decided(market.slug, "five-minute")
+    assert not fifteen_reads
+
+    clock.current = market.start + timedelta(seconds=102)
+    publish_five(venue, stream_feed, clock, market)
+    trader.tick()
+    row = journal.get(market.slug + ":five-minute")
+    assert row["state"] == "open"
+    assert row["created_at"] == clock.current.isoformat()
+    assert len(actual_fills) == 1
+    assert not fifteen_reads
+    clock.current = market.start + timedelta(seconds=103)
+    trader.tick()
+    assert fifteen_reads == [market.start + timedelta(seconds=103)]
+    assert journal.get(row["trade_id"]) == row
+    assert len(actual_fills) == 1
+    assert sum(row["decision"] == "decision_started" for row in journal.opportunities()) == 1
+
+
+@pytest.mark.parametrize("first_input", ["never", "stale", "malformed", "one_sided"])
+def test_startup_expiry_or_invalid_first_snapshot_is_terminal(
+    venue, journal, stream_feed, clock, unsubscribed_five_minute_market, actual_fills, first_input
+):
+    market = unsubscribed_five_minute_market
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    wait_for(lambda: market.slug in stream_feed.books.health()["subscriptions"])
+    assert not journal.entry_decided(market.slug, "five-minute")
+    clock.current = market.start + timedelta(seconds=102)
+    if first_input in {"stale", "malformed"}:
+        before = stream_feed.books.health()["malformed"]
+        message = snapshot(
+            stream_feed.socket,
+            venue.markets[market.slug],
+            (
+                clock.current - timedelta(seconds=36) if first_input == "stale" else clock.current
+            ).isoformat(),
+        )
+        if first_input == "malformed":
+            message["marketData"]["offers"][0]["qty"] = "NaN"
+        stream_feed.socket.publish(message)
+        wait_for(lambda: stream_feed.books.health()["malformed"] > before)
+    elif first_input == "one_sided":
+        publish_five(venue, stream_feed, clock, market, offers=[])
+    else:
+        clock.current = market.start + timedelta(seconds=105)
+    trader.tick()
+    assert journal.entry_decided(market.slug, "five-minute")
+    assert not actual_fills
+    clock.current = market.start + timedelta(seconds=106 if first_input == "never" else 104)
+    publish_five(venue, stream_feed, clock, market)
+    trader.tick()
+    assert not actual_fills
+    rows = journal.opportunities()
+    assert sum(row["decision"] == "missed_window" for row in rows) == int(first_input == "never")
+    assert sum(row["decision"] == "decision_started" for row in rows) == int(first_input != "never")
+
+
+def test_snapshot_readiness_before_window_stays_terminal_after_disconnect(
+    venue, journal, stream_feed, clock, unsubscribed_five_minute_market, actual_fills
+):
+    market = unsubscribed_five_minute_market
+    clock.current = market.start + timedelta(seconds=99)
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    wait_for(lambda: market.slug in stream_feed.books.health()["subscriptions"])
+    publish_five(venue, stream_feed, clock, market)
+    trader.tick()
+    assert not journal.entry_decided(market.slug, "five-minute")
+    stream_feed.disconnect()
+    clock.current = market.start + timedelta(seconds=100)
+    trader.tick()
+    assert journal.entry_decided(market.slug, "five-minute")
+    assert not actual_fills
+    assert any(
+        row["slug"] == market.slug and row["decision"] == "book_unavailable"
+        for row in journal.opportunities()
+    )
+
+
 @pytest.mark.parametrize("five_minute_status", ["missing", "ambiguous"])
 def test_missing_or_ambiguous_five_minute_discovery_preserves_fifteen_minute_entry(
     venue, journal, stream_feed, clock, five_minute_market, actual_fills, five_minute_status
@@ -941,23 +1062,40 @@ def test_order_recovery_precedes_optional_discovery_and_its_rate_limit(
 
 
 @pytest.mark.parametrize(
-    "live,retained,settlement,expected_entry",
-    [(False, True, 1, True), (True, False, 1, True), (True, True, None, False)],
-    ids=["paper-retained", "live-fully-sold", "live-unresolved-retained"],
+    "live,retained,settlement,expected_entry,startup_wait",
+    [
+        (False, True, 1, True, False),
+        (True, False, 1, True, False),
+        (True, True, None, False, False),
+        (False, True, 1, True, True),
+    ],
+    ids=["paper-retained", "live-fully-sold", "live-unresolved-retained", "startup-wait"],
 )
 def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_live_guard(
     venue,
     journal,
     stream_feed,
     clock,
-    five_minute_market,
+    unsubscribed_five_minute_market,
     actual_fills,
     live,
     retained,
     settlement,
     expected_entry,
+    startup_wait,
 ):
-    publish_five(venue, stream_feed, clock, five_minute_market)
+    five_minute_market = unsubscribed_five_minute_market
+    current_book = replace(
+        stream_feed.books.book(parse_market(venue.market)),
+        bids=((Decimal("0.88"), Decimal("10")),),
+        asks=((Decimal("0.90"), Decimal("10")),),
+    )
+    if not startup_wait:
+        before = len(stream_feed.socket.subscriptions)
+        stream_feed.books.set_markets([parse_market(venue.market), five_minute_market])
+        wait_for(lambda: len(stream_feed.socket.subscriptions) > before)
+        publish_five(venue, stream_feed, clock, five_minute_market)
+        current_book = stream_feed.books.book(five_minute_market)
     decision_time = clock.current
     ended = replace(
         five_minute_market,
@@ -965,7 +1103,6 @@ def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_
         start=five_minute_market.start - timedelta(seconds=300),
         end=five_minute_market.start,
     )
-    current_book = stream_feed.books.book(five_minute_market)
     clock.current = ended.start + timedelta(seconds=100)
     book = replace(
         current_book,
@@ -976,6 +1113,11 @@ def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_
     old_id = ended.slug + ":five-minute"
     journal.reserve_entry(plan, ended.end, settings=dict(bot.FIVE_MINUTE_SETTINGS))
     journal.finish_order(old_id, Decimal("0.5"), Decimal("0.45"), Decimal("0.01"))
+    archive = replace(ended, slug="older-observed-five-minute")
+    if startup_wait:
+        journal.record_opportunity(
+            archive, None, "missed_window", settings=dict(bot.FIVE_MINUTE_SETTINGS)
+        )
     if not retained:
         exit_plan = venue.client.sell_plan(ended, book, "up", Decimal("0.5"))
         journal.reserve_exit(old_id, exit_plan)
@@ -986,9 +1128,13 @@ def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_
     assert venue.positions == {}
     clock.current = decision_time
     handler = venue.on_request
-    settlement_reads, create_times = [], []
+    settlement_reads, history_reads, create_times = [], [], []
 
     def slow_settlement(request):
+        if request.url.path == f"/v1/markets/{archive.slug}/settlement":
+            history_reads.append(clock.current)
+            clock.current += timedelta(seconds=10)
+            return httpx.Response(200, json={"slug": archive.slug, "settlement": 1})
         if request.url.path == f"/v1/markets/{ended.slug}/settlement":
             settlement_reads.append(clock.current)
             clock.current += timedelta(seconds=10)
@@ -1004,6 +1150,16 @@ def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_
     venue.on_request = slow_settlement
     trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=live)
     trader.tick()
+    if startup_wait:
+        wait_for(lambda: five_minute_market.slug in stream_feed.books.health()["subscriptions"])
+        assert settlement_reads == history_reads == []
+        assert journal.get(old_id) == old_row
+        assert not journal.entry_decided(five_minute_market.slug, "five-minute")
+        assert clock.current == decision_time
+        clock.current += timedelta(seconds=2)
+        decision_time = clock.current
+        publish_five(venue, stream_feed, clock, five_minute_market)
+        trader.tick()
     assert settlement_reads == []
     assert journal.get(old_id) == old_row
     entry = journal.get(five_minute_market.slug + ":five-minute")
@@ -1022,9 +1178,12 @@ def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_
         )
         assert journal.exposure() == Decimal("0.46")
 
-    clock.current = decision_time + timedelta(seconds=1)
+    resumed_at = clock.current + timedelta(seconds=1)
+    clock.current = resumed_at
     trader.tick()
-    assert settlement_reads == [decision_time + timedelta(seconds=1)]
+    assert settlement_reads == [resumed_at]
+    if startup_wait:
+        assert history_reads == [decision_time]
     assert len(create_times) == (1 if live and expected_entry else 0)
     if settlement is None:
         assert journal.get(old_id) == old_row
@@ -1042,7 +1201,7 @@ def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_
 
 
 @pytest.fixture
-def five_minute_market(venue, stream_feed, clock):
+def unsubscribed_five_minute_market(venue, clock):
     row = copy.deepcopy(venue.market)
     row["slug"] = "cpc-btc-updown-5m-2026-10-21-1840z"
     start = clock.current - timedelta(seconds=100)
@@ -1053,7 +1212,12 @@ def five_minute_market(venue, stream_feed, clock):
     )
     venue.markets[row["slug"]] = row
     venue.pages = {0: [venue.market, row]}
-    market = parse_market(row)
+    return parse_market(row)
+
+
+@pytest.fixture
+def five_minute_market(venue, stream_feed, unsubscribed_five_minute_market):
+    market = unsubscribed_five_minute_market
     before = len(stream_feed.socket.subscriptions)
     stream_feed.books.set_markets([parse_market(venue.market), market])
     wait_for(lambda: len(stream_feed.socket.subscriptions) > before)
