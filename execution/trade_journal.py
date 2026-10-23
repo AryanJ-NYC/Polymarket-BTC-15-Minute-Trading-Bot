@@ -776,9 +776,6 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
         or before.get("cost") is None
         or before.get("realized") is None
         or after.get("realized") is None
-        # Reported provider fees still use the existing fee-comparison path.
-        or before.get("fees") is not None
-        or after.get("fees") is not None
     ):
         return False
     quantity = payout = gross = fees = Decimal("0")
@@ -832,10 +829,30 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
         payout += row_payout
     provider_cost = amount(before["cost"])
     realized = amount(after["realized"])
+    if before.get("fees") is not None:
+        # Gross realized cashflows exclude fees, while the provider's residual
+        # cost includes them. Require the explicit base/fee identity rather
+        # than assuming how average cost allocates fees across policy lots.
+        if before.get("baseCost") is None:
+            return False
+        base_cost = amount(before["baseCost"])
+        reported_fee = amount(before["fees"])
+        if (
+            base_cost < 0
+            or not 0 <= reported_fee <= fees
+            or provider_cost != base_cost + reported_fee
+            or realized != gross + payout
+        ):
+            return False
+        provider_cost = base_cost
+    elif after.get("fees") is not None:
+        return False
     return (
         number(before["netPositionDecimal"]) == quantity
         and number(after["netPositionDecimal"]) == 0
         and (after.get("cost") is None or amount(after["cost"]) == 0)
+        and (after.get("baseCost") is None or amount(after["baseCost"]) == 0)
+        and (after.get("fees") is None or amount(after["fees"]) == 0)
         and provider_cost >= 0
         and amount(before["realized"]) + payout - provider_cost == realized
         and realized in {gross + payout, gross + payout - fees}
