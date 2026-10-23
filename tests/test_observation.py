@@ -117,6 +117,98 @@ def test_rest_comparison_worker_only_reads_and_stops_cleanly(venue, tmp_path):
     assert all("/v1/markets" in path for _, path, _ in venue.calls)
 
 
+def test_rest_worker_retains_unexpired_identity_on_empty_refresh_but_expires_after_slow_read(
+    venue, clock, tmp_path, monkeypatch
+):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    import tools.observe_market_data as observer
+    from execution.polymarket_client import parse_market
+
+    initial = clock.current
+    elapsed = [0.0]
+    fifteen = replace(
+        parse_market(venue.market),
+        start=initial - timedelta(seconds=100),
+        end=initial + timedelta(seconds=800),
+    )
+    five = replace(
+        fifteen,
+        slug="five-current",
+        start=initial - timedelta(seconds=60),
+        end=initial + timedelta(seconds=240),
+    )
+    following = replace(
+        five, slug="five-next", start=five.end, end=five.end + timedelta(seconds=300)
+    )
+    for market in (fifteen, five, following):
+        venue.markets[market.slug] = {**venue.market, "slug": market.slug}
+    snapshots, book_reads = [], []
+
+    def advance(seconds):
+        elapsed[0] += seconds
+        clock.current += timedelta(seconds=seconds)
+
+    class Shutdown:
+        passes = 0
+
+        def is_set(self):
+            return self.passes >= 5
+
+        def wait(self, timeout):
+            snapshots.append(worker.current_markets())
+            self.passes += 1
+            if self.passes < 5:
+                advance((30, 30, 150, 3)[self.passes - 1])
+            return self.is_set()
+
+    shutdown = Shutdown()
+
+    class Exchange:
+        def discover_market(self, horizon_seconds=900):
+            if horizon_seconds == 900:
+                return fifteen
+            if shutdown.passes == 3:
+                advance(40)  # Empty response arrives after the old window ends.
+            return (five, None, five, None, following)[shutdown.passes]
+
+        def book(self, market):
+            book_reads.append((shutdown.passes, market.slug))
+            # Retention preserves subscription identity, not stale quote eligibility.
+            age = 36 if shutdown.passes == 1 and market == five else 0
+            venue.timestamp = (clock.current - timedelta(seconds=age)).isoformat()
+            return venue.client.book(market)
+
+        def settlement(self, slug):
+            return None
+
+    monkeypatch.setattr(observer, "datetime", clock)
+    monkeypatch.setattr(observer.time, "monotonic", lambda: elapsed[0])
+    path = tmp_path / "rest.jsonl"
+    worker = observer.RestBaseline(Exchange(), path, shutdown)
+    worker.run()
+    assert [snapshot.get(300) for snapshot in snapshots] == [five, five, five, None, following]
+    assert all(snapshot[900] == fifteen for snapshot in snapshots)
+    assert (1, five.slug) in book_reads
+    assert (3, five.slug) not in book_reads
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    five_rows = [row for row in rows if row["horizon_seconds"] == 300]
+    assert [row.get("slug") for row in five_rows] == [
+        five.slug,
+        five.slug,
+        five.slug,
+        None,
+        following.slug,
+    ]
+    assert five_rows[1]["available"] is False
+    assert five_rows[1]["quote_reason"] == "stale_timestamp"
+    assert five_rows[2]["available"] is True
+    assert five_rows[3]["reason"] == "no_current_market"
+    assert five_rows[4]["available"] is True
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
 def test_rest_worker_limits_slow_outcome_backlog_and_rotates_without_starving_discovery(
     venue, clock, tmp_path, monkeypatch
 ):
@@ -546,6 +638,10 @@ def test_observer_selects_one_context_per_decision_and_closes_on_every_exit(
     assert summary["read_only"]["account_calls"] == 0
     assert summary["read_only"]["order_calls"] == 0
     assert summary["read_only"]["journal_opened"] is False
+    assert summary["by_horizon"][str(market.horizon_seconds)] == {
+        "contract_count": 1,
+        "rollovers": 0,
+    }
     if stop_reason != "failure":
         rows = observer._read_rows(output / "stream.jsonl")
         assert [row["context"] for row in rows if "context" in row] == selected

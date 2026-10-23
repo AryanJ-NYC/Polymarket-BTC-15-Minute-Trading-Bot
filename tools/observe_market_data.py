@@ -447,6 +447,10 @@ class RestBaseline(threading.Thread):
                         discovered = self.exchange.discover_market(horizon)
                         if self.shutdown.is_set():
                             return
+                        if discovered is None:
+                            # An empty refresh does not retire a live identity.
+                            # Recheck expiry after the potentially slow request.
+                            discovered = self.current_markets().get(horizon)
                         with self.lock:
                             self.markets[horizon] = discovered
                             if discovered is not None and horizon == 300:

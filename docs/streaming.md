@@ -125,9 +125,12 @@ and cache-busting authenticated REST book reads run on a separate worker, normal
 every three seconds, while the main observation loop samples the latest streamed
 book every three seconds. The worker independently discovers 300-second and
 900-second BTC contracts and streams both horizons; a missing five-minute contract
-does not remove the fifteen-minute subscription. Five-minute rollover does not
-reset the fifteen-minute strategy history. Slow REST calls can reduce baseline sample count but do
-not block socket receipt. Halfway through the run, the observer closes only its
+does not remove the fifteen-minute subscription. An empty periodic refresh keeps
+the known contract until its measurement window ends, with expiry checked again
+after a slow request. Retaining its identity does not extend quote freshness.
+Five-minute rollover does not reset the fifteen-minute strategy history.
+Slow REST calls can reduce baseline sample count but do not block socket receipt.
+Halfway through the run, the observer closes only its
 own underlying SDK transport on the receiver's event loop. The same production
 `MarketStream` instance detects the SDK close event, invalidates books, applies
 its normal backoff, reconnects, and resubscribes. Recovery requires an eligible
