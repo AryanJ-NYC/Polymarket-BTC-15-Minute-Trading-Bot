@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -528,6 +529,137 @@ def test_concurrent_horizon_partial_fills_hold_and_settle_each_provider_contract
     ]
     assert [body["marketSlug"] for body in creates] == [five_minute_market.slug, fifteen.slug]
     assert all(body["intent"] == "ORDER_INTENT_BUY_LONG" for body in creates)
+
+
+def test_outcome_backlog_rotates_on_ordinary_ticks_with_a_held_fifteen_minute_lot(
+    venue, journal, stream_feed, clock, monkeypatch
+):
+    elapsed = [0.0]
+    monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+    beginning = clock.current
+    start = beginning - timedelta(seconds=400)
+    venue.market["assetPriceTerms"].update(
+        windowStart=start.isoformat(), windowEnd=(start + timedelta(seconds=900)).isoformat()
+    )
+    current = parse_market(venue.market)
+    before = len(stream_feed.socket.subscriptions)
+    stream_feed.books.set_markets([current])
+    wait_for(lambda: len(stream_feed.socket.subscriptions) > before)
+    stream_feed.publish()
+    plan = venue.client.buy_plan(current, stream_feed.books.book(current), "up", Decimal("2"))
+    journal.reserve_entry(
+        plan,
+        current.end,
+        settings={"timing_preset": "minute-five", "exit_policy": "settlement-only-v1"},
+    )
+    journal.finish_order(
+        current.slug + ":minute-five", Decimal("0.5"), Decimal("0.325"), Decimal("0.01")
+    )
+    venue.positions[current.slug] = {"netPositionDecimal": "0.5", "qtyAvailableDecimal": "0.5"}
+    held = journal.records()[0]
+    for slug, horizon, ended_ago in (
+        ("archived-a-five", 300, 900),
+        ("archived-b-five", 300, 600),
+        ("archived-c-five", 300, 300),
+        ("archived-d-fifteen", 900, 1),
+    ):
+        ended = beginning - timedelta(seconds=ended_ago)
+        market = replace(current, slug=slug, start=ended - timedelta(seconds=horizon), end=ended)
+        journal.record_opportunity(
+            market,
+            None,
+            "outside_favorite_band",
+            settings={"timing_preset": "five-minute" if horizon == 300 else "minute-five"},
+        )
+    reads = []
+
+    def historical_outcome(request):
+        if not request.url.path.endswith("/settlement"):
+            return None
+        slug = request.url.path.split("/")[-2]
+        reads.append(slug)
+        if slug == "archived-a-five":
+            return httpx.Response(404, json={"error": "Not resolved"})
+        return httpx.Response(
+            200, json={"slug": slug, "settlement": 1 if slug == "archived-c-five" else 0}
+        )
+
+    venue.on_request = historical_outcome
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    for seconds, expected_reads in (
+        (0, 1),
+        (10, 1),
+        (29.999, 1),
+        (30, 2),
+        (60, 3),
+        (90, 4),
+        (120, 5),
+    ):
+        elapsed[0] = seconds
+        clock.current = beginning + timedelta(seconds=seconds)
+        venue.timestamp = clock.current.isoformat()
+        stream_feed.publish()
+        trader.tick()
+        assert len(reads) == expected_reads
+        assert trader.market == current
+        assert journal.get(held["trade_id"]) == held
+    assert reads == [
+        "archived-a-five",
+        "archived-b-five",
+        "archived-c-five",
+        "archived-d-fifteen",
+        "archived-a-five",
+    ]
+    assert journal.pending_contracts() == ["archived-a-five"]
+    assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+def test_due_history_waits_until_after_the_five_minute_decision_and_order(
+    venue, journal, stream_feed, clock, five_minute_market, actual_fills, monkeypatch
+):
+    elapsed = [0.0]
+    monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+    venue.pages = {0: [venue.markets[five_minute_market.slug]]}
+    archived = replace(
+        five_minute_market,
+        slug="previous-five-minute",
+        start=five_minute_market.start - timedelta(seconds=300),
+        end=five_minute_market.start,
+    )
+    journal.record_opportunity(
+        archived, None, "outside_favorite_band", settings=bot.FIVE_MINUTE_SETTINGS
+    )
+    handler = venue.on_request
+    outcome_read_times = []
+
+    def slow_outcome(request):
+        if request.url.path == f"/v1/markets/{archived.slug}/settlement":
+            outcome_read_times.append(clock.current)
+            clock.current += timedelta(seconds=10)
+            return httpx.Response(200, json={"slug": archived.slug, "settlement": 1})
+        return handler(request)
+
+    venue.on_request = slow_outcome
+    clock.current = five_minute_market.start + timedelta(seconds=95)
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    assert not actual_fills
+    assert not outcome_read_times
+    assert clock.current == five_minute_market.start + timedelta(seconds=95)
+
+    elapsed[0] = 5
+    clock.current = five_minute_market.start + timedelta(seconds=100)
+    publish_five(venue, stream_feed, clock, five_minute_market)
+    trader.tick()
+    assert len(actual_fills) == 1
+    assert outcome_read_times == [five_minute_market.start + timedelta(seconds=100)]
+    row = journal.get(five_minute_market.slug + ":five-minute")
+    assert row["state"] == "open" and row["pending"] is None
+    assert row["created_at"] == (five_minute_market.start + timedelta(seconds=100)).isoformat()
+    paths = [path for _, path, _ in venue.calls]
+    assert paths.index("/v1/orders") < paths.index(f"/v1/markets/{archived.slug}/settlement")
+    assert journal.pending_contracts() == []
 
 
 @pytest.fixture

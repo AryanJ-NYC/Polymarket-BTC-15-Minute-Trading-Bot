@@ -369,6 +369,13 @@ class TradingBot:
     def tick(self) -> None:
         try:
             self._tick()
+            # Reconciliation and time-sensitive admissions finish first. Read-only
+            # outcome capture may run while lots are held, but never through a
+            # shared provider cooldown or an unresolved order reservation.
+            if monotonic() >= self.next_data_attempt and not any(
+                row["pending"] for row in self.journal.records()
+            ):
+                self._capture_outcomes()
         except (APIError, APIConnectionError, APITimeoutError) as exc:
             if any(row["pending"] and not row["order_id"] for row in self.journal.records()):
                 raise RuntimeError(
@@ -433,16 +440,6 @@ class TradingBot:
                 return
         if self.one_trade and self.trade_id is not None:
             return
-        if (
-            self.market is not None
-            and (datetime.now(timezone.utc) - self.market.start).total_seconds()
-            >= self.settings["entry_end_seconds"]
-            and not any(row["state"] == "open" for row in self.journal.records())
-        ):
-            self._capture_outcomes()
-            if monotonic() < self.next_data_attempt:
-                self._record_pause("exchange_backoff")
-                return
         # Admission order is fixed and recorded. Both horizons reserve against
         # this journal/account serially; the fifteen-minute policy order is unchanged.
         self._consider_five_minute(unavailable=unavailable)
@@ -452,10 +449,6 @@ class TradingBot:
             self._record_pause("exchange_backoff")
             return
         if self.market is None:
-            # Five-minute-only availability must still produce official labels
-            # for skipped contracts. Outcome reads stay bounded by their timer.
-            if not any(row["state"] == "open" for row in self.journal.records()):
-                self._capture_outcomes()
             logger.info("Waiting for a current BTC 15-minute contract")
             return
         if self.experiment is not None and self.market.start < parse_time(
@@ -926,6 +919,48 @@ class TradingBot:
     def _capture_outcomes(self) -> None:
         if monotonic() < self.next_outcome_attempt:
             return
+        elapsed = (
+            (datetime.now(timezone.utc) - self.market.start).total_seconds()
+            if self.market is not None
+            else None
+        )
+        if self.model is not None and not self.simultaneous:
+            # Enrolled/model-only comparisons keep their historical observation
+            # cadence. Dual-horizon polling belongs to the newly enabled modes.
+            if any(row["state"] == "open" for row in self.journal.records()) or (
+                elapsed is not None and elapsed < self.settings["entry_end_seconds"]
+            ):
+                return
+        elif elapsed is not None and TIMING_WINDOWS[0][1] <= elapsed < TIMING_WINDOWS[-1][2]:
+            # Keep optional history away from the existing baseline/model entry
+            # windows; the rest of each quarter hour can drain both horizons.
+            return
+        if (self.model is None or self.simultaneous) and not (
+            self.one_trade and self.trade_id is not None
+        ):
+            for market, settings in (
+                (self.five_minute_market, FIVE_MINUTE_SETTINGS),
+                (self.market, MINUTE_FIVE_SETTINGS),
+            ):
+                if market is None or self.journal.entry_decided(
+                    market.slug, settings["timing_preset"]
+                ):
+                    continue
+                if (
+                    market is self.market
+                    and self.experiment is not None
+                    and market.start < parse_time(self.experiment["eligible_from"])
+                ):
+                    continue
+                until_entry = (
+                    market.start
+                    + timedelta(seconds=settings["entry_start_seconds"])
+                    - datetime.now(timezone.utc)
+                ).total_seconds()
+                # A historical GET can use the SDK's ten-second timeout. Keep
+                # that and the three-second loop delay clear of a one-shot entry.
+                if 0 < until_entry <= 13:
+                    return
         self.next_outcome_attempt = monotonic() + 30
         pending = self.journal.pending_contracts(after_slug=self.outcome_cursor)
         if not pending:
