@@ -431,6 +431,7 @@ class RestBaseline(threading.Thread):
     def run(self) -> None:
         next_discovery = {300: 0.0, 900: 0.0}
         next_outcomes = 0.0
+        outcome_cursor = None
         while not self.shutdown.is_set():
             started = time.monotonic()
             for horizon in (900, 300):
@@ -476,12 +477,26 @@ class RestBaseline(threading.Thread):
                     return
             if started >= next_outcomes:
                 next_outcomes = started + 30
-                pending = [
-                    market
-                    for slug, market in self.observed.items()
-                    if slug not in self.resolved and datetime.now(timezone.utc) >= market.end
-                ]
-                for market in pending[:10]:
+                pending = sorted(
+                    (
+                        market
+                        for slug, market in self.observed.items()
+                        if slug not in self.resolved and datetime.now(timezone.utc) >= market.end
+                    ),
+                    key=lambda market: (market.end, market.slug),
+                )
+                if pending:
+                    # One slow historical read must not become a batch that
+                    # starves discovery. Advance even when its outcome is absent.
+                    market = next(
+                        (
+                            market
+                            for market in pending
+                            if outcome_cursor is None or (market.end, market.slug) > outcome_cursor
+                        ),
+                        pending[0],
+                    )
+                    outcome_cursor = (market.end, market.slug)
                     try:
                         value = self.exchange.settlement(market.slug)
                         if value is not None:

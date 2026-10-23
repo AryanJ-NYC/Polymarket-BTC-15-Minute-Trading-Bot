@@ -61,6 +61,93 @@ def test_rest_comparison_worker_only_reads_and_stops_cleanly(venue, tmp_path):
     assert all("/v1/markets" in path for _, path, _ in venue.calls)
 
 
+def test_rest_worker_limits_slow_outcome_backlog_and_rotates_without_starving_discovery(
+    venue, clock, tmp_path, monkeypatch
+):
+    from collections import Counter
+    from dataclasses import replace
+    from datetime import timedelta
+
+    import tools.observe_market_data as observer
+    from execution.polymarket_client import parse_market
+
+    initial = clock.current
+    elapsed = [0.0]
+    calls = []
+    market = parse_market(venue.market)
+    book = venue.client.book(market)
+
+    def advance(seconds):
+        elapsed[0] += seconds
+        clock.current += timedelta(seconds=seconds)
+
+    class Shutdown:
+        passes = 0
+
+        def is_set(self):
+            return self.passes >= 34
+
+        def wait(self, timeout):
+            self.passes += 1
+            # Build a backlog through ordinary discovery, then let the worker
+            # catch up at its normal cadence without sleeping or starting a thread.
+            advance(300 if self.passes < 12 else timeout)
+            return self.is_set()
+
+    shutdown = Shutdown()
+
+    class Exchange:
+        def discover_market(self, horizon_seconds=900):
+            calls.append(("discovery", horizon_seconds, shutdown.passes, elapsed[0]))
+            if horizon_seconds == 900:
+                return None
+            index = int(elapsed[0] // 300)
+            start = initial + timedelta(seconds=index * 300)
+            return replace(
+                market,
+                slug=f"five-minute-{index:02}",
+                start=start,
+                end=start + timedelta(seconds=300),
+            )
+
+        def book(self, selected):
+            return replace(book, slug=selected.slug, timestamp=clock.current)
+
+        def settlement(self, slug):
+            calls.append(("settlement", slug, shutdown.passes, elapsed[0]))
+            advance(10)  # The existing HTTP timeout, without wall-clock delay.
+            if slug == "five-minute-01":
+                return Decimal("1")
+            raise httpx.ReadTimeout("Official outcome temporarily unavailable")
+
+    monkeypatch.setattr(observer, "datetime", clock)
+    monkeypatch.setattr(observer.time, "monotonic", lambda: elapsed[0])
+    path = tmp_path / "rest.jsonl"
+    observer.RestBaseline(Exchange(), path, shutdown).run()
+    attempts = [call for call in calls if call[0] == "settlement"]
+    assert attempts
+    assert max(Counter(call[2] for call in attempts).values()) == 1
+    assert all(later[3] - earlier[3] >= 30 for earlier, later in zip(attempts, attempts[1:]))
+    assert [call[1] for call in attempts[:3]] == [
+        "five-minute-00",
+        "five-minute-01",
+        "five-minute-02",
+    ]
+    assert sum(call[1] == "five-minute-00" for call in attempts) >= 2
+    assert sum(call[1] == "five-minute-01" for call in attempts) == 1
+    # Discovery in the next pass follows one timeout, rather than a batch of
+    # old requests blocking that same worker for up to 100 seconds.
+    for index, call in enumerate(calls[:-1]):
+        if call[0] == "settlement":
+            assert calls[index + 1][0] == "discovery"
+    outcomes = [json.loads(line) for line in (tmp_path / "outcomes.jsonl").read_text().splitlines()]
+    assert [row["slug"] for row in outcomes] == ["five-minute-01"]
+    assert outcomes[0]["source"] == "official_settlement"
+    assert outcomes[0]["yes_settlement_price"] == "1"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert {row["horizon_seconds"] for row in rows} == {300, 900}
+
+
 def test_shutdown_after_slow_discovery_does_not_start_a_book_read(tmp_path):
     import threading
 

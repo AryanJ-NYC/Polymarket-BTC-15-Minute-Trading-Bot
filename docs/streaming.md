@@ -152,7 +152,9 @@ favorite proxy, executable price and settings. A missing or invalid first book
 consumes that observation decision. The policy inherits the 35-second freshness
 limit; no five-minute optimization is implied. Its books do not reach the
 fifteen-minute strategy or any fitted model. The observer also requests official
-settlement labels for captured five-minute contracts after their measurement end;
+settlement labels for captured five-minute contracts after their measurement end,
+with at most one rotating pending outcome per 30-second pass after discovery. A
+missing or timed-out outcome cannot hold discovery behind a batch of old requests;
 merely closed contracts remain pending. The REST baseline lane samples quotes. The observer invokes no account, order, or journal operations. Shutdown
 first prevents any further HTTP requests, including additional discovery pages,
 then waits for the in-flight baseline read and its sample write to finish before
