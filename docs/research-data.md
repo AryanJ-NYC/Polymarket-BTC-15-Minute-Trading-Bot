@@ -1,8 +1,9 @@
 # Continuous BTC research data
 
 The research collector archives BTC 5m and 15m markets alongside the trading bot.
-It uses the existing Polymarket US market-data credentials and public HTTP GETs;
-it has no order, account, strategy or trading-journal workflow. There is no run
+It uses the existing Polymarket US market-data credentials, public HTTP GETs and
+Kraken's unauthenticated public BTC/USD trade WebSocket. It has no order, account,
+strategy or trading-journal workflow. There is no run
 duration or sample limit. The source feeds require no additional subscription.
 
 ```bash
@@ -20,6 +21,14 @@ python -m tools.collect_research_data --env-file /path/to/.env.us --output logs/
 - Public one-second BTC reference candles, polled every two seconds with an
   overlapping range. Original responses and request/receipt times are retained,
   including revisions and returned effective time bounds.
+- Kraken BTC/USD spot trades from `wss://ws.kraken.com/v2`, including the latest
+  50-trade subscription snapshot, every subsequent update, duplicate trades,
+  heartbeats, subscription responses and malformed messages. Entire messages
+  are retained: one update can contain several trades. Text is saved unchanged
+  in `raw_text`; binary messages are saved losslessly in `raw_bytes_base64`.
+  Valid JSON also has `payload`, with decimal JSON numbers represented as
+  strings to avoid floating-point precision loss. Integer trade IDs and provider
+  timestamp strings remain intact. Malformed JSON has `parse_error:invalid_json`.
 - Connection generations, subscription bindings, gaps, HTTP failures and rate
   limits. Every ordinary record has a session ID, sequence, UTC receipt time and
   monotonic receipt time. Socket payloads retain provider timestamps separately.
@@ -31,6 +40,27 @@ stamped thresholds or settlements. The collector always reports
 `true_brti_available:false`; no paid feed or website scraping is configured.
 This data supports testing a reference-based estimator against official outcomes,
 but does not establish exact reconstruction of the final 60 raw BRTI ticks.
+
+The spot source is named `kraken_spot_btcusd_trade`. It is a single-exchange
+trade-price proxy, **not BRTI or an official settlement label**. The public trade
+channel needs no Kraken API key or paid subscription. It runs continuously with
+independent connection generations, subscription acknowledgement, a ten-second
+acknowledgement deadline, a 35-second message-idle timeout and reconnect backoff
+from one to thirty seconds. A failed spot connection does not stop the Polymarket
+feeds; archive failure remains fatal. Its receive queue and message size are
+bounded at 16 frames and 1 MiB. The receive queue uses backpressure; an oversized
+message closes the connection and creates a spot gap before reconnecting.
+Malformed JSON or a non-object JSON message is archived before reconnecting;
+it cannot keep an unusable stream alive indefinitely.
+Reconnect snapshots do not prove that every missed
+trade was recovered; this collector does not perform REST backfill.
+
+Replay spot messages by local receipt time and sequence. Provider timestamps
+are event times, not local availability; a reconnect snapshot's older trades
+only became available through that message when it arrived. Deduplicate by
+symbol and trade ID in derived datasets, retaining raw duplicate evidence and
+checking conflicting versions. Do not deduplicate by timestamp, price or size.
+Never forward-fill a quiet interval as a newly observed trade.
 
 For matched-expiry research, pair only contracts with matching closing instants,
 reference index and settlement rules. Reconstruct each leg using messages already
@@ -59,8 +89,20 @@ Preserve and inspect any damaged tail before consuming that archive.
 written, queued and dropped record counts, and unavailable BRTI status. Its own
 `checked_at` must be recent: a stopped process leaves its last status on disk.
 Socket connectivity alone does not prove either horizon is delivering books.
+The separate `spot` health object distinguishes socket `connected` from
+subscription `subscribed`, and records its generation, last message receipt,
+snapshot receipt, live trade-update receipt and provider trade timestamp.
+Snapshots and heartbeats never refresh the live trade-update receipt. These
+are receipt indicators, not a guarantee of valid prices, complete trades or
+fresh provider event times; compare provider time as well as local receipt age.
 Counters are per process session; the archive persists across restarts. Sort
 replay by record receipt time and sequence, not by the random session filename.
+
+Spot lifecycle records use `spot_connection_attempt`, `spot_connected`,
+`spot_connection_gap` and `spot_error`; payload records use `spot_message`.
+These are deliberately distinct from Polymarket's connection event kinds:
+spot disconnects must not invalidate contract books. A shared writer
+`capture_gap` still applies to every source because overflow can lose any feed.
 
 No archive is deleted automatically. Capture fails when less than 512 MiB of disk
 space remains, protecting the trading service's remaining space. The service
@@ -115,4 +157,5 @@ touch the live journal to repair this collector.
 Feed references: [Markets WebSocket](https://docs.polymarket.us/api-reference/websocket/markets),
 [typed crypto contracts](https://docs.polymarket.us/trader-guide/crypto-schema),
 [public reference API](https://docs.polymarket.us/api-reference/asset-prices/overview),
+[Kraken trade channel](https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/trade),
 [CF's licensed feed](https://docs.cfbenchmarks.com/api/websocket/intro/).
