@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from execution.polymarket_client import QuoteUnavailable, parse_time
+from execution.trade_journal import confirmed_cashflow_pnls
 
 
 def main() -> int:
@@ -23,6 +24,7 @@ def main() -> int:
     if not args.journal.is_file():
         parser.error(f"Journal does not exist: {args.journal}")
     with sqlite3.connect(f"{args.journal.resolve().as_uri()}?mode=ro", uri=True) as db:
+        db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
         rows = [json.loads(raw) for (raw,) in db.execute("SELECT data FROM trades ORDER BY rowid")]
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -45,9 +47,17 @@ def main() -> int:
             if key != "trades":
                 print(f"{key}: {value if value is not None else 'pending / unknown'}")
         for row in rows:
+            key = row.get("trade_id", row["slug"])
+            confirmation = report["pnl_confirmations"].get(key)
+            pnl = confirmation["net_pnl"] if confirmation else row["pnl"]
+            basis = (
+                " (reconciled market cashflows; raw journal evidence preserved)"
+                if confirmation
+                else ""
+            )
             print(
-                f"{row.get('trade_id', row['slug'])} | {row['outcome']} | {row['state']} | "
-                f"net P&L: {row['pnl'] if row['pnl'] is not None else 'pending / unknown'}"
+                f"{key} | {row['outcome']} | {row['state']} | "
+                f"net P&L: {pnl if pnl is not None else 'pending / unknown'}{basis}"
             )
     return 0
 
@@ -59,6 +69,7 @@ def summarize(
     experiments: list[dict] | None = None,
 ) -> dict:
     opportunities = opportunities or []
+    cashflow_pnls = confirmed_cashflow_pnls(rows)
     policies = {}
     for row in rows:
         policies.setdefault(_policy(row), []).append(row)
@@ -75,28 +86,40 @@ def summarize(
             )
             group[field].append(row)
     return {
-        **_summarize(rows),
+        **_summarize(rows, cashflow_pnls),
         **_coverage(rows, opportunities),
         "by_settings": [
             {
                 "settings": group["settings"],
-                **_summarize(group["trades"]),
+                **_summarize(group["trades"], cashflow_pnls),
                 **_coverage(group["trades"], group["opportunities"]),
                 **_opportunity_report(group["opportunities"]),
             }
             for _, group in sorted(groups.items())
         ],
-        "by_policy": {policy: _summarize(trades) for policy, trades in sorted(policies.items())},
+        "by_policy": {
+            policy: _summarize(trades, cashflow_pnls) for policy, trades in sorted(policies.items())
+        },
         **_opportunity_report(opportunities),
         "opportunity_decisions": {
             policy: _opportunity_report(observations)["opportunity_decisions"]
             for policy, observations in sorted(policy_opportunities.items())
         },
-        "by_experiment": _experiment_report(rows, opportunities, experiments or []),
+        "by_experiment": _experiment_report(rows, opportunities, experiments or [], cashflow_pnls),
+        "pnl_confirmations": {
+            row.get("trade_id", row["slug"]): {
+                "net_pnl": str(cashflow_pnls[row.get("trade_id", row["slug"])]),
+                "basis": "reconciled_market_cashflows",
+                "market_slug": row["slug"],
+                "settlement_recorded_at": row["settlement"].get("recorded_at"),
+            }
+            for row in rows
+            if row.get("trade_id", row["slug"]) in cashflow_pnls
+        },
     }
 
 
-def _experiment_report(rows, opportunities, definitions):
+def _experiment_report(rows, opportunities, definitions, cashflow_pnls):
     grouped = {}
     for definition in definitions:
         identity = definition.get("id") if isinstance(definition, dict) else None
@@ -134,7 +157,7 @@ def _experiment_report(rows, opportunities, definitions):
             "definition": group["definition"],
             "by_arm": {
                 arm: {
-                    **_summarize(group[arm].get("trades", [])),
+                    **_summarize(group[arm].get("trades", []), cashflow_pnls),
                     **_coverage(group[arm].get("trades", []), group[arm].get("opportunities", [])),
                     "entry_attempt_count": len(group[arm].get("trades", [])),
                     "unfilled_count": sum(
@@ -176,13 +199,28 @@ def _opportunity_report(opportunities):
     }
 
 
-def _summarize(rows: list[dict]) -> dict:
+def _summarize(rows: list[dict], cashflow_pnls: dict[str, Decimal]) -> dict:
     closed = sorted(
         (row for row in rows if row["state"] == "closed"),
         key=lambda row: row.get("closed_at", ""),
     )
-    known = [row for row in closed if row["pnl"] is not None and not row.get("accounting_issues")]
-    values = [Decimal(row["pnl"]) for row in known]
+    known = [
+        row
+        for row in closed
+        if row.get("trade_id", row["slug"]) in cashflow_pnls
+        or (row["pnl"] is not None and not row.get("accounting_issues"))
+    ]
+    values = [
+        cashflow_pnls[row.get("trade_id", row["slug"])]
+        if row.get("trade_id", row["slug"]) in cashflow_pnls
+        else Decimal(row["pnl"])
+        for row in known
+    ]
+    entry_cost = (
+        sum((Decimal(row["entry_cost"]) for row in known), Decimal("0"))
+        if all(row["entry_cost"] is not None for row in known)
+        else None
+    )
     wins = [value for value in values if value > 0]
     losses = [value for value in values if value < 0]
     pending = [row for row in rows if row["state"] in {"open", "reserved"}]
@@ -212,6 +250,15 @@ def _summarize(rows: list[dict]) -> dict:
             for row in rows
         ),
         "known_closed_count": len(known),
+        "confirmed_cashflow_count": sum(
+            row.get("trade_id", row["slug"]) in cashflow_pnls for row in known
+        ),
+        "confirmed_entry_cost": str(entry_cost) if entry_cost is not None else None,
+        "return_on_entry_cost": str(net / entry_cost) if entry_cost else None,
+        "average_net_pnl": str(net / len(values)) if values else None,
+        "wins": len(wins),
+        "losses": len(losses),
+        "breakeven_count": sum(value == 0 for value in values),
         "pending_count": len(pending),
         "unresolved_closed_count": len(unresolved),
         "known_realized_net_pnl": str(net),

@@ -142,6 +142,7 @@ class TradeJournal:
         settings: dict | None = None,
         *,
         quote_reason: str | None = None,
+        execution_check: dict | None = None,
     ) -> int:
         now = datetime.now(timezone.utc)
         data = {
@@ -160,6 +161,8 @@ class TradeJournal:
             "settings": settings,
             "book": None,
         }
+        if execution_check is not None:
+            data["execution_check"] = execution_check
         if book is not None:
             two_sided = bool(book.bids and book.asks)
             data["book"] = {
@@ -484,6 +487,31 @@ class TradeJournal:
         budget, reason = self.entry_budget(bankroll, additional_cost)
         if additional_cost > budget:
             raise ValueError(f"{reason} is exhausted or already at risk")
+
+
+def confirmed_cashflow_pnls(rows: list[dict]) -> dict[str, Decimal]:
+    """Derive owned-lot results only from a complete, exact saved market cashflow proof.
+
+    This is reporting evidence, independent of admission tolerances. The source
+    rows, their accounting warnings and their raw P&L remain unchanged.
+    """
+    markets: dict[str, list[dict]] = {}
+    for row in rows:
+        markets.setdefault(row["slug"], []).append(row)
+    confirmed = {}
+    for market in markets.values():
+        keys = [row.get("trade_id", row["slug"]) for row in market]
+        if len(set(keys)) != len(keys):
+            continue
+        try:
+            if not _settled_cashflows_match(market):
+                continue
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            continue  # Incomplete/invalid historical evidence is never confirmation.
+        for key, row in zip(keys, market):
+            if row["state"] == "closed" and (row["pnl"] is None or row.get("accounting_issues")):
+                confirmed[key] = number(row["proceeds"]) - number(row["entry_cost"])
+    return confirmed
 
 
 def entry_key(slug: str, preset: str | None = None) -> str:

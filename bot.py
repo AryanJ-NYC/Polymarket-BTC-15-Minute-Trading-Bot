@@ -25,6 +25,7 @@ from core.strategy_brain.strategies.btc_15min_strategy import (
 )
 from execution.market_stream import MarketStream, StreamUnavailable
 from execution.polymarket_client import (
+    ExecutionRejected,
     OrderNotSubmitted,
     OrderPending,
     OrderPreflightError,
@@ -654,6 +655,7 @@ class TradingBot:
                 outcome,
                 settings,
                 quote_reason=quote_reason(exc),
+                execution_check=getattr(exc, "execution_check", None),
             )
             logger.info(
                 "Entry skipped: executable quote or account unavailable ({}, reason {})",
@@ -873,6 +875,7 @@ class TradingBot:
                     plan.outcome,
                     settings,
                     quote_reason=quote_reason(exc),
+                    execution_check=getattr(exc, "execution_check", None),
                 )
 
         def validate():
@@ -1048,11 +1051,11 @@ class TradingBot:
         self, plan, market, book, *, streamed: bool, settings: dict | None
     ) -> None:
         if datetime.now(timezone.utc) >= plan.expires_at:
-            raise ValueError("Order plan has expired")
+            raise ExecutionRejected("plan_expired", plan, book)
         latest = self.books.book(market) if streamed else self.exchange.book(market)
         validate_book(market, latest)
         if streamed and latest.generation != book.generation:
-            raise ValueError("Order book connection/subscription generation changed")
+            raise ExecutionRejected("stream_generation_changed", plan, book, latest)
         if plan.action == "BUY":
             if settings is None:
                 raise ValueError("Entry settings are required")
@@ -1060,15 +1063,15 @@ class TradingBot:
                 raise QuoteUnavailable(latest.entry_reason)
             elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
             if not settings["entry_start_seconds"] <= elapsed < settings["entry_end_seconds"]:
-                raise ValueError("Entry deadline elapsed")
+                raise ExecutionRejected("entry_deadline_elapsed", plan, book, latest)
             if settings.get("timing_preset") == "minute-five":
                 if _minute_five_outcome(latest, settings) != plan.outcome:
-                    raise ValueError("Minute-five favorite is no longer eligible")
+                    raise ExecutionRejected("favorite_no_longer_eligible", plan, book, latest)
             elif "model_tag" not in settings:
                 if (plan.outcome == "up" and latest.mid <= number(settings["up_midpoint"])) or (
                     plan.outcome == "down" and latest.mid >= number(settings["down_midpoint"])
                 ):
-                    raise ValueError("Entry direction is no longer eligible")
+                    raise ExecutionRejected("direction_no_longer_eligible", plan, book, latest)
             else:
                 q = self.model.predict(
                     midpoint=latest.mid,
@@ -1080,7 +1083,7 @@ class TradingBot:
                     plan.quantity * probability - plan.notional - plan.fee_bound - self.extra_cost
                     <= 0
                 ):
-                    raise ValueError("Model edge is no longer positive")
+                    raise ExecutionRejected("model_edge_nonpositive", plan, book, latest)
             # The reserved fee-rounded budget already binds this quantity. Sizing
             # it again can round a valid minimum order down below the increment.
             yes_price, available = latest.asks[0] if plan.outcome == "up" else latest.bids[0]
@@ -1088,8 +1091,10 @@ class TradingBot:
             current = self.exchange.sell_plan(market, latest, plan.outcome, plan.quantity)
             yes_price = current.yes_price
             available = current.quantity
-        if yes_price != plan.yes_price or available < plan.quantity:
-            raise ValueError("Executable price or depth changed")
+        if yes_price != plan.yes_price:
+            raise ExecutionRejected("executable_price_changed", plan, book, latest)
+        if available < plan.quantity:
+            raise ExecutionRejected("executable_depth_changed", plan, book, latest)
 
     def _valuation_book(self, slug):
         market = (

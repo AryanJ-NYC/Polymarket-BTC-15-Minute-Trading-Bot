@@ -606,3 +606,35 @@ read-time check also covers existing saved records; it preserves their raw
 warnings and unknown exact policy P&L. Daily risk still counts each losing
 policy conservatively. Missing evidence, pending/open holdings, delayed fills,
 and unexplained cashflow differences remain blocking; this adds no tolerance.
+
+### Confirmed results from saved settlement cashflows
+
+The read-only results report can confirm a closed policy lot from the strict
+whole-market cashflow reconciliation above, even when its raw journal `pnl`
+remains null. This requires complete known fills and collected fees, exact owned
+quantities and payouts, consistent saved resolution evidence, and matching
+provider realized cashflows. Admission tolerance alone never confirms a result.
+
+`pnl_confirmations` identifies each derived result, its market and the captured
+settlement timestamp. `confirmed_cashflow_count` distinguishes these results
+from already-known journal P&L. Confirmed results are included in every policy,
+settings and experiment summary; each lot retains its own result. The CLI's
+`trades` list preserves raw nulls and warnings. The report uses saved evidence;
+it does not refresh provider records, repair the journal or prove an account
+cash debit. Conflicting fees/basis outside the strict proof remain unresolved.
+
+`confirmed_entry_cost`, `return_on_entry_cost` (a fraction, not percent) and
+`average_net_pnl` use the same confirmed completed trades. Wins and losses use
+fee-net P&L; `breakeven_count` is separate. Open trades and unfilled attempts do
+not become realized returns.
+
+### Execution rejection diagnostics
+
+Local and minute-five submission preflight failures retain bounded reason codes
+such as `executable_price_changed`, `executable_depth_changed`, `plan_expired`
+and `favorite_no_longer_eligible`. Their `execution_check` records planned price,
+quantity and expiry alongside the current top-of-book prices/depth, timestamps
+and stream generation when available. It excludes raw provider errors, order
+payloads and credentials. Old or unrecognized errors still report `unknown`.
+Minute-five continues to make one durable decision per contract: a rejected
+plan consumes the decision and does not introduce a retry.

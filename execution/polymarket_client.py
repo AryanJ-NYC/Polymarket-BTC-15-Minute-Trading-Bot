@@ -650,6 +650,32 @@ class QuoteUnavailable(ValueError):
         super().__init__(QUOTE_REASONS[self.reason])
 
 
+class ExecutionRejected(QuoteUnavailable):
+    """A local execution guard failure with bounded, credential-free quote evidence."""
+
+    def __init__(self, reason: str, plan: Plan, book: Book, latest: Book | None = None):
+        super().__init__(reason)
+        self.execution_check = {
+            "planned": {
+                "yes_price": str(plan.yes_price),
+                "quantity": str(plan.quantity),
+                "expires_at": plan.expires_at.isoformat(),
+                "quote_timestamp": book.timestamp.isoformat(),
+                "generation": book.generation,
+            },
+            "latest": None
+            if latest is None
+            else {
+                "bid": str(latest.bids[0][0]) if latest.bids else None,
+                "ask": str(latest.asks[0][0]) if latest.asks else None,
+                "bid_quantity": str(latest.bids[0][1]) if latest.bids else None,
+                "ask_quantity": str(latest.asks[0][1]) if latest.asks else None,
+                "quote_timestamp": latest.timestamp.isoformat(),
+                "generation": latest.generation,
+            },
+        }
+
+
 class OrderPreflightError(ValueError):
     """The order create endpoint was never called; reservation can be released."""
 
@@ -672,6 +698,14 @@ CENT = Decimal("0.01")
 BOOK_MAX_AGE_SECONDS = 35
 BOOK_FUTURE_TOLERANCE_SECONDS = 5
 QUOTE_REASONS = {
+    "plan_expired": "Order plan has expired",
+    "stream_generation_changed": "Order book connection/subscription generation changed",
+    "entry_deadline_elapsed": "Entry deadline elapsed",
+    "favorite_no_longer_eligible": "Minute-five favorite is no longer eligible",
+    "direction_no_longer_eligible": "Entry direction is no longer eligible",
+    "model_edge_nonpositive": "Model edge is no longer positive",
+    "executable_price_changed": "Executable price changed",
+    "executable_depth_changed": "Executable depth changed",
     "missing_bids": "Market book has no positive bids",
     "missing_offers": "Market book has no positive offers",
     "insufficient_quantity": "Position or visible depth is below the minimum trade quantity",
