@@ -25,6 +25,10 @@ restricts writes to the state directory and needs no inbound public HTTP port.
 Check service and deployment status on the host; this guide does not record a
 current release or trading state.
 
+The separate [continuous research collector](research-data.md) archives
+BTC 5m/15m books and free public reference data. Its pinned runtime and storage
+are independent of trading releases; use its dedicated installer and service.
+
 ## Start and observe
 
 Connect through the Droplet's DigitalOcean Web Console as `root`, or use the
