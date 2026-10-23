@@ -433,8 +433,11 @@ the executable side, its captured depth and increment, and an intended quantity
 captured before the deadline. It rounds the fee on the resulting fractional
 quantity, uses only official outcome labels and orders those outcomes by contract
 end. Unsized opportunities and unavailable official outcomes stay explicit;
-later preflight quotes cannot replace an earlier decision book. Minute-spaced
-historical prices, midpoint fills and spot candles cannot replay this rule.
+later preflight quotes cannot replace an earlier decision book. Evaluation uses
+the same -5-to-35-second provider-clock tolerance as trading; a timestamp ahead
+of the local clock requires evidence that the book was already received by the
+decision. Minute-spaced historical prices, midpoint fills and spot candles cannot
+replay this rule.
 
 Use the [read-only observer](docs/streaming.md#read-only-comparison-run) to verify
 actual five-minute discovery, decision inputs and independent rollovers. It blocks

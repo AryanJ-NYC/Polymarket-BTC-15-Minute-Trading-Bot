@@ -1,4 +1,7 @@
+from datetime import datetime, timedelta
 from decimal import Decimal
+
+import pytest
 
 from results_report import summarize
 
@@ -110,6 +113,55 @@ def test_assumed_fill_without_captured_budget_remains_unsized():
     assumed = report["by_policy"][POLICY]["quote_based_evaluation"]
     assert assumed["labeled_count"] == 0
     assert assumed["unsized_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "provider_age,local_age,accepted",
+    [
+        (-5, 0.1, True),
+        (-5.000001, 0.1, False),
+        (35, 0.1, True),
+        (35.000001, 0.1, False),
+        (-4, -0.000001, False),
+        (1, -0.000001, False),
+        (1, None, True),
+        (-4, 35, True),
+        (-4, 35.000001, False),
+        (-4, None, False),
+    ],
+)
+def test_assumed_fill_matches_live_quote_age_bounds_without_future_receipt(
+    provider_age, local_age, accepted
+):
+    candidate = observation("clock-skew", "eligible_entry", seconds=104)
+    decided = datetime.fromisoformat(candidate["observed_at"])
+    candidate["book"].update(
+        quote_timestamp=(decided - timedelta(seconds=provider_age)).isoformat(),
+        provider_age_seconds=provider_age,
+        local_age_seconds=local_age,
+    )
+    if local_age is not None:
+        candidate["book"]["received_at_utc"] = (decided - timedelta(seconds=local_age)).isoformat()
+    outcome = {"slug": "clock-skew", "yes_settlement_price": "1"}
+    report = summarize([], opportunities=[candidate], outcomes=[outcome])
+    assumed = report["by_policy"][POLICY]["quote_based_evaluation"]
+    assert assumed["labeled_count"] == int(accepted)
+    assert assumed["rejected_quote_count"] == int(not accepted)
+    if accepted:
+        assert assumed["outcomes"][0]["decision_at"] == "2026-10-22T12:01:44+00:00"
+        assert assumed["outcomes"][0]["net_pnl"] == "0.0150"
+
+
+def test_assumed_fill_never_uses_a_skewed_quote_observed_after_decision_deadline():
+    late = observation("late-skew", "eligible_entry", seconds=105)
+    late["book"]["quote_timestamp"] = "2026-10-22T12:01:49+00:00"
+    late["book"]["provider_age_seconds"] = -4
+    late["book"]["local_age_seconds"] = 0.1
+    outcome = {"slug": "late-skew", "yes_settlement_price": "1"}
+    report = summarize([], opportunities=[late], outcomes=[outcome])
+    assumed = report["by_policy"][POLICY]["quote_based_evaluation"]
+    assert assumed["labeled_count"] == 0
+    assert assumed["outcomes"] == []
 
 
 POLICY = "btc-5m-strong-favorite-100-v1"

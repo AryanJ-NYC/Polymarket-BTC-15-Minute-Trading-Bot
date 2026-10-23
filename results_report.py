@@ -10,7 +10,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from execution.polymarket_client import QuoteUnavailable, estimate_fee, number, parse_time
+from execution.polymarket_client import (
+    BOOK_FUTURE_TOLERANCE_SECONDS,
+    BOOK_MAX_AGE_SECONDS,
+    QuoteUnavailable,
+    estimate_fee,
+    number,
+    parse_time,
+)
 
 
 def main() -> int:
@@ -385,10 +392,21 @@ def _assumed_fills(opportunities, outcomes):
             quote_at = parse_time(book["quote_timestamp"])
             observed = parse_time(row["observed_at"])
             age = (observed - quote_at).total_seconds()
-            if not 0 < bid < ask < 1 or not 0 <= age <= 35:
+            if not 0 < bid < ask < 1 or not (
+                -BOOK_FUTURE_TOLERANCE_SECONDS <= age <= BOOK_MAX_AGE_SECONDS
+            ):
                 raise ValueError("Invalid decision book")
-            if book.get("provider_age_seconds", age) > 35 or book.get("local_age_seconds", 0) > 35:
-                raise ValueError("Stale decision book")
+            provider_age = book.get("provider_age_seconds", age)
+            if not -BOOK_FUTURE_TOLERANCE_SECONDS <= provider_age <= BOOK_MAX_AGE_SECONDS:
+                raise ValueError("Invalid provider quote age")
+            local_age = book.get("local_age_seconds")
+            if local_age is not None:
+                if not 0 <= local_age <= BOOK_MAX_AGE_SECONDS:
+                    raise ValueError("Invalid local quote age")
+            elif age < 0 or provider_age < 0:
+                # Provider clock skew is safe only with evidence that this
+                # book was already received by the selected decision.
+                raise ValueError("Future-dated quote needs local receipt evidence")
             mid = (bid + ask) / 2
             if not Decimal("0.80") < max(mid, 1 - mid) <= Decimal("0.95"):
                 raise ValueError("Outside fixed favorite band")
