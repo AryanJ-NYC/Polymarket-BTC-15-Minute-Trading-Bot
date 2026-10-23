@@ -378,6 +378,12 @@ class TradeJournal:
             raise ValueError("Position cannot be settled")
         if not 0 <= yes_value <= 1:
             raise ValueError("Invalid settlement value")
+        saved = data.get("settlement")
+        if data["state"] == "closed" and saved:
+            if number(saved["yes_value"]) != yes_value:
+                raise ValueError("Conflicting official settlement outcome")
+            if resolution is None or saved.get("resolution") == resolution:
+                return  # Preserve original evidence and once-only payout on replay.
         self.update(trade_id, **_settlement_fields(data, yes_value, resolution))
 
     def settle_market(
@@ -828,8 +834,17 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
     before = resolution.get("beforePosition") or {}
     after = resolution.get("afterPosition") or {}
     yes_value = number(settlement.get("yes_value", "-1"))
+    # A sole filled lot uses settle()'s legacy metadata, even when completed
+    # zero-fill attempts share its contract. Apply the same financial proof
+    # without rewriting that historical settlement or its warnings.
+    legacy_single_lot = len(rows) == 1 and settlement.get("scope") is None
+    allowed_issues = (
+        {RESOLUTION_COST_ISSUE, RESOLUTION_FEE_ISSUE}
+        if legacy_single_lot
+        else {MARKET_RESOLUTION_ISSUE}
+    )
     if (
-        settlement.get("scope") != "market"
+        (not legacy_single_lot and settlement.get("scope") != "market")
         or yes_value not in {0, 1}
         or before.get("cost") is None
         or before.get("realized") is None
@@ -845,8 +860,8 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
             or row["pending"]
             or row["entry_cost"] is None
             or row["proceeds"] is None
-            or set(row.get("accounting_issues", [])) - {MARKET_RESOLUTION_ISSUE}
-            or saved.get("scope") != "market"
+            or set(row.get("accounting_issues", [])) - allowed_issues
+            or saved.get("scope") != settlement.get("scope")
             or number(saved.get("yes_value", "-1")) != yes_value
             or row["outcome"] not in {"up", "down"}
             or saved.get("resolution") != resolution
