@@ -358,6 +358,114 @@ def test_small_difference_does_not_waive_other_accounting_guards(venue, journal,
         journal.exposure()
 
 
+@pytest.fixture
+def settled_market_without_provider_fee(venue, journal, clock, request):
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "down", Decimal("3"))
+    journal.reserve_entry(plan, market.end, settings={"timing_preset": "earlier"})
+    earlier = market.slug + ":earlier"
+    journal.finish_order(earlier, Decimal("2.09"), Decimal("1.3794"), Decimal("0.03"))
+    clock.current += timedelta(seconds=1)
+    journal.reserve_exit(earlier, replace(plan, action="SELL", quantity=Decimal("2.09")))
+    journal.finish_order(earlier, Decimal("2.09"), Decimal("1.7765"), Decimal("0.02"))
+    clock.current += timedelta(seconds=1)
+    journal.reserve_entry(plan, market.end, settings={"timing_preset": "current"})
+    journal.finish_order(market.slug, Decimal("1.44"), Decimal("1.3968"), Decimal("0"))
+    journal.settle_market(
+        market.slug,
+        Decimal(getattr(request, "param", "0")),
+        resolution={
+            "beforePosition": {
+                "netPositionDecimal": "-1.44",
+                "cost": {"value": "1.3968", "currency": "USD"},
+                "fees": None,
+            },
+            "afterPosition": {"netPositionDecimal": "0"},
+        },
+    )
+    return market
+
+
+@pytest.mark.parametrize(
+    "settled_market_without_provider_fee,daily_budget",
+    [("0", "0.28"), ("1", "0.0032")],
+    indirect=["settled_market_without_provider_fee"],
+)
+def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidence(
+    journal, settled_market_without_provider_fee, tmp_path, daily_budget
+):
+    market = settled_market_without_provider_fee
+    rows = journal.records()
+    assert all(row["pnl"] is None and row["accounting_issues"] for row in rows)
+    assert all(row["settlement"]["market_check"]["status"] == "unconfirmed" for row in rows)
+    yes_value = Decimal(rows[0]["settlement"]["yes_value"])
+    assert sum(Decimal(row["proceeds"]) for row in rows) == (
+        Decimal("1.7565") + Decimal("1.44") * (1 - yes_value)
+    )
+    assert journal.exposure() == 0
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+    assert journal.entry_budget(Decimal("14"), Decimal("100"))[0] == Decimal(daily_budget)
+    journal.risk_check(Decimal("2"), Decimal("100"))
+    journal.settle_market(market.slug, yes_value, resolution=rows[0]["settlement"]["resolution"])
+    assert journal.records() == rows
+    journal.close()
+    reopened = TradeJournal(tmp_path / "risk.sqlite")
+    try:
+        assert reopened.exposure() == 0
+        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+        assert reopened.entry_budget(Decimal("14"), Decimal("100"))[0] == Decimal(daily_budget)
+        assert reopened.records() == rows
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "higher_cost",
+        "lower_cost",
+        "unknown_expected_cost",
+        "unknown_collected_fees",
+        "reported_provider_fee",
+        "unknown_chronology",
+        "pending_order",
+        "open_position",
+        "unrelated_issue",
+    ],
+)
+def test_missing_market_fee_exception_keeps_unconfirmed_evidence_blocking(
+    journal, settled_market_without_provider_fee, fault
+):
+    row = journal.records()[0]
+    check = row["settlement"]["market_check"]
+    if fault in {"higher_cost", "lower_cost"}:
+        check["cost_delta"] = "0.01" if fault == "higher_cost" else "-0.01"
+        row["settlement"]["resolution"]["beforePosition"]["cost"]["value"] = str(
+            Decimal(check["expected_cost"]) + Decimal(check["cost_delta"])
+        )
+    elif fault == "unknown_expected_cost":
+        check["expected_cost"] = None
+    elif fault == "unknown_collected_fees":
+        check["expected_fees"] = None
+    elif fault == "reported_provider_fee":
+        row["settlement"]["resolution"]["beforePosition"]["fees"] = {"value": "0.01"}
+    elif fault == "unknown_chronology":
+        check["status"] = "unconfirmed_chronology"
+    elif fault == "pending_order":
+        row["pending"] = {"action": "BUY"}
+    elif fault == "open_position":
+        row.update(state="open", quantity="1")
+    else:
+        row["accounting_issues"].append("Unresolved partial exit")
+    journal.update(
+        row["trade_id"], **{key: value for key, value in row.items() if key != "trade_id"}
+    )
+    with pytest.raises(RuntimeError, match="unknown or disputed"):
+        journal.exposure()
+    with pytest.raises(RuntimeError, match="unknown or disputed|unresolved"):
+        journal.entry_budget(Decimal("100"), Decimal("100"))
+
+
 def _record_buy(journal, plan, cost):
     plan = replace(plan, quantity=Decimal("10"), notional=cost, fee_bound=Decimal("0"))
     journal.reserve_entry(plan, plan.expires_at)
