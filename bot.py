@@ -75,8 +75,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--kelly",
-        action="store_true",
-        help="Use 4%%-capped quarter Kelly with --model and hold new model bets to settlement",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use 4%%-capped quarter Kelly with --model (default); --no-kelly restores legacy sizing",
     )
     parser.add_argument(
         "--experiment-id",
@@ -227,9 +228,10 @@ class TradingBot:
         context: ContextRefresher | None = None,
         experiment_id: str | None = None,
         simultaneous: bool = False,
-        kelly: bool = False,
+        kelly: bool | None = None,
     ):
         _validate_experiment(experiment_id, model, simultaneous)
+        kelly = model is not None if kelly is None else kelly
         if kelly and model is None:
             raise ValueError("Kelly sizing requires a model")
         extra_cost = number(extra_cost)
@@ -304,6 +306,9 @@ class TradingBot:
                 kelly_multiplier=str(KELLY_MULTIPLIER),
             )
         if experiment_id is not None:
+            requested_id = experiment_id
+            if kelly:
+                experiment_id = _kelly_experiment_id(requested_id)
             self.experiment = journal.start_experiment(
                 experiment_id,
                 {
@@ -313,7 +318,14 @@ class TradingBot:
                     "model_tag": model.tag,
                     "extra_cost_usd": str(extra_cost),
                     "baseline_settings": self._baseline_settings,
-                    **({"model_settings": self._model_settings} if kelly else {}),
+                    **(
+                        {
+                            "model_settings": self._model_settings,
+                            "requested_experiment_id": requested_id,
+                        }
+                        if kelly
+                        else {}
+                    ),
                     **(
                         {
                             "baseline_windows": TIMING_WINDOWS,
@@ -327,8 +339,9 @@ class TradingBot:
                 },
             )
             logger.info(
-                "Experiment {} | model {} | whole contracts from {} | shared bankroll limits | simultaneous={}",
+                "Experiment {} (requested {}) | model {} | whole contracts from {} | shared bankroll limits | simultaneous={}",
                 experiment_id,
+                requested_id,
                 model.tag,
                 self.experiment["eligible_from"],
                 simultaneous,
@@ -1669,6 +1682,15 @@ def _validate_experiment(
 def _experiment_arm(experiment_id: str, slug: str) -> str:
     digest = hashlib.sha256((experiment_id + "\0" + slug).encode()).digest()
     return ("baseline", "model")[digest[0] % 2]
+
+
+def _kelly_experiment_id(requested_id: str) -> str:
+    """Keep legacy results separate when the unchanged service adopts Kelly."""
+    suffix = ".kelly-v3"
+    if len(requested_id) + len(suffix) <= 64:
+        return requested_id + suffix
+    digest = hashlib.sha256(requested_id.encode()).hexdigest()[:16]
+    return requested_id[:38] + "." + digest + suffix
 
 
 MINUTE_FIVE_SETTINGS = {

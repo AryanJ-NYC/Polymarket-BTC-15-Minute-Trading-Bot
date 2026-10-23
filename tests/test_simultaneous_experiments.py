@@ -24,6 +24,7 @@ def test_slow_first_preview_keeps_second_policys_expired_window_visible(
         stream_feed.books,
         live=True,
         model=saved_model(tmp_path, 0.8),
+        kelly=False,
         context=bullish_context(),
         experiment_id=identity,
         simultaneous=True,
@@ -61,6 +62,7 @@ def test_same_tick_opposing_policies_never_net_each_others_holdings(
         stream_feed.books,
         live=True,
         model=saved_model(tmp_path, 0.2),
+        kelly=False,
         context=bullish_context(),
         experiment_id=identity,
         simultaneous=True,
@@ -96,6 +98,7 @@ def test_pending_first_entry_blocks_second_policy_and_records_both(
         stream_feed.books,
         live=True,
         model=saved_model(tmp_path, 0.8),
+        kelly=False,
         context=bullish_context(),
         experiment_id="pending-both",
         simultaneous=True,
@@ -131,6 +134,7 @@ def test_second_policy_respects_one_trade_and_shared_exposure(
         live=True,
         one_trade=one_trade,
         model=saved_model(tmp_path, 0.8),
+        kelly=False,
         context=bullish_context(),
         experiment_id="shared-budget",
         simultaneous=True,
@@ -179,6 +183,7 @@ def test_shared_outage_preserves_both_active_policy_observations(
         stream_feed.books,
         live=True,
         model=saved_model(tmp_path, 0.8),
+        kelly=False,
         context=bullish_context(),
         experiment_id="outage-both",
         simultaneous=True,
@@ -219,6 +224,7 @@ def test_four_experiments_share_one_account_and_survive_restart(
             stream_feed.books,
             live=True,
             model=model,
+            kelly=False,
             context=bullish_context(),
             experiment_id=identity,
             simultaneous=True,
@@ -309,6 +315,7 @@ def test_model_skip_is_recorded_without_consuming_a_slot_or_substituting_policy(
         stream_feed.books,
         live=True,
         model=saved_model(tmp_path, probability),
+        kelly=False,
         context=bullish_context(),
         experiment_id="model-skip",
         simultaneous=True,
@@ -334,13 +341,16 @@ def test_simultaneous_mode_cannot_reuse_an_assigned_comparison_id(
 ):
     model = saved_model(tmp_path, 0.8)
     clock.current = future_market.start
-    bot.TradingBot(venue.client, journal, stream_feed.books, model=model, experiment_id="pinned")
+    bot.TradingBot(
+        venue.client, journal, stream_feed.books, model=model, kelly=False, experiment_id="pinned"
+    )
     with pytest.raises(ValueError, match="different configuration"):
         bot.TradingBot(
             venue.client,
             journal,
             stream_feed.books,
             model=model,
+            kelly=False,
             experiment_id="pinned",
             simultaneous=True,
         )

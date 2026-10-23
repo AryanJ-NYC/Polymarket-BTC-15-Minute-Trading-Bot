@@ -523,6 +523,7 @@ def test_enrolled_model_comparison_keeps_its_pinned_single_baseline_window(
         journal,
         stream_feed.books,
         model=saved_model(tmp_path, 0.1),
+        kelly=False,
         experiment_id="test-baseline",
         context=bullish_context(),
     )

@@ -39,7 +39,7 @@ def test_kelly_live_order_uses_edge_and_four_percent_ceiling(
     monkeypatch.setattr(ProbabilityModel, "predict", lambda self, **kwargs: Decimal(q))
     journal = TradeJournal(tmp_path / "kelly.sqlite")
     try:
-        trader = TradingBot(venue.client, journal, books, live=True, model=model, kelly=True)
+        trader = TradingBot(venue.client, journal, books, live=True, model=model)
         warm_up(trader, venue, clock, stream_feed)
         trader.tick()
         requests = [
@@ -74,7 +74,7 @@ def test_kelly_holds_through_price_stop_and_preserves_exit_policy_on_restart(
         assert quantity > 0
         venue.bid, venue.ask = "0.01", "0.03"
         publish_book(stream_feed, venue, clock)
-        trader = TradingBot(venue.client, journal, books, model=model)  # Restart without Kelly.
+        trader = TradingBot(venue.client, journal, books, model=model, kelly=False)
         trader.tick()
         assert journal.records()[0]["quantity"] == row["quantity"]
         assert len(journal.records()[0]["orders"]) == 1
@@ -123,28 +123,66 @@ def test_kelly_requires_model_before_account_access(monkeypatch):
 
 
 @pytest.mark.parametrize("simultaneous", [False, True])
-@pytest.mark.parametrize("kelly", [False, True])
-def test_experiment_cannot_toggle_kelly_with_same_id(
-    venue, journal, books, tmp_path, simultaneous, kelly
+@pytest.mark.parametrize("identifier", ["btc-five-20261022-a0201afd", "x" * 64])
+def test_default_kelly_creates_separate_stable_cohort_without_changing_legacy(
+    venue, journal, books, tmp_path, simultaneous, identifier, clock
 ):
     model = saved_model(tmp_path)
-    TradingBot(
+    legacy = TradingBot(
         venue.client,
         journal,
         books,
         model=model,
-        kelly=kelly,
-        experiment_id="sizing-comparison",
+        kelly=False,
+        experiment_id=identifier,
         simultaneous=simultaneous,
+    ).experiment
+    current = TradingBot(
+        venue.client,
+        journal,
+        books,
+        model=model,
+        experiment_id=identifier,
+        simultaneous=simultaneous,
+    ).experiment
+    assert current["id"].endswith(".kelly-v3")
+    assert len(current["id"]) <= 64
+    assert current["id"] != legacy["id"]
+    assert current["configuration"]["requested_experiment_id"] == identifier
+    assert current["configuration"]["model_settings"]["entry_bankroll_fraction"] == "0.04"
+    clock.current += timedelta(hours=1)
+    assert (
+        TradingBot(
+            venue.client,
+            journal,
+            books,
+            model=model,
+            experiment_id=identifier,
+            simultaneous=simultaneous,
+        ).experiment
+        == current
     )
+    assert (
+        TradingBot(
+            venue.client,
+            journal,
+            books,
+            model=model,
+            kelly=False,
+            experiment_id=identifier,
+            simultaneous=simultaneous,
+        ).experiment
+        == legacy
+    )
+    # A cohort rollover is not permission to reinterpret any existing definition.
     with pytest.raises(ValueError, match="different configuration"):
         TradingBot(
             venue.client,
             journal,
             books,
             model=model,
-            kelly=not kelly,
-            experiment_id="sizing-comparison",
+            extra_cost=Decimal("0.01"),
+            experiment_id=identifier,
             simultaneous=simultaneous,
         )
 
@@ -173,3 +211,66 @@ def test_kelly_rechecks_funds_and_reserves_fees_within_buying_power(
         <= 1
     )
     assert Decimal(row["entry_cost"]) <= 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_deployed_cli_selects_default_sizing_and_runs_until_operator_stops(
+    venue, tmp_path, books, monkeypatch, legacy
+):
+    import signal
+
+    saved_model(tmp_path, 0.8)
+    monkeypatch.setattr(bot.PolymarketClient, "connect", lambda _: venue.client)
+    monkeypatch.setattr(venue.client, "market_stream", lambda: books)
+    monkeypatch.setattr(bot, "ROOT", tmp_path)
+    monkeypatch.setattr(bot.ContextRefresher, "start", lambda _: None)
+    monkeypatch.setattr(bot.ContextRefresher, "close", lambda _: None)
+    elapsed = [0.0]
+    monkeypatch.setattr(bot, "monotonic", lambda: elapsed[0])
+
+    # Exercise the real main loop/constructor; advance time without sleeping.
+    class StopEvent:
+        stopped = False
+
+        def set(self):
+            self.stopped = True
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, delay):
+            elapsed[0] += 86400
+
+    monkeypatch.setattr(bot, "Event", StopEvent)
+    policies = []
+
+    def tick(trader):
+        assert trader.live and not trader.one_trade
+        policies.append(trader.experiment)
+        if len(policies) == 2:
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+    monkeypatch.setattr(TradingBot, "tick", tick)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "bot.py",
+            "--live",
+            "--env-file",
+            "/etc/polymarket-us/.env.us",
+            "--model",
+            str(tmp_path / "model.json"),
+            "--experiment-id",
+            "btc-five-20261022-a0201afd",
+            "--simultaneous",
+            *(["--no-kelly"] if legacy else []),
+        ],
+    )
+    assert bot.main() == 0
+    assert len(policies) == 2 and elapsed[0] == 86400
+    configuration = policies[0]["configuration"]
+    assert configuration["model_settings"]["sizing_policy"] == (
+        "bankroll-percentage-v1" if legacy else "quarter-kelly-v3"
+    )
+    assert policies[0]["id"] == "btc-five-20261022-a0201afd" + ("" if legacy else ".kelly-v3")
+    assert all(method == "GET" for method, _, _ in venue.calls)

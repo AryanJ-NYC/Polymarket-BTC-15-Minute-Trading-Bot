@@ -29,6 +29,7 @@ def test_experiment_baseline_arm_uses_baseline_through_live_preflight(
         books,
         live=True,
         model=saved_model(tmp_path, 0.1),
+        kelly=False,
         experiment_id="test-baseline",
     )
     clock.current = late
@@ -289,7 +290,13 @@ def test_unavailable_account_after_position_management_keeps_current_contract_at
         enrolled_trader(venue, journal, clock, books, model, experiment_id)
         if enrolled
         else TradingBot(
-            venue.client, journal, books, live=True, model=model, experiment_id=experiment_id
+            venue.client,
+            journal,
+            books,
+            live=True,
+            model=model,
+            kelly=False,
+            experiment_id=experiment_id,
         )
     )
     # The ended holding cannot settle yet, so the urgent management path must
@@ -321,6 +328,7 @@ def test_new_experiment_waits_for_a_whole_contract_but_still_exits_legacy_holdin
         journal,
         books,
         model=saved_model(tmp_path, 0.8),
+        kelly=False,
         experiment_id="test-model",
     )
     trader.tick()
@@ -340,7 +348,13 @@ def test_restarting_experiment_preserves_its_configuration_and_arm(
     before = journal.opportunities()[-1]["settings"]["experiment"]
     clock.current += timedelta(seconds=3)
     resumed = TradingBot(
-        venue.client, journal, books, live=True, model=model, experiment_id="test-model"
+        venue.client,
+        journal,
+        books,
+        live=True,
+        model=model,
+        kelly=False,
+        experiment_id="test-model",
     )
     resumed.tick()
     assert journal.opportunities()[-1]["settings"]["experiment"] == before
@@ -350,6 +364,7 @@ def test_restarting_experiment_preserves_its_configuration_and_arm(
             journal,
             books,
             model=saved_model(tmp_path, 0.2),
+            kelly=False,
             experiment_id="test-model",
         )
     assert journal.records() == []
@@ -425,6 +440,7 @@ def enrolled_trader(venue, journal, clock, books, model, experiment_id, **kwargs
             books,
             live=True,
             model=model,
+            kelly=False,
             experiment_id=experiment_id,
             **kwargs,
         )
