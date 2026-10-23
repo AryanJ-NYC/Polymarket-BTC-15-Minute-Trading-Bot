@@ -114,15 +114,23 @@ credential file explicitly; the observer neither displays nor rewrites it:
   --output logs/stream-observation-YYYYMMDD-HHMMSS
 ```
 
-A 31-minute run covers at least two 15-minute contract rollovers when discovery
+A bounded 7-minute run normally covers a five-minute rollover and the next 100-second
+decision window; use the recorded evidence to confirm both. A 31-minute run covers
+at least two 15-minute contract rollovers when discovery
 and provider data remain available. Confirm the actual duration and rollover count
 in the generated summary; requested duration alone is insufficient evidence.
 
 The observer creates an independent authenticated market-data socket. Discovery
 and cache-busting authenticated REST book reads run on a separate worker, normally
 every three seconds, while the main observation loop samples the latest streamed
-book every three seconds. Slow REST calls can reduce baseline sample count but do
-not block socket receipt. Halfway through the run, the observer closes only its
+book every three seconds. The worker independently discovers 300-second and
+900-second BTC contracts and streams both horizons; a missing five-minute contract
+does not remove the fifteen-minute subscription. An empty periodic refresh keeps
+the known contract until its measurement window ends, with expiry checked again
+after a slow request. Retaining its identity does not extend quote freshness.
+Five-minute rollover does not reset the fifteen-minute strategy history.
+Slow REST calls can reduce baseline sample count but do not block socket receipt.
+Halfway through the run, the observer closes only its
 own underlying SDK transport on the receiver's event loop. The same production
 `MarketStream` instance detects the SDK close event, invalidates books, applies
 its normal backoff, reconnects, and resubscribes. Recovery requires an eligible
@@ -139,8 +147,18 @@ model's inference or EV selection, account-based sizing, or order submission. It
 optional context comes from the independent [background refresher](context-refresh.md).
 Each decision retains one snapshot with source values, ages and availability;
 the summary reports context request counts separately from exchange HTTP totals.
-The REST baseline lane only samples
-quotes. The observer invokes no account, order, or journal operations. Shutdown
+Five-minute evidence is bounded to contract discovery and one decision per
+contract at 100–105 seconds (or an explicit missed-window result). Its
+`btc-5m-strong-favorite-100-v1` snapshot includes contract terms, actual decision
+and provider timestamps, local receipt age, bid/ask prices and quantities,
+favorite proxy, executable price and settings. A missing or invalid first book
+consumes that observation decision. The policy inherits the 35-second freshness
+limit; no five-minute optimization is implied. Its books do not reach the
+fifteen-minute strategy or any fitted model. The observer also requests official
+settlement labels for captured five-minute contracts after their measurement end,
+with at most one rotating pending outcome per 30-second pass after discovery. A
+missing or timed-out outcome cannot hold discovery behind a batch of old requests;
+merely closed contracts remain pending. The REST baseline lane samples quotes. The observer invokes no account, order, or journal operations. Shutdown
 first prevents any further HTTP requests, including additional discovery pages,
 then waits for the in-flight baseline read and its sample write to finish before
 closing the SDK or generating final artifacts. Each network call retains the
@@ -148,20 +166,25 @@ SDK's ten-second timeout. Before any API read it installs an HTTP transport
 that rejects every method except GET. SDK authentication, market-data
 subscriptions, and the induced transport close are the only socket operations
 the harness requests. The request trace contains only method, safe path,
-status, timing, and the baseline/discovery category; it excludes query parameters,
-headers, request bodies, and provider exception bodies.
+status, timing, and separate discovery, comparison-book, and settlement categories;
+it excludes query parameters, headers, request bodies, and provider exception bodies.
 
 Each new ignored output directory contains:
 
 - `stream.jsonl` and `rest.jsonl`: timestamped samples, quote availability, provider
   age, local receipt-to-observation/decision latency where available, top prices,
   read-only decisions, feature counts, and stream health.
+- `five-minute.jsonl`: one discovery record and at most one decision snapshot per
+  five-minute contract; these are observations, without account sizing or execution.
+- `outcomes.jsonl`: available official five-minute settlement labels; missing
+  outcomes remain pending and are never inferred from closed flags or spot prices.
 - `requests.jsonl`: sanitized HTTP method/path/status/timing traces. Deliberate
-  comparison book reads are counted separately from discovery.
+  comparison book reads and official settlement attempts, including unavailable
+  outcomes and transport failures, are counted separately from discovery.
 - `source-manifest.json` and `source/`: exact observed Python sources, SHA-256
   fingerprints, dependency pins, Git HEAD, and capture time. A dirty checkout's
   source snapshot is authoritative for that run.
-- `summary.json` and `report.md`: duration, contracts and rollover count,
+- `summary.json` and `report.md`: duration, contracts and independent rollover counts by horizon,
   availability, request counts, recovery measurements, and nearest-rank
   p50/p95/p99 with sample counts.
 

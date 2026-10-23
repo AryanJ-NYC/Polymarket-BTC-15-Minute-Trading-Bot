@@ -73,7 +73,7 @@ Temporary read failures retain known order IDs and recover automatically.
 
 ## Strategy and limits
 
-- Discovers BTC, 15-minute, Up/Down contracts by their typed US asset terms,
+- Discovers BTC five- and fifteen-minute Up/Down contracts by their typed US asset terms,
   paginating the public API. Uses `windowStart` / `windowEnd`, not slug guesses or
   the later expiration timestamp.
 - Preserves the previous late-window entry policy: sample the latest distinct
@@ -382,6 +382,72 @@ only one trade across all experiments before waiting for its completion. Duratio
 expiry can leave holdings or results unresolved; preserve and inspect them using
 the existing recovery procedure. Running the experiment does not automatically
 select a permanent winning window or change stakes.
+
+### Five-minute BTC contracts
+
+The same serial runner also follows provider-typed BTC five-minute Up/Down
+contracts. Discovery validates the exact 300-second measurement window; fifteen-minute
+contracts retain their exact 900-second window and existing policies. Each horizon
+rolls independently, and a missing five-minute contract does not pause the
+fifteen-minute horizon. Owned contracts retain their subscriptions until their
+measurement end. Both use the same account and SQLite journal.
+
+Ordinary baseline operation and the simultaneous baseline/model comparison include
+`btc-5m-strong-favorite-100-v1`. The existing model-only and assigned-comparison
+modes retain their selection. Five-minute books never feed the fifteen-minute
+fusion history or fitted model. The fixed five-minute policy makes one durable
+decision on the first normal tick at elapsed **100 seconds through strictly before
+105 seconds**, buys the favorite only when its YES midpoint (or complement) is
+strictly above .80 and at most .95, and holds its owned lot to official settlement.
+Up buys at the YES ask; Down buys at one minus the YES bid. Visible side quantity,
+quantity increments, limit IOC execution and the fee-inclusive 2% bankroll ceiling
+still apply. Skips, invalid quotes, risk blocks and zero fills consume the decision;
+missing the interval records `missed_window`. A newly subscribed contract waits
+for its first snapshot within that interval before consuming its decision; if no
+snapshot arrives before 105 seconds, it records `missed_window`. Once a snapshot
+has arrived, an invalid or unavailable quote still consumes the decision. Crashes
+and restarts cannot resample a consumed decision. A reservation with an ambiguous
+create remains pending for recovery.
+
+The policy inherits the existing **35-second** provider/local freshness limit.
+That setting has not been optimized for five-minute trading. Evidence retains the
+actual provider and receipt ages instead of treating this setting as a claim about
+quote quality. There is no fusion, warmup, model fitting or timing/threshold sweep.
+
+Five-minute admission precedes fifteen-minute admission within a tick, recorded as
+`five-minute-first-v1`; existing ordering within the fifteen-minute comparison is
+preserved. Every admission rechecks the shared 10% funded exposure, 10% UTC daily
+gross-loss capacity and five-open-trade limit, including pending and legacy lots.
+Opposite-side conflicts concern the same provider contract, not all BTC horizons.
+Existing exits cannot sell the five-minute policy's settlement-only shares. The
+usual `--duration`, `--one-trade`, paper and live controls remain in force; adding
+this policy does not create a separate budget.
+
+`results_report.py` reports the five-minute rule as its own `by_policy` cohort,
+including observed contracts, one-shot decisions, eligible opportunities, attempts,
+fills, no-entry/missed-window counts, capacity/conflict skips, fees and reconciled
+P&L, win/loss averages, drawdown, pending/disputed results, quote ages and UTC daily
+concentration. `by_execution_mode` identifies live execution, simulated paper
+fills, and legacy records with unknown mode. Broad totals must be interpreted with
+those labels and the selected journal.
+
+The separate `quote_based_evaluation` is explicitly **assumed fills**, never actual
+execution. It uses the original eligibility quote available before 105 seconds,
+the executable side, its captured depth and increment, and an intended quantity
+captured before the deadline. It rounds the fee on the resulting fractional
+quantity, uses only official outcome labels and orders those outcomes by contract
+end. Unsized opportunities and unavailable official outcomes stay explicit;
+later preflight quotes cannot replace an earlier decision book. Evaluation uses
+the same -5-to-35-second provider-clock tolerance as trading; a timestamp ahead
+of the local clock requires evidence that the book was already received by the
+decision. Minute-spaced historical prices, midpoint fills and spot candles cannot
+replay this rule.
+
+Use the [read-only observer](docs/streaming.md#read-only-comparison-run) to verify
+actual five-minute discovery, decision inputs and independent rollovers. It blocks
+all non-GET HTTP operations before sending and makes no account, preview, create or
+cancel calls. Such QA establishes implementation and captured inputs, not
+profitability or completed live execution.
 
 ### Continuous minute-five strong favorites
 

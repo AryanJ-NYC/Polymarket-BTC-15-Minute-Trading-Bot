@@ -19,17 +19,20 @@ import threading
 import time
 from collections import Counter
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
 
+from bot import FIVE_MINUTE_SETTINGS
 from core.strategy_brain.context import ContextRefresher
 from core.strategy_brain.strategies.btc_15min_strategy import (
     BASELINE_POLICY_VERSION,
     BTCStrategy15Min,
 )
 from execution.market_stream import MarketStream
-from execution.polymarket_client import PolymarketClient, quote_reason
+from execution.polymarket_client import PolymarketClient, validate_book
+from execution.polymarket_client import quote_reason as safe_quote_reason
 
 
 def main() -> int:
@@ -67,8 +70,9 @@ def main() -> int:
     recovery_injection = {"status": "not_requested"}
     recovery_future = None
     recovering_since = None
-    subscribed_at = None
-    current_slug = None
+    current_slugs = {}
+    subscribed_at = {}
+    five_minute = FiveMinuteObservations()
     try:
         exchange = PolymarketClient.connect(args.env_file)
         # SDK 2.4.1 owns one synchronous HTTP client. Replace it before any API
@@ -90,12 +94,28 @@ def main() -> int:
                 shutdown.wait(min(next_sample - now, 0.25))
                 continue
             next_sample = now + SAMPLE_INTERVAL
-            market = baseline.current_market()
-            if market is not None and market.slug != current_slug:
-                current_slug = market.slug
-                subscribed_at = time.monotonic()
-                stream.set_markets([market])
-                subscriptions.append({"utc": _utc(), "slug": current_slug})
+            markets = baseline.current_markets()
+            changed = {horizon: market.slug for horizon, market in markets.items()} != current_slugs
+            for horizon, market in markets.items():
+                if market.slug != current_slugs.get(horizon):
+                    subscribed_at[horizon] = time.monotonic()
+                    subscriptions.append(
+                        {
+                            "utc": _utc(),
+                            "slug": market.slug,
+                            "horizon_seconds": horizon,
+                            "window_start": market.start.isoformat(),
+                            "window_end": market.end.isoformat(),
+                        }
+                    )
+                    if horizon == 300:
+                        _append(
+                            output / "five-minute.jsonl",
+                            {**_contract_sample(market), "decision": "contract_observed"},
+                        )
+            if changed:
+                stream.set_markets(list(markets.values()))
+                current_slugs = {horizon: market.slug for horizon, market in markets.items()}
             if (
                 not reconnect_done
                 and now - started >= args.duration / 2
@@ -119,18 +139,25 @@ def main() -> int:
                 if recovery_injection["status"] != "closed":
                     recovering_since = None
                 recovery_future = None
-            row = {"utc": _utc(), "elapsed_s": time.monotonic() - started, "source": "stream"}
-            row["health"] = stream.health()
-            if market is None:
-                row.update({"available": False, "reason": "no_current_market"})
-            else:
+            for horizon, market in markets.items():
+                row = {"utc": _utc(), "elapsed_s": time.monotonic() - started, "source": "stream"}
+                row["health"] = stream.health()
+                row.update(_contract_sample(market))
+                book = None
+                decision_at = datetime.now(timezone.utc)
+                elapsed = (decision_at - market.start).total_seconds()
+                if horizon == 300 and not 100 <= elapsed < 105:
+                    decision = five_minute.decide(market, None, decision_at)
+                    if decision is not None:
+                        _append(output / "five-minute.jsonl", decision)
+                    continue
                 row["slug"] = market.slug
                 try:
                     book = stream.book(market)
                     eligible_at = time.monotonic()
                     row.update(_book_sample(book))
                     row["available"] = True
-                    if row["entry_available"]:
+                    if row["entry_available"] and horizon == 900:
                         decision_started = time.monotonic()
                         row["context"] = context.snapshot()
                         strategy.observe(book)
@@ -163,19 +190,32 @@ def main() -> int:
                             }
                         )
                         recovering_since = None
-                    if subscribed_at is not None:
-                        row["subscription_to_sample_ms"] = (time.monotonic() - subscribed_at) * 1000
-                        subscribed_at = None
+                    if horizon in subscribed_at:
+                        row["subscription_to_sample_ms"] = (
+                            time.monotonic() - subscribed_at[horizon]
+                        ) * 1000
+                        subscribed_at.pop(horizon)
                 except ValueError as exc:
                     row.update(
                         {
                             "available": False,
                             "reason": type(exc).__name__,
-                            "quote_reason": quote_reason(exc),
+                            "quote_reason": safe_quote_reason(exc),
                         }
                     )
-            stream_rows.append(row)
-            _append(output / "stream.jsonl", row)
+                if horizon == 300:
+                    decision = five_minute.decide(
+                        market,
+                        book if row.get("available") else None,
+                        datetime.now(timezone.utc),
+                        quote_reason=row.get("quote_reason"),
+                    )
+                    if decision is not None:
+                        decision["tick_at"] = decision_at.isoformat()
+                        _append(output / "five-minute.jsonl", decision)
+                else:
+                    stream_rows.append(row)
+                    _append(output / "stream.jsonl", row)
     except Exception as exc:
         # Provider errors may contain response bodies or signed headers.
         fatal = type(exc).__name__
@@ -211,7 +251,28 @@ def main() -> int:
         "fatal_error_class": fatal,
         "baseline_worker_stopped": baseline is None or not baseline.is_alive(),
         "subscriptions": subscriptions,
-        "contract_rollovers": max(0, len(subscriptions) - 1),
+        "contract_rollovers": sum(
+            max(0, sum(row["horizon_seconds"] == horizon for row in subscriptions) - 1)
+            for horizon in (300, 900)
+        ),
+        "by_horizon": {
+            str(horizon): {
+                "contract_count": sum(row["horizon_seconds"] == horizon for row in subscriptions),
+                "rollovers": max(
+                    0, sum(row["horizon_seconds"] == horizon for row in subscriptions) - 1
+                ),
+            }
+            for horizon in (300, 900)
+        },
+        "five_minute": {
+            "policy_version": "btc-5m-strong-favorite-100-v1",
+            "decisions": dict(
+                Counter(row["decision"] for row in _read_rows(output / "five-minute.jsonl"))
+            ),
+            "official_outcomes": _read_rows(output / "outcomes.jsonl"),
+            "quote_max_age_seconds": 35,
+            "freshness_basis": "Inherited setting; not optimized for five-minute contracts",
+        },
         "stream": _sample_summary(stream_rows),
         "rest_baseline": _sample_summary(rest_rows),
         "context": _context_summary(stream_rows, context.snapshot() if context else {}),
@@ -303,11 +364,16 @@ class ReadOnlyTransport(httpx.BaseTransport):
         started = time.monotonic()
         method = request.method.upper()
         path = request.url.path
+        kind = "discovery"
+        if path.endswith("/book"):
+            kind = "comparison_book_baseline"
+        elif path.endswith("/settlement"):
+            kind = "settlement"
         row = {
             "utc": _utc(),
             "method": method,
             "path": _safe_path(path),
-            "kind": "comparison_book_baseline" if path.endswith("/book") else "discovery",
+            "kind": kind,
         }
         if method != "GET":
             row.update({"status": "blocked", "latency_ms": 0})
@@ -354,52 +420,182 @@ class RestBaseline(threading.Thread):
         self.path = path
         self.shutdown = shutdown
         self.lock = threading.Lock()
-        self.market = None
+        self.markets = {}
+        self.observed = {}
+        self.resolved = set()
 
-    def current_market(self):
+    def current_markets(self):
         with self.lock:
-            market = self.market
-        if market is not None and datetime.now(timezone.utc) >= market.end:
-            return None
-        return market
+            markets = dict(self.markets)
+        return {
+            horizon: market
+            for horizon, market in markets.items()
+            if market is not None and datetime.now(timezone.utc) < market.end
+        }
 
     def run(self) -> None:
-        next_discovery = 0.0
+        next_discovery = {300: 0.0, 900: 0.0}
+        next_outcomes = 0.0
+        outcome_cursor = None
         while not self.shutdown.is_set():
             started = time.monotonic()
-            row = {"utc": _utc(), "source": "rest_baseline"}
-            try:
-                market = self.current_market()
-                if market is None or started >= next_discovery:
-                    discovered = self.exchange.discover_market()
-                    if self.shutdown.is_set():
-                        break
-                    with self.lock:
-                        self.market = discovered
-                    market = discovered
-                    next_discovery = started + (30 if market is not None else SAMPLE_INTERVAL)
-                if market is None:
-                    row.update({"available": False, "reason": "no_current_market"})
-                else:
-                    row["slug"] = market.slug
-                    request_started = time.monotonic()
-                    book = self.exchange.book(market)
-                    row.update(_book_sample(book))
-                    row["request_to_observation_ms"] = (time.monotonic() - request_started) * 1000
-                    row["available"] = True
-            except ObservationStopped:
-                break
-            except Exception as exc:
-                row.update(
-                    {
-                        "available": False,
-                        "reason": type(exc).__name__,
-                        "quote_reason": quote_reason(exc),
-                        "http_status": getattr(exc, "status_code", None),
-                    }
+            for horizon in (900, 300):
+                row = {"utc": _utc(), "source": "rest_baseline", "horizon_seconds": horizon}
+                try:
+                    market = self.current_markets().get(horizon)
+                    if market is None or started >= next_discovery[horizon]:
+                        discovered = self.exchange.discover_market(horizon)
+                        if self.shutdown.is_set():
+                            return
+                        if discovered is None:
+                            # An empty refresh does not retire a live identity.
+                            # Recheck expiry after the potentially slow request.
+                            discovered = self.current_markets().get(horizon)
+                        with self.lock:
+                            self.markets[horizon] = discovered
+                            if discovered is not None and horizon == 300:
+                                self.observed[discovered.slug] = discovered
+                        market = discovered
+                        next_discovery[horizon] = started + (
+                            30 if market is not None else SAMPLE_INTERVAL
+                        )
+                    if market is None:
+                        row.update({"available": False, "reason": "no_current_market"})
+                    else:
+                        row.update(_contract_sample(market))
+                        request_started = time.monotonic()
+                        book = self.exchange.book(market)
+                        row.update(_book_sample(book))
+                        row["request_to_observation_ms"] = (
+                            time.monotonic() - request_started
+                        ) * 1000
+                        row["available"] = True
+                except ObservationStopped:
+                    return
+                except Exception as exc:
+                    row.update(
+                        {
+                            "available": False,
+                            "reason": type(exc).__name__,
+                            "quote_reason": safe_quote_reason(exc),
+                            "http_status": getattr(exc, "status_code", None),
+                        }
+                    )
+                _append(self.path, row)
+                if self.shutdown.is_set():
+                    return
+            if started >= next_outcomes:
+                next_outcomes = started + 30
+                pending = sorted(
+                    (
+                        market
+                        for slug, market in self.observed.items()
+                        if slug not in self.resolved and datetime.now(timezone.utc) >= market.end
+                    ),
+                    key=lambda market: (market.end, market.slug),
                 )
-            _append(self.path, row)
+                if pending:
+                    # One slow historical read must not become a batch that
+                    # starves discovery. Advance even when its outcome is absent.
+                    market = next(
+                        (
+                            market
+                            for market in pending
+                            if outcome_cursor is None or (market.end, market.slug) > outcome_cursor
+                        ),
+                        pending[0],
+                    )
+                    outcome_cursor = (market.end, market.slug)
+                    try:
+                        value = self.exchange.settlement(market.slug)
+                        if value is not None:
+                            _append(
+                                self.path.parent / "outcomes.jsonl",
+                                {
+                                    **_contract_sample(market),
+                                    "yes_settlement_price": str(value),
+                                    "recorded_at": _utc(),
+                                    "source": "official_settlement",
+                                },
+                            )
+                            self.resolved.add(market.slug)
+                    except ObservationStopped:
+                        return
+                    except Exception:
+                        # Missing or unavailable official labels stay pending.
+                        pass
+                    if self.shutdown.is_set():
+                        return
             self.shutdown.wait(max(0, SAMPLE_INTERVAL - (time.monotonic() - started)))
+
+
+class FiveMinuteObservations:
+    """One decision snapshot per observed contract; never an order or account operation."""
+
+    def __init__(self):
+        self.decided = set()
+
+    def decide(self, market, book, now, *, quote_reason=None):
+        elapsed = (now - market.start).total_seconds()
+        if market.slug in self.decided or elapsed < 100:
+            return None
+        self.decided.add(market.slug)
+        row = {
+            **_contract_sample(market),
+            "observed_at": now.isoformat(),
+            "elapsed_seconds": elapsed,
+            "decision": "missed_window" if elapsed >= 105 else "book_unavailable",
+            "settings": dict(FIVE_MINUTE_SETTINGS),
+            "book": None,
+            "outcome": None,
+            "quote_reason": quote_reason,
+        }
+        if elapsed >= 105 or book is None:
+            return row
+        try:
+            validate_book(market, book)
+            if book.entry_reason:
+                raise ValueError(book.entry_reason)
+            row["book"] = {
+                "quote_timestamp": book.timestamp.isoformat(),
+                "received_at": book.received_at,
+                "provider_age_seconds": (now - book.timestamp).total_seconds(),
+                "local_age_seconds": None
+                if book.received_at is None
+                else time.monotonic() - book.received_at,
+                "bid": str(book.bids[0][0]),
+                "ask": str(book.asks[0][0]),
+                "bid_quantity": str(book.bids[0][1]),
+                "ask_quantity": str(book.asks[0][1]),
+                "fee_coefficient": str(market.fee_coefficient),
+            }
+            favorite = max(book.mid, 1 - book.mid)
+            row["decision"] = (
+                "eligible_entry"
+                if Decimal("0.80") < favorite <= Decimal("0.95")
+                else "outside_favorite_band"
+            )
+            if row["decision"] == "eligible_entry":
+                up = book.mid > Decimal("0.5")
+                row["outcome"] = "up" if up else "down"
+                row["executable_price"] = str(book.asks[0][0] if up else 1 - book.bids[0][0])
+                row["visible_quantity"] = str(book.asks[0][1] if up else book.bids[0][1])
+                row["favorite_probability_proxy"] = str(favorite)
+        except ValueError as exc:
+            row["quote_reason"] = safe_quote_reason(exc)
+        return row
+
+
+def _contract_sample(market):
+    return {
+        "slug": market.slug,
+        "window_start": market.start.isoformat(),
+        "window_end": market.end.isoformat(),
+        "horizon_seconds": market.horizon_seconds,
+        "quantity_increment": str(market.increment),
+        "price_tick": str(market.tick),
+        "fee_coefficient": str(market.fee_coefficient),
+    }
 
 
 def _book_sample(book) -> dict:
@@ -412,6 +608,8 @@ def _book_sample(book) -> dict:
         "generation": getattr(book, "generation", None),
         "bid": str(book.bids[0][0]) if book.bids else None,
         "ask": str(book.asks[0][0]) if book.asks else None,
+        "bid_quantity": str(book.bids[0][1]) if book.bids else None,
+        "ask_quantity": str(book.asks[0][1]) if book.asks else None,
         "entry_available": book.entry_reason is None,
         "up_exit_available": bool(book.bids),
         "down_exit_available": bool(book.asks),
@@ -517,6 +715,9 @@ def _report(summary: dict) -> str:
         f"Fatal error class: {summary['fatal_error_class'] or 'none'}.",
         f"Decision policy: {summary['strategy']['policy_version']}; model=None (default fusion).",
         "Probability-model inference/EV selection, account sizing, and order submission are outside this observation.",
+        f"Horizons: {json.dumps(summary['by_horizon'], sort_keys=True)}.",
+        f"Five-minute policy: {json.dumps(summary['five_minute'], sort_keys=True)}.",
+        "Five-minute evidence records one decision at 100–105 seconds, with executable prices and visible quantities. The inherited 35-second freshness limit has not been optimized for five-minute trading.",
         "",
         "Book availability includes valid one-sided exit quotes; midpoint decisions require entry availability.",
         f"Stream entry samples: {summary['stream']['entry_available_samples']}; quote reasons: {json.dumps(summary['stream']['quote_rejection_reasons'], sort_keys=True)}.",
@@ -570,7 +771,7 @@ def _report(summary: dict) -> str:
         "",
         f"Recovery: {json.dumps(summary['recovery_ms'], sort_keys=True)}",
         "",
-        "REST book requests are deliberate comparison overhead, counted separately from discovery.",
+        "REST book comparison and official settlement requests are counted separately from discovery.",
         "These are contemporaneous observations, not a historical before-deployment baseline.",
         "Strategy decisions run read-only on stream samples; no account, order, or journal operations are performed.",
         "The transport rejects every non-GET request before sending it.",

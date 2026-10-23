@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -19,6 +20,86 @@ def test_account_and_current_typed_market(venue, market_row):
     assert market.slug == market_row["slug"]
     assert market.end - market.start == timedelta(minutes=15)
     assert all(method == "GET" for method, _, _ in venue.calls)
+
+
+@pytest.mark.parametrize("seconds", [300, 900])
+def test_fractional_measurement_duration_cannot_masquerade_as_supported_horizon(venue, seconds):
+    market = parse_market(venue.market)
+    market = replace(market, end=market.start + timedelta(seconds=seconds, microseconds=500000))
+    assert market.horizon_seconds == seconds + 0.5
+    assert market.horizon_seconds not in (300, 900)
+
+
+def test_discovery_separates_typed_horizons_and_uses_measurement_end(venue, clock):
+    five = deepcopy(venue.market)
+    five.update(slug="typed-five-minute", endDate=(clock.current + timedelta(hours=1)).isoformat())
+    five["assetPriceTerms"].update(
+        horizon="5m",
+        windowStart=(clock.current - timedelta(seconds=100)).isoformat(),
+        windowEnd=(clock.current + timedelta(seconds=200)).isoformat(),
+    )
+    five.update(minimumTradeQty="0.1", orderPriceMinTickSize="0.001", feeCoefficient="0.07")
+    unrelated = {**venue.market, "assetPriceTerms": {"asset": {"symbol": "eth"}}}
+    venue.pages = {0: [unrelated] * 100, 100: [five, venue.market]}
+    market = venue.client.discover_market(300)
+    assert market.slug == "typed-five-minute"
+    assert market.horizon_seconds == 300
+    assert market.end == clock.current + timedelta(seconds=200)
+    assert (market.increment, market.tick, market.fee_coefficient) == (
+        Decimal("0.1"),
+        Decimal("0.001"),
+        Decimal("0.07"),
+    )
+    assert venue.client.discover_market().slug == venue.market["slug"]
+    venue.markets[market.slug] = five
+    assert venue.client.market(market.slug) == market
+    venue.pages = {0: [venue.market]}
+    assert venue.client.discover_market(300) is None
+    assert venue.client.discover_market().horizon_seconds == 900
+
+
+@pytest.mark.parametrize("horizon,seconds", [("5m", 300), ("15m", 900)])
+@pytest.mark.parametrize("invalid", ["duration", "type", "asset"])
+def test_typed_contract_restore_rejects_wrong_duration_type_or_asset(
+    venue, clock, horizon, seconds, invalid
+):
+    row = deepcopy(venue.market)
+    row["assetPriceTerms"].update(
+        horizon=horizon,
+        windowStart=clock.current.isoformat(),
+        windowEnd=(clock.current + timedelta(seconds=seconds)).isoformat(),
+    )
+    if invalid == "duration":
+        row["assetPriceTerms"]["windowEnd"] = (
+            clock.current + timedelta(seconds=seconds + 1)
+        ).isoformat()
+    elif invalid == "type":
+        row["assetPriceTerms"]["marketType"] = "ASSET_PRICE_MARKET_TYPE_STRIKE"
+    else:
+        row["assetPriceTerms"]["asset"]["symbol"] = "eth"
+    venue.markets[row["slug"]] = row
+    with pytest.raises(ValueError):
+        venue.client.market(row["slug"])
+
+
+def test_discovery_ambiguity_is_confined_to_requested_horizon(venue, clock):
+    five = deepcopy(venue.market)
+    five["assetPriceTerms"].update(
+        horizon="5m",
+        windowStart=(clock.current - timedelta(seconds=100)).isoformat(),
+        windowEnd=(clock.current + timedelta(seconds=200)).isoformat(),
+    )
+    five["slug"] = "five-one"
+    venue.pages = {0: [five, {**five, "slug": "five-two"}, venue.market]}
+    with pytest.raises(ValueError, match="Multiple current BTC 5-minute"):
+        venue.client.discover_market(300)
+    assert venue.client.discover_market().slug == venue.market["slug"]
+
+
+def test_discovery_rejects_unsupported_horizon_before_requests(venue):
+    with pytest.raises(ValueError, match="Unsupported"):
+        venue.client.discover_market(600)
+    assert venue.calls == []
 
 
 @pytest.mark.parametrize(

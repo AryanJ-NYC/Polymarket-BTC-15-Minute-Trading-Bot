@@ -27,13 +27,28 @@ References: [authentication](https://docs.polymarket.us/api-reference/authentica
 Paginate `markets.list` and select contracts by `assetPriceTerms`:
 
 - `asset.symbol == "btc"`
-- `horizon == "15m"`
+- `horizon == "5m"` or `"15m"`, selected independently
 - `marketType == "ASSET_PRICE_MARKET_TYPE_UP_DOWN"`
 
 Use the timezone-aware `windowStart` and `windowEnd` measurement window. `endDate`
-is a later expiration timestamp. Validate a 15-minute duration, both tradable
-sides, the quantity increment, price tick and fee coefficient. Do not construct
-slugs or stop discovery after an arbitrary first page.
+is a later expiration timestamp. Require exactly 300 seconds for `5m` and 900
+seconds for `15m`; reject a typed horizon whose measurement duration disagrees.
+Validate both tradable sides, the quantity increment, price tick and fee
+coefficient. Do not construct slugs or stop discovery after an arbitrary first
+page. Ambiguity is rejected within the requested horizon. A missing five-minute
+contract does not suppress discovery of the fifteen-minute contract. Owned
+contracts of either supported horizon use the same parser after restart.
+
+Ordinary and simultaneous runs discover five-minute contracts first. A newly
+subscribed five-minute contract waits for its first stream snapshot during the
+100–105-second entry window before consuming its decision. Missing the interval
+records one `missed_window`; a received invalid snapshot consumes the decision.
+Optional fifteen-minute discovery, ended-lot settlement reads and outcome history
+wait while that initial snapshot is pending in the entry window. After a decision,
+new fifteen-minute discovery resumes on the next tick; known fifteen-minute
+contracts and history remain available. Model-only and assigned modes retain
+their discovery order. Pending-order reconciliation and shared cooldowns still
+precede discovery.
 
 Up/YES pays when the closing reference is at or above the opening reference.
 Both reference prices use CF Benchmarks BRTI averages over the 60 seconds before
@@ -43,7 +58,8 @@ Authenticated books use `marketData.marketSlug`, `state`, `transactTime`, `bids`
 and `offers`. Each level has a USD `px` Amount and a decimal `qty`. Validate the
 slug, open state, finite prices/quantities, tick alignment, at least one positive
 side and an uncrossed spread when both sides exist. Accept timestamps at most
-35 seconds old or five seconds ahead; null or
+35 seconds old or five seconds ahead; this inherited limit has not been
+optimized for five-minute trading. Null or
 non-advancing timestamps must not manufacture strategy history.
 
 Paper and live trading use the SDK's authenticated full `marketData` WebSocket
@@ -230,9 +246,16 @@ transient reads; a 429 returns immediately to the runner's cooldown. Treat
 transient connection, timeout, 404 and 5xx responses as unavailable data without
 inventing prices, liquidity, fees or outcomes.
 
-Optional historical outcome lookup runs only after the known current contract's
-entry cutoff, while flat, at most once per 30-second pass. Rotate past missing
-outcomes. This leaves warmup and entry free of optional historical requests;
-a genuinely long shared backoff can still affect a later contract.
+Pending-order reconciliation runs before optional current-market discovery.
+Discovery continues to record comparison coverage while readback is pending;
+an active shared cooldown still pauses REST work.
+
+Ordinary and simultaneous runs rotate at most one historical outcome per
+30-second pass after current trading work, including while lots remain held.
+Defer these optional reads during baseline entry windows and within 43 seconds
+before an unconsumed one-shot decision: ten seconds for the request, the minimum
+30-second shared cooldown, and three seconds for the loop. Model-only and assigned
+comparisons keep their existing restrictions on entry windows and open trades.
+Longer provider `Retry-After` values remain mandatory and can still affect later entries.
 
 Reference: [rate limits](https://docs.polymarket.us/api-reference/rate-limits).

@@ -65,8 +65,11 @@ class PolymarketClient:
         bankroll = self._bankroll(usd[0], positions, book_source)
         return Account(buying_power, positions, orders, bankroll)
 
-    def discover_market(self) -> Market | None:
+    def discover_market(self, horizon_seconds: int = 900) -> Market | None:
         """Discover by typed asset terms and measurement windows, never slug guesses."""
+        if horizon_seconds not in (300, 900):
+            raise ValueError("Unsupported BTC measurement horizon")
+        horizon = f"{horizon_seconds // 60}m"
         now = datetime.now(timezone.utc)
         params = {
             "categories": ["crypto"],
@@ -83,7 +86,7 @@ class PolymarketClient:
                 terms = row.get("assetPriceTerms") or {}
                 if (
                     terms.get("asset", {}).get("symbol") == "btc"
-                    and terms.get("horizon") == "15m"
+                    and terms.get("horizon") == horizon
                     and terms.get("marketType") == "ASSET_PRICE_MARKET_TYPE_UP_DOWN"
                 ):
                     market = parse_market(row)
@@ -95,7 +98,9 @@ class PolymarketClient:
             raise ValueError("Market discovery pagination limit reached")
         unique = {market.slug: market for market in candidates}
         if len(unique) > 1:
-            raise ValueError("Multiple current BTC 15-minute contracts; refusing ambiguity")
+            raise ValueError(
+                f"Multiple current BTC {horizon_seconds // 60}-minute contracts; refusing ambiguity"
+            )
         return next(iter(unique.values()), None)
 
     def market(self, slug: str) -> Market:
@@ -346,12 +351,12 @@ def parse_market(row: dict) -> Market:
     terms = row["assetPriceTerms"]
     if (
         terms["asset"]["symbol"] != "btc"
-        or terms["horizon"] != "15m"
+        or terms["horizon"] not in ("5m", "15m")
         or terms["marketType"] != "ASSET_PRICE_MARKET_TYPE_UP_DOWN"
     ):
-        raise ValueError("Not a BTC 15-minute Up/Down contract")
+        raise ValueError("Not a supported BTC Up/Down contract")
     start, end = parse_time(terms["windowStart"]), parse_time(terms["windowEnd"])
-    if end - start != timedelta(minutes=15):
+    if end - start != timedelta(seconds=300 if terms["horizon"] == "5m" else 900):
         raise ValueError("Unexpected contract measurement window")
     sides = row["marketSides"]
     if len(sides) != 2 or {side["long"] for side in sides} != {True, False}:
@@ -583,6 +588,10 @@ class Market:
     tick: Decimal
     fee_coefficient: Decimal
     tradable: bool
+
+    @property
+    def horizon_seconds(self) -> float:
+        return (self.end - self.start).total_seconds()
 
 
 @dataclass(frozen=True)

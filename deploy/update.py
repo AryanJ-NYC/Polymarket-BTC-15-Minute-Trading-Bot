@@ -138,8 +138,8 @@ def ci_passed(sha: str) -> bool:
 
 
 def ready() -> bool:
-    # The baseline admits entries only during minutes 12-14:30. Allow a
-    # generous margin for shutdown, account reads, and the new process's startup.
+    # Avoid both horizons' entry windows and leave a startup margin. The
+    # account and journal must still independently prove flat before stopping.
     if not quiet_window() or not journal_flat():
         return False
     probe = run(
@@ -160,7 +160,10 @@ def ready() -> bool:
 
 def quiet_window() -> bool:
     offset = datetime.now(timezone.utc).timestamp() % 900
-    return 60 <= offset < 660
+    # Five-minute decisions recur at 100 seconds. Fifteen-minute decisions
+    # include minute five and minutes 12-14:30. These two intervals leave at
+    # least 60 seconds before the next policy entry window can begin.
+    return 120 <= offset % 300 < 240 and offset < 660
 
 
 def journal_flat() -> bool:

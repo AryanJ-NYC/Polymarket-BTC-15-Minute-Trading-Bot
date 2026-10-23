@@ -145,7 +145,7 @@ Completing an issue or recording a comparison does not stop the trading service.
 
 ## Automatic updates
 
-The root-owned `polymarket-update.timer` checks `main` every five minutes. For each
+The root-owned `polymarket-update.timer` checks `main` every minute. For each
 new commit it requires a successful **push** run of this repository's `ci.yml`
 workflow for that exact main SHA. Pull-request checks alone do not deploy it.
 There is no approval environment, deploy button, webhook, or GitHub SSH secret.
@@ -158,8 +158,12 @@ A deployment waits for all of the following:
 - Authenticated reads report no open orders and no nonzero positions, including
   expired positions. An expired nonzero balance can therefore defer updates
   indefinitely until it is resolved; this gate is stricter than the bot's guard.
-- The clock is between minute 1 and minute 11 of the current UTC quarter hour.
-  Baseline entries span minutes 12–14:30; the quiet window leaves a startup margin.
+- The clock is in `[2:00, 4:00)` or `[7:00, 9:00)` of the current UTC quarter
+  hour. Five-minute decisions recur at second 100, the fifteen-minute favorite
+  decides at minute five, and baseline entries span minutes 12–14:30. These quiet
+  intervals leave at least 60 seconds before the next entry window begins.
+  The one-minute timer cadence samples these shorter quiet intervals instead
+  of repeatedly checking at the same five-minute phase.
 - The service is active or inactive; failed/activating/stopping states defer.
 
 Dependencies build before the bot stops, in a contained systemd unit as
@@ -214,6 +218,15 @@ Ordinary application/dependency changes need only a passing main push. The
 installer is bound to Droplet ID `611323289`, reloads units, and enables the timer;
 it does not itself start or restart the trading service. The timer may run
 immediately after installation, so inspect its eligibility first.
+
+Before releasing the five-minute policy to `main`, install this change's reviewed
+`deploy/update.py` and `deploy/polymarket-update.timer` through that root-owned
+installation procedure. Pause the timer and wait for any active updater first.
+The previous controller's wider quiet window can overlap the new 100-second
+decisions, and an application release cannot replace the installed controller or
+timer. Verify the installed controller and one-minute timer cadence before
+allowing the application release. This PR changes the deployment files and
+guidance; it does not install them on the Droplet.
 
 ## Investigate a stopped service
 

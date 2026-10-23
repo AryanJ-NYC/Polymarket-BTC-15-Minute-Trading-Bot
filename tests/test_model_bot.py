@@ -477,7 +477,13 @@ def test_post_entry_history_still_honors_shared_retry_after(
         assert not any(
             path == "/v1/markets/current-after-backoff/book" for _, path, _ in venue.calls
         )
+        # The cooldown has expired, but the minute-five decision is only
+        # nineteen seconds away. Keep optional history outside its buffer.
         assert len(history_requests) == 1
+        clock.current += timedelta(seconds=24.1)
+        elapsed[0] += 24.1
+        trader.tick()
+        assert len(history_requests) == 2
     finally:
         journal.close()
 
