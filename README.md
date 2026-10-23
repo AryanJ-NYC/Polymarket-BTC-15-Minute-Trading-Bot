@@ -113,7 +113,8 @@ Temporary read failures retain known order IDs and recover automatically.
   rounded down to the market increment and visible depth. **Targets at most 2%
   of current account bankroll per entry, including a conservative fee reserve,
   with 10% aggregate funded exposure.** Never increases spend to meet minimum
-  quantity. Maximum five open positions.
+  quantity. Maximum five open positions. The optional model Kelly policy below
+  uses an edge-dependent target capped at 4% instead of the 2% target.
 - Rechecks eligible book generation, executable price/depth, freshness, and entry
   deadline after slow work and immediately before submission, including after
   preview. Known preflight rejections safely release the reserved order;
@@ -581,6 +582,45 @@ realized result of earlier exits.
 Track each experiment's sample counts, checks, deployed revision, prediction
 metrics and actual execution results in its GitHub issue or PR. Automated fixture
 coverage, deployed behavior and live execution are separate evidence.
+
+### Quarter Kelly with a 4% ceiling
+
+Add `--kelly` to an explicitly selected model:
+
+```bash
+python bot.py --model logs/model.json --kelly
+```
+
+Add `--live` to place real orders. This option also works with assigned or
+simultaneous comparisons; use a **new experiment ID** when changing sizing.
+Existing enrolled comparisons reject a policy change under the same ID.
+
+For each side's estimated settlement probability `q`, the target is:
+
+```text
+c = executable side price + feeCoefficient / 4
+fraction = min(0.04, 0.25 * max(0, (q - c) / (1 - c)))
+```
+
+No bet is placed when `c >= 1` or the estimated edge is nonpositive. The 4% is
+a ceiling, not a fixed bet: at a fee-inclusive cost of $0.50, probabilities of
+0.52 and 0.58 target 1% and 4% of bankroll respectively. This is approximate
+fractional Kelly, not an exact optimum with uncertain probabilities and rounded
+fees. The fee reserve is conservative; quantity flooring and the existing
+rounded-fee/positive-EV checks apply. Any `--extra-cost-usd` allowance is deducted
+from the target before sizing and remains part of the EV check.
+
+Sizing uses the refreshed account bankroll and available buying power. The
+existing shared 10% funded exposure, 10% daily gross-loss budget and five-position
+limits still apply. Final quote checks, including after preview, also reject a
+planned stake if the refreshed probability no longer supports its size.
+
+New Kelly model trades **hold to official settlement**, because this formula
+models a $1-or-zero settlement payoff. Their saved exit policy survives restart,
+including a restart without `--kelly`. Earlier trades retain their own saved exit
+policy. Reports separate Kelly results from legacy sizing for the same model
+tag. The option does not retrain or replace the selected probability model, and
+ordinary operation without `--kelly` retains its existing behavior.
 
 ### Run baseline and model together
 
