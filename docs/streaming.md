@@ -163,8 +163,8 @@ SDK's ten-second timeout. Before any API read it installs an HTTP transport
 that rejects every method except GET. SDK authentication, market-data
 subscriptions, and the induced transport close are the only socket operations
 the harness requests. The request trace contains only method, safe path,
-status, timing, and the baseline/discovery category; it excludes query parameters,
-headers, request bodies, and provider exception bodies.
+status, timing, and separate discovery, comparison-book, and settlement categories;
+it excludes query parameters, headers, request bodies, and provider exception bodies.
 
 Each new ignored output directory contains:
 
@@ -176,7 +176,8 @@ Each new ignored output directory contains:
 - `outcomes.jsonl`: available official five-minute settlement labels; missing
   outcomes remain pending and are never inferred from closed flags or spot prices.
 - `requests.jsonl`: sanitized HTTP method/path/status/timing traces. Deliberate
-  comparison book reads are counted separately from discovery.
+  comparison book reads and official settlement attempts, including unavailable
+  outcomes and transport failures, are counted separately from discovery.
 - `source-manifest.json` and `source/`: exact observed Python sources, SHA-256
   fingerprints, dependency pins, Git HEAD, and capture time. A dirty checkout's
   source snapshot is authoritative for that run.

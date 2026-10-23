@@ -364,11 +364,16 @@ class ReadOnlyTransport(httpx.BaseTransport):
         started = time.monotonic()
         method = request.method.upper()
         path = request.url.path
+        kind = "discovery"
+        if path.endswith("/book"):
+            kind = "comparison_book_baseline"
+        elif path.endswith("/settlement"):
+            kind = "settlement"
         row = {
             "utc": _utc(),
             "method": method,
             "path": _safe_path(path),
-            "kind": "comparison_book_baseline" if path.endswith("/book") else "discovery",
+            "kind": kind,
         }
         if method != "GET":
             row.update({"status": "blocked", "latency_ms": 0})
@@ -762,7 +767,7 @@ def _report(summary: dict) -> str:
         "",
         f"Recovery: {json.dumps(summary['recovery_ms'], sort_keys=True)}",
         "",
-        "REST book requests are deliberate comparison overhead, counted separately from discovery.",
+        "REST book comparison and official settlement requests are counted separately from discovery.",
         "These are contemporaneous observations, not a historical before-deployment baseline.",
         "Strategy decisions run read-only on stream samples; no account, order, or journal operations are performed.",
         "The transport rejects every non-GET request before sending it.",

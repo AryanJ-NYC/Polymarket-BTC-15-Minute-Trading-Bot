@@ -35,6 +35,62 @@ def test_observer_blocks_writes_before_the_transport_and_sanitizes_traces(tmp_pa
     assert transport.summary()["writes_blocked"] == 1
 
 
+def test_observer_counts_outcome_retries_separately_from_discovery_and_books(tmp_path):
+    attempts = iter([404, "timeout", 200])
+    trace = tmp_path / "requests.jsonl"
+    sent = []
+
+    def handle(request):
+        sent.append(request)
+        if request.url.path.endswith("/settlement"):
+            status = next(attempts)
+            if status == "timeout":
+                raise httpx.ReadTimeout("sensitive timeout detail", request=request)
+            return httpx.Response(status, json={})
+        return httpx.Response(200, json={})
+
+    transport = ReadOnlyTransport(httpx.MockTransport(handle), trace)
+    with httpx.Client(transport=transport) as http:
+        http.get("https://api.polymarket.us/v1/markets?secret=sensitive")
+        http.get("https://api.polymarket.us/v1/markets/test/book?secret=sensitive")
+        for status in (404, "timeout", 200):
+            if status == "timeout":
+                with pytest.raises(httpx.ReadTimeout):
+                    http.get(
+                        "https://api.polymarket.us/v1/markets/test/settlement?secret=sensitive"
+                    )
+            else:
+                assert (
+                    http.get(
+                        "https://api.polymarket.us/v1/markets/test/settlement?secret=sensitive"
+                    ).status_code
+                    == status
+                )
+        with pytest.raises(ValueError, match="read-only"):
+            http.post("https://api.polymarket.us/v1/orders", headers={"secret": "sensitive"})
+    rows = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert [row["kind"] for row in rows[:5]] == [
+        "discovery",
+        "comparison_book_baseline",
+        "settlement",
+        "settlement",
+        "settlement",
+    ]
+    assert [row["status"] for row in rows[2:5]] == [404, "transport_error", 200]
+    assert transport.summary()["counts"] == {
+        "requests_sent": 5,
+        "discovery": 1,
+        "comparison_book_baseline": 1,
+        "settlement": 3,
+        "status_200": 3,
+        "status_404": 1,
+        "status_transport_error": 1,
+        "writes_blocked": 1,
+    }
+    assert len(sent) == 5 and all(request.method == "GET" for request in sent)
+    assert "sensitive" not in trace.read_text()
+
+
 def test_rest_comparison_worker_only_reads_and_stops_cleanly(venue, tmp_path):
     import threading
     import time
