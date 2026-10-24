@@ -11,13 +11,16 @@ from results_report import summarize
 
 @pytest.mark.parametrize("yes_value,net", [("0", "3.989"), ("1", "-5.231")])
 @pytest.mark.parametrize("zero_fill", [False, True])
+@pytest.mark.parametrize("readback_delayed", [False, True])
 def test_exact_single_lot_cashflows_admit_and_report_after_reopen(
-    venue, tmp_path, yes_value, net, zero_fill
+    venue, tmp_path, yes_value, net, zero_fill, readback_delayed
 ):
     path = tmp_path / "single-lot.sqlite"
     journal = TradeJournal(path)
     try:
-        key = _settle_single_lot(journal, venue, yes_value, zero_fill=zero_fill)
+        key = _settle_single_lot(
+            journal, venue, yes_value, zero_fill=zero_fill, readback_delayed=readback_delayed
+        )
         original = journal.records()
         row = journal.get(key)
         assert row["pnl"] is None
@@ -81,7 +84,6 @@ def test_repeated_single_lot_settlement_preserves_original_evidence(
         "entry_cost",
         "proceeds",
         "payout",
-        "delayed_readback",
         "unrelated_warning",
         "unknown_scope",
         "zero_fill_fee",
@@ -93,7 +95,7 @@ def test_repeated_single_lot_settlement_preserves_original_evidence(
 def test_incomplete_single_lot_proof_blocks_admission_and_confirmation(venue, tmp_path, fault):
     journal = TradeJournal(tmp_path / "invalid.sqlite")
     try:
-        key = _settle_single_lot(journal, venue)
+        key = _settle_single_lot(journal, venue, readback_delayed=True)
         row = journal.get(key)
         before = row["settlement"]["resolution"]["beforePosition"]
         after = row["settlement"]["resolution"]["afterPosition"]
@@ -122,8 +124,6 @@ def test_incomplete_single_lot_proof_blocks_admission_and_confirmation(venue, tm
             row["proceeds"] = "9.23"
         elif fault == "payout":
             row["settlement_proceeds"] = "9.23"
-        elif fault == "delayed_readback":
-            row["orders"][0]["readback_delayed"] = True
         elif fault == "unrelated_warning":
             row["accounting_issues"].append("Unknown ownership")
         elif fault == "unknown_scope":
@@ -156,7 +156,7 @@ def test_incomplete_single_lot_proof_blocks_admission_and_confirmation(venue, tm
 def test_confirmed_single_lot_keeps_independent_risk_limits(venue, tmp_path, clock):
     journal = TradeJournal(tmp_path / "limits.sqlite")
     try:
-        _settle_single_lot(journal, venue, "1")
+        _settle_single_lot(journal, venue, "1", readback_delayed=True)
         assert journal.entry_budget(Decimal("55"), Decimal("100")) == (
             Decimal(".269"),
             "daily 10% loss budget",
@@ -192,7 +192,95 @@ def test_confirmed_single_lot_keeps_independent_risk_limits(venue, tmp_path, clo
         journal.close()
 
 
-def _settle_single_lot(journal, venue, yes_value="0", *, zero_fill=True):
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("yes_value", ["0", "1"])
+@pytest.mark.parametrize("provider_residual", ["0", ".01"])
+def test_captured_recovered_buy_settlement_requires_exact_cashflows(
+    venue, tmp_path, shared, yes_value, provider_residual
+):
+    path = tmp_path / "recovered.sqlite"
+    journal = TradeJournal(path)
+    market = parse_market(venue.market)
+    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
+    lots = [("model-current", "7.97", ".73", "5.8181", ".11", True)]
+    if shared:
+        lots.append(("current", "1", ".70", ".70", ".02", False))
+    try:
+        for preset, quantity, price, notional, fee, delayed in lots:
+            entry = replace(
+                plan,
+                quantity=Decimal(quantity),
+                yes_price=Decimal(price),
+                notional=Decimal(notional),
+                fee_bound=Decimal(fee),
+            )
+            journal.reserve_entry(entry, market.end, settings={"timing_preset": preset})
+            key = market.slug if preset == "current" else market.slug + ":" + preset
+            journal.finish_order(
+                key, Decimal(quantity), Decimal(notional), Decimal(fee), readback_delayed=delayed
+            )
+        gross_cost = Decimal("6.5181" if shared else "5.8181")
+        quantity = Decimal("8.97" if shared else "7.97")
+        payout = quantity * Decimal(yes_value)
+        journal.settle_market(
+            market.slug,
+            Decimal(yes_value),
+            resolution={
+                "beforePosition": {
+                    "netPositionDecimal": str(quantity),
+                    "cost": {"value": str(gross_cost), "currency": "USD"},
+                    "realized": {"value": provider_residual, "currency": "USD"},
+                },
+                "afterPosition": {
+                    "netPositionDecimal": "0",
+                    "cost": {"value": "0", "currency": "USD"},
+                    "realized": {
+                        "value": str(payout - gross_cost + Decimal(provider_residual)),
+                        "currency": "USD",
+                    },
+                },
+            },
+        )
+        original = journal.records()
+        assert original[0]["orders"][0]["readback_delayed"] is True
+        assert all(row["pnl"] is None and row["accounting_issues"] for row in original)
+        if Decimal(provider_residual):
+            # The provider's own bridge still balances, but delayed observations
+            # cannot also borrow the separate shared-market residual allowance.
+            with pytest.raises(RuntimeError, match="unknown or disputed"):
+                journal.entry_budget(Decimal("70"), Decimal("100"))
+            assert confirmed_cashflow_pnls(original) == {}
+            assert journal.records() == original
+            return
+        expected_net = {
+            (False, "1"): "2.0419",
+            (True, "1"): "2.3219",
+            (False, "0"): "-5.9281",
+            (True, "0"): "-6.6481",
+        }[shared, yes_value]
+        assert sum(confirmed_cashflow_pnls(original).values()) == Decimal(expected_net)
+        assert journal.exposure() == 0
+        expected_budget = min(Decimal("1.4"), Decimal("7") + Decimal(expected_net))
+        assert journal.entry_budget(Decimal("70"), Decimal("100"))[0] == expected_budget
+        journal.risk_check(expected_budget, Decimal("70"))
+        with pytest.raises(ValueError, match="daily|2%"):
+            journal.risk_check(expected_budget + Decimal(".0001"), Decimal("70"))
+        journal.settle_market(
+            market.slug, Decimal(yes_value), resolution=original[0]["settlement"]["resolution"]
+        )
+        assert journal.records() == original
+    finally:
+        journal.close()
+    reopened = TradeJournal(path)
+    try:
+        assert reopened.records() == original
+        assert sum(confirmed_cashflow_pnls(reopened.records()).values()) == Decimal(expected_net)
+        assert reopened.entry_budget(Decimal("70"), Decimal("100"))[0] == expected_budget
+    finally:
+        reopened.close()
+
+
+def _settle_single_lot(journal, venue, yes_value="0", *, zero_fill=True, readback_delayed=False):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "down", Decimal("6"))
     if zero_fill:
@@ -200,7 +288,9 @@ def _settle_single_lot(journal, venue, yes_value="0", *, zero_fill=True):
         journal.finish_order(market.slug + ":earlier", Decimal("0"), Decimal("0"), Decimal("0"))
     key = market.slug + ":model-current"
     journal.reserve_entry(plan, market.end, settings={"timing_preset": "model-current"})
-    journal.finish_order(key, Decimal("9.22"), Decimal("5.071"), Decimal("0.16"))
+    journal.finish_order(
+        key, Decimal("9.22"), Decimal("5.071"), Decimal("0.16"), readback_delayed=readback_delayed
+    )
     journal.settle_market(
         market.slug,
         Decimal(yes_value),
