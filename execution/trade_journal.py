@@ -556,7 +556,7 @@ def confirmed_cashflow_pnls(rows: list[dict]) -> dict[str, Decimal]:
         if len(set(keys)) != len(keys):
             continue
         try:
-            if not _settled_cashflows_match(market):
+            if _settled_cashflow_adjustment(market) is None:
                 continue
         except (KeyError, TypeError, ValueError, ArithmeticError):
             continue  # Incomplete/invalid historical evidence is never confirmation.
@@ -797,18 +797,41 @@ def _risk_entry_costs(rows: list[dict]) -> dict[str, Decimal | None]:
         if not any(costs[row["trade_id"]] is None for row in market):
             continue
         try:
-            if not _settled_cashflows_match(market):
+            adjustment = _settled_cashflow_adjustment(market, tolerance=SETTLEMENT_FEE_TOLERANCE)
+            if adjustment is None:
                 continue
+            market_costs = {
+                row["trade_id"]: (
+                    number(row["entry_cost"])
+                    if costs[row["trade_id"]] is None
+                    else costs[row["trade_id"]]
+                )
+                for row in market
+            }
+            # Preserve any existing reserve, and charge an adverse market residual
+            # once, on the latest disputed closure's UTC day. Favorable differences
+            # never replenish the daily budget or become confirmed policy P&L.
+            reserved = sum(
+                market_costs[row["trade_id"]] - number(row["entry_cost"]) for row in market
+            )
+            if adjustment > reserved:
+                disputed = [row for row in market if costs[row["trade_id"]] is None]
+                owner = max(disputed, key=lambda row: (row["closed_at"], row["trade_id"]))
+                market_costs[owner["trade_id"]] += adjustment - reserved
         except (KeyError, TypeError, ValueError, ArithmeticError):
             continue  # Malformed saved evidence remains blocked, never a proof.
-        for row in market:
-            if costs[row["trade_id"]] is None:
-                costs[row["trade_id"]] = number(row["entry_cost"])
+        costs.update(market_costs)
     return costs
 
 
-def _settled_cashflows_match(rows: list[dict]) -> bool:
-    """Reconcile a closed market without assuming how the provider allocates its cost basis."""
+def _settled_cashflow_adjustment(
+    rows: list[dict], *, tolerance: Decimal = Decimal("0")
+) -> Decimal | None:
+    """Return a conservative reserve for complete settled cashflows, or no proof.
+
+    Reporting uses exact matching; admission alone permits a bounded residual.
+    Provider allocation can vary, but its own settlement bridge must stay exact.
+    """
     # settle_market excludes unfilled attempts. They carry no settlement basis
     # only when their completed orders and collected amounts are all known zero.
     for row in rows:
@@ -825,10 +848,10 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
                 for order in row["orders"]
             )
         ):
-            return False
+            return None
     rows = [row for row in rows if row["state"] != "unfilled"]
     if not rows:
-        return False
+        return None
     settlement = rows[0].get("settlement") or {}
     resolution = settlement.get("resolution") or {}
     before = resolution.get("beforePosition") or {}
@@ -850,7 +873,7 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
         or before.get("realized") is None
         or after.get("realized") is None
     ):
-        return False
+        return None
     quantity = payout = gross = fees = Decimal("0")
     for row in rows:
         saved = row.get("settlement") or {}
@@ -867,16 +890,16 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
             or saved.get("resolution") != resolution
             or (saved.get("market_check") or {}).get("status") == "unconfirmed_chronology"
         ):
-            return False
+            return None
         retained = entry = proceeds = Decimal("0")
         for order in row["orders"]:
             filled = number(order["quantity"])
             if order["fee"] is None or order.get("readback_delayed") or filled < 0:
-                return False
+                return None
             fee = number(order["fee"])
             notional = number(order["notional"])
             if fee < 0 or not 0 <= notional <= filled:
-                return False
+                return None
             fees += fee
             if order["action"] == "BUY":
                 retained += filled
@@ -887,7 +910,7 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
                 proceeds += notional - fee
                 gross += notional
             else:
-                return False
+                return None
         row_payout = retained * (yes_value if row["outcome"] == "up" else 1 - yes_value)
         if (
             entry != number(row["entry_cost"])
@@ -897,7 +920,7 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
                 and number(row["settlement_proceeds"]) != row_payout
             )
         ):
-            return False
+            return None
         quantity += retained * (1 if row["outcome"] == "up" else -1)
         payout += row_payout
     provider_cost = amount(before["cost"])
@@ -907,7 +930,7 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
         # cost includes them. Require the explicit base/fee identity rather
         # than assuming how average cost allocates fees across policy lots.
         if before.get("baseCost") is None:
-            return False
+            return None
         base_cost = amount(before["baseCost"])
         reported_fee = amount(before["fees"])
         if (
@@ -916,11 +939,11 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
             or provider_cost != base_cost + reported_fee
             or realized != gross + payout
         ):
-            return False
+            return None
         provider_cost = base_cost
     elif after.get("fees") is not None:
-        return False
-    return (
+        return None
+    if not (
         number(before["netPositionDecimal"]) == quantity
         and number(after["netPositionDecimal"]) == 0
         and (after.get("cost") is None or amount(after["cost"]) == 0)
@@ -928,8 +951,18 @@ def _settled_cashflows_match(rows: list[dict]) -> bool:
         and (after.get("fees") is None or amount(after["fees"]) == 0)
         and provider_cost >= 0
         and amount(before["realized"]) + payout - provider_cost == realized
-        and realized in {gross + payout, gross + payout - fees}
-    )
+    ):
+        return None
+    differences = {realized - gross - payout, realized - gross - payout + fees}
+    if Decimal("0") in differences:
+        return Decimal("0")
+    # The residual allowance is for shared market settlements; legacy single-lot
+    # evidence retains its exact proof and existing row-level fee exception.
+    if legacy_single_lot:
+        return None
+    bounded = [difference for difference in differences if abs(difference) <= tolerance]
+    # If both gross and net conventions fit, reserve the worse plausible result.
+    return max(Decimal("0"), -min(bounded)) if bounded else None
 
 
 def _risk_entry_cost(row: dict) -> Decimal | None:

@@ -690,7 +690,7 @@ def test_zero_fill_policy_does_not_hide_settled_cashflows(venue, journal, settle
     "fault",
     [
         "cash_shortfall",
-        "mixed_fee_basis",
+        "broken_provider_bridge",
         "provider_quantity",
         "unknown_provider_realized",
         "unknown_fee",
@@ -704,24 +704,29 @@ def test_zero_fill_policy_does_not_hide_settled_cashflows(venue, journal, settle
         "conflicting_resolution",
     ],
 )
-def test_market_cashflow_admission_keeps_unexplained_or_incomplete_evidence_blocking(
+def test_market_cashflow_admission_keeps_large_or_incomplete_disputes_blocking(
     journal, settled_fifo_market, fault
 ):
     rows = journal.records()
     row = rows[1]
     if fault in {
         "cash_shortfall",
-        "mixed_fee_basis",
+        "broken_provider_bridge",
         "provider_quantity",
         "unknown_provider_realized",
     }:
         for item in rows:
             resolution = item["settlement"]["resolution"]
-            if fault in {"cash_shortfall", "mixed_fee_basis"}:
-                # Both provider realized values move together, so the provider's
-                # own before/after identity still holds; actual fills must agree too.
-                difference = Decimal(".01" if fault == "cash_shortfall" else ".03")
-                for position in ["beforePosition", "afterPosition"]:
+            if fault in {"cash_shortfall", "broken_provider_bridge"}:
+                # A shortfall beyond both gross/net tolerances stays blocked;
+                # even a penny cannot break the provider's own exact bridge.
+                difference = Decimal(".1101" if fault == "cash_shortfall" else ".01")
+                positions = (
+                    ["beforePosition", "afterPosition"]
+                    if fault == "cash_shortfall"
+                    else ["afterPosition"]
+                )
+                for position in positions:
                     amount = resolution[position]["realized"]
                     amount["value"] = str(Decimal(amount["value"]) - difference)
             elif fault == "provider_quantity":
@@ -752,6 +757,25 @@ def test_market_cashflow_admission_keeps_unexplained_or_incomplete_evidence_bloc
         journal.exposure()
     with pytest.raises(RuntimeError, match="unknown or disputed|unresolved"):
         journal.entry_budget(Decimal("100"), Decimal("100"))
+
+
+@pytest.mark.parametrize("difference", [".01", ".03"])
+def test_ambiguous_gross_or_net_residual_uses_worse_daily_result(
+    journal, settled_fifo_market, difference
+):
+    for row in journal.records():
+        resolution = row["settlement"]["resolution"]
+        for position in ["beforePosition", "afterPosition"]:
+            amount = resolution[position]["realized"]
+            amount["value"] = str(Decimal(amount["value"]) - Decimal(difference))
+        journal.update(row.pop("trade_id"), **row)
+    # Both fee conventions fall within five cents. Do not pick the favorable
+    # convention or reserve once per policy: charge the adverse delta once.
+    assert journal.exposure() == 0
+    assert journal.entry_budget(Decimal("2"), Decimal("100")) == (
+        Decimal(".0425") - Decimal(difference),
+        "daily 10% loss budget",
+    )
 
 
 def _record_buy(journal, plan, cost):
