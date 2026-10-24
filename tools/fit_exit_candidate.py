@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from exit_candidate import fit_candidate
+from exit_candidate import POLICY, fit_candidate
 
 
 def main():
@@ -85,9 +85,9 @@ def target_contracts(targets):
             if not 0 < exit_price < 1:
                 raise ValueError("Invalid target exit price")
             expected = 10 * exit_price - fee
-            if not row["entry_time"] < row["close_time"] < row["end"] or Decimal(
-                row["trigger_return"]
-            ) > Decimal("-.15"):
+            if row["close_time"] != row["entry_time"] + POLICY[
+                "target_exit_observation_seconds"
+            ] or Decimal(row["trigger_return"]) > Decimal("-.15"):
                 raise ValueError("Invalid stop target cashflow")
         else:
             raise ValueError("Unknown training target exit")

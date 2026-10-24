@@ -29,3 +29,5 @@ python -m compileall -q bot.py probability_model.py exit_candidate.py execution 
 python -m pip check
 python -m tools.evaluate_exit_candidate --research-repo /path/to/research-repo --output /tmp/new-unused-directory
 ```
+
+Codex review round 1 found that a stop target observed after 30 seconds could be stamped with the frozen 60-second policy. The importer now requires `close_time == entry_time + target_exit_observation_seconds` before dropping timing metadata. The regression failed before the fix and now rejects 30-, 59- and 61-second targets. All 23 focused candidate tests pass; the original full corpus still generates the identical checked-in artifact, and the final independent replay preserves every original result and source hash.

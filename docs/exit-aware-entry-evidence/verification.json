@@ -26,7 +26,7 @@
     "exit_candidate.py": "abd5aa53e4caf64fde229667dd060fb7a5d4240f87f33915321e5a1f879196eb",
     "models/exit-aware-20261023.json": "1a56d5bb70888da221fcb93926c1bdc6aac9342d886a39160faaed2b24ac99e6",
     "tools/evaluate_exit_candidate.py": "c591e94f50624c6b323889534aac4c08fdecfeabe67937fc93161fb7780e5a07",
-    "tools/fit_exit_candidate.py": "05d758309f48b42db8a0e9d3b388c2dc531b569974f39e2ed843c8b24f22f632",
+    "tools/fit_exit_candidate.py": "1583906f6daebc8838abb4093e3b62a605048203a5830b0ca6a06a83a7719cd5",
     "logs/broad-kelly-20261023/compare.py": "b5f6eeaab39b3cff1f7bd23be35f26c066c4bc41fa480d9cf1ee7092d12f3fe4",
     "logs/entry-economics-20261023/compare.py": "df98056ff355fbfa27dd8d9406bd9d7c7babf6e4a41446c7a4998568d68e850c",
     "logs/exit-aware-kelly-20261023/PLAN.md": "c1f9a52ca8fed1c57db6ffee70e8c92c8fc1217343aa15fbdac7d3899633cf25",

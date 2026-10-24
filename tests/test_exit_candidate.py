@@ -356,6 +356,10 @@ def test_counterfactual_export_reconstructs_both_sides_and_rejects_inconsistent_
     broken["proceeds"] = "4.00"
     with pytest.raises(ValueError, match="net proceeds"):
         target_contracts([broken, down])
+    for seconds in (30, 59, 61):
+        different_cadence = {**up, "close_time": up["entry_time"] + seconds}
+        with pytest.raises(ValueError, match="stop target cashflow"):
+            target_contracts([different_cadence, down])
 
 
 def test_cli_missing_model_recovers_owned_holding_without_baseline_fallback(
