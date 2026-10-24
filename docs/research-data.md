@@ -2,7 +2,8 @@
 
 The research collector archives BTC 5m and 15m markets alongside the trading bot.
 It uses the existing Polymarket US market-data credentials, public HTTP GETs and
-Kraken's unauthenticated public BTC/USD trade WebSocket. It has no order, account,
+Kraken's unauthenticated public BTC/USD spot and `PF_XBTUSD` futures trade
+WebSockets. It has no order, account,
 strategy or trading-journal workflow. There is no run
 duration or sample limit. The source feeds require no additional subscription.
 
@@ -34,6 +35,14 @@ python -m tools.collect_research_data --env-file /path/to/.env.us --output logs/
   Valid JSON also has `payload`, with decimal JSON numbers represented as
   strings to avoid floating-point precision loss. Integer trade IDs and provider
   timestamp strings remain intact. Malformed JSON has `parse_error:invalid_json`.
+- Kraken Futures `PF_XBTUSD` trades from `wss://futures.kraken.com/ws/v1`,
+  including subscription snapshots, ordinary fills, liquidation-related trades,
+  terminations, blocks, duplicates and unknown types. The separate Futures
+  heartbeat subscription, acknowledgements, errors and malformed frames are
+  retained too. `raw_text` or `raw_bytes_base64` preserves every received frame;
+  decoded `payload` retains decimal numbers as strings and integer `seq`/`time`
+  values unchanged. No UID deduplication, sequence repair, unit conversion or
+  liquidation-side inference happens during capture.
 - Connection generations, subscription bindings, gaps, HTTP failures and rate
   limits. Every ordinary record has a session ID, sequence, UTC receipt time and
   monotonic receipt time. Socket payloads retain provider timestamps separately.
@@ -66,6 +75,49 @@ only became available through that message when it arrived. Deduplicate by
 symbol and trade ID in derived datasets, retaining raw duplicate evidence and
 checking conflicting versions. Do not deduplicate by timestamp, price or size.
 Never forward-fill a quiet interval as a newly observed trade.
+
+The Futures source is `kraken_futures_pf_xbtusd_trade`. The collector subscribes
+to `feed:trade` with `product_ids:["PF_XBTUSD"]`, plus `feed:heartbeat` without
+product IDs, on its own public connection. Both acknowledgements must match
+their requests within ten seconds. An acknowledged heartbeat never substitutes
+for an acknowledged trade subscription. Connection open and subscription sends
+are bounded at ten seconds, close at five seconds, protocol pings at twenty
+seconds with a twenty-second pong timeout, and reconnect backoff at one to
+thirty seconds. A 35-second timeout applies to accepted, bound message activity;
+unknown or mismatched frames cannot keep an unusable feed alive indefinitely.
+These timeouts are collector policy, not a Kraken heartbeat-cadence guarantee.
+Healthy heartbeat traffic keeps a quiet trade feed open. Absence of liquidation
+prints is not a connection failure. The queue and frame limits match spot:
+16 frames with backpressure and 1 MiB per frame. Malformed/non-object JSON,
+rejected subscriptions, removed subscriptions and provider errors are archived
+before a local reconnect. A Futures failure does not restart the other feeds;
+shared archive failure still stops the collector.
+
+Futures `binding_status` distinguishes accepted subscription acknowledgements,
+bound live trades, snapshots and heartbeats from inactive generations,
+unacknowledged feeds, mismatched products, unknown feeds and invalid shapes.
+Health requires an active generation, a matching acknowledged feed/product,
+the expected message shape and archive queue acceptance. Snapshots validate the
+envelope and each supplied child trade; an empty snapshot is valid. Unknown
+trade types and malformed trade fields remain in the raw archive but do not
+refresh live health. This conservative shape check is not a guarantee of an
+economically valid price, complete tape or timely provider clock.
+
+Futures frames additionally record integer `received_ns` from the local wall
+clock, the same instant as a nanosecond UTC `received_at` string, and a separate
+`received_monotonic_ns`. Provider `time` is UTC milliseconds and `seq` is the
+documented subscription-message sequence; neither is a local receipt clock.
+Replay in actual receipt order and retain UID duplicates, conflicting versions,
+sequence repeats/regressions/jumps and connection gaps for explicit analysis.
+Do not infer a global contiguous trade sequence or recovered coverage from a
+reconnect snapshot. The collector performs no Futures historical backfill.
+
+The documented `side` is the taker's side. `type:liquidation` identifies a
+liquidation-related execution; it does not establish that the liquidated
+account was the taker. Kraken describes this linear Multi-M product in BTC
+quantity and USD price, but the collector leaves wire values unchanged for
+instrument-specific downstream validation. Futures trades are a cross-market
+input, not raw BRTI, official settlement labels or evidence of profitability.
 
 For matched-expiry research, pair only contracts with matching closing instants,
 reference index and settlement rules. Reconstruct each leg using messages already
@@ -135,6 +187,16 @@ snapshot receipt, live trade-update receipt and provider trade timestamp.
 Snapshots and heartbeats never refresh the live trade-update receipt. These
 are receipt indicators, not a guarantee of valid prices, complete trades or
 fresh provider event times; compare provider time as well as local receipt age.
+The separate `futures` object records its product, generation, connection and
+independent `trade_subscribed` / `heartbeat_subscribed` states, plus last bound
+message, heartbeat, snapshot, live trade and live liquidation receipts. Live
+trade and liquidation provider timestamps are recorded separately as supplied
+integer milliseconds. Only queue-accepted bound frames advance these values;
+snapshots, heartbeats and control replies never refresh live trade/liquidation
+health. Ordinary live trades can advance trade health without advancing the
+liquidation receipt. Values are the last accepted receipts in this process,
+which can precede the current connection generation; read connection state and
+gaps alongside their timestamps.
 Counters are per process session; the archive persists across restarts. Sort
 replay by record receipt time and sequence, not by the random session filename.
 
@@ -143,6 +205,12 @@ Spot lifecycle records use `spot_connection_attempt`, `spot_connected`,
 These are deliberately distinct from Polymarket's connection event kinds:
 spot disconnects must not invalidate contract books. A shared writer
 `capture_gap` still applies to every source because overflow can lose any feed.
+Futures uses its own `futures_connection_attempt`, `futures_connected`,
+`futures_subscription_sent`, `futures_connection_gap` and `futures_error`
+lifecycle records, and `futures_message` payload records. A sent subscription
+is not an acknowledgement; only a matching, archived provider reply changes
+the corresponding subscription health flag. Futures gaps do not invalidate
+spot or Polymarket source generations.
 
 No archive is deleted automatically. Capture fails when less than 512 MiB of disk
 space remains, protecting the trading service's remaining space. The service
@@ -198,4 +266,8 @@ Feed references: [Markets WebSocket](https://docs.polymarket.us/api-reference/we
 [typed crypto contracts](https://docs.polymarket.us/trader-guide/crypto-schema),
 [public reference API](https://docs.polymarket.us/api-reference/asset-prices/overview),
 [Kraken trade channel](https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/trade),
+[Kraken Futures trade channel](https://docs.kraken.com/exchange/api-reference/futures-websocket/trade),
+[Kraken Futures heartbeat](https://docs.kraken.com/exchange/api-reference/futures-websocket/heartbeat),
+[Kraken Futures WebSocket guide](https://docs.kraken.com/exchange/guides/futures/websockets),
+[Multi-M contract guide](https://support.kraken.com/articles/4844429542676-trading-multi-collateral-derivatives),
 [CF's licensed feed](https://docs.cfbenchmarks.com/api/websocket/intro/).
