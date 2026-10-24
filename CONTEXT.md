@@ -13,7 +13,7 @@ _Avoid_: Position, when referring to an individual experiment's trade.
 
 **Conflict skip**: An observation where a proposed entry opposes an experiment trade still held in the same contract. It is not a fill or an executed trade result.
 
-**Minute-five policy**: The ordinary quote-only strategy that makes one durable decision at elapsed 300–305 seconds, buys the favorite with midpoint above .80 and at most .95, and holds its owned shares to settlement. Skips consume its decision; baseline windows retain their retry rules.
+**Minute-five policy**: The ordinary quote-only strategy that makes one durable decision at elapsed 300–305 seconds, buys the favorite with midpoint above .80 and at most .95, and holds its owned shares to settlement. Skips consume its decision; baseline windows retain their retry rules. Once its contract is known and its decision claimed, optional other-horizon discovery and expired-lot settlement wait until a later tick. Entry still needs one fresh account guard and the unchanged final quote/deadline checks; retained unsettled live shares block entry.
 
 **Five-minute policy**: `btc-5m-strong-favorite-100-v1` makes one durable decision at elapsed 100–105 seconds in a five-minute contract, buys the favorite with midpoint above .80 and at most .95 at its executable side price, and holds its owned shares to settlement. A skip, crash or zero fill consumes the decision. No tick in the interval produces one missed-window skip. It uses neither fifteen-minute history nor a fitted model.
 

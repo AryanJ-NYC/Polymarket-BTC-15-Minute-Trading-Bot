@@ -1,8 +1,10 @@
 import sqlite3
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 from stream_fakes import snapshot, wait_for
 from test_baseline_signals import warm
@@ -29,6 +31,123 @@ def test_minute_five_buys_without_baseline_history_or_signals(
     assert Decimal(row["orders"][0]["notional"]) == Decimal("0.45")
     assert Decimal(row["entry_cost"]) == Decimal("0.46")
     assert len(actual_fills) == 1
+
+
+@pytest.mark.parametrize("account_seconds", [3, 5])
+def test_minute_five_uses_one_fresh_account_read_inside_its_window(
+    venue, journal, stream_feed, clock, future_market, actual_fills, account_seconds
+):
+    clock.current = future_market.start + timedelta(seconds=300)
+    venue.bid, venue.ask, venue.fill_price = "0.88", "0.90", "0.90"
+    publish(venue, stream_feed, clock)
+    handler = venue.on_request
+
+    def slow_account(request):
+        if request.url.path == "/v1/account/balances":
+            clock.current += timedelta(seconds=account_seconds)
+        return handler(request)
+
+    venue.on_request = slow_account
+    bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
+    assert len(actual_fills) == (1 if account_seconds == 3 else 0)
+    row = journal.get(future_market.slug + ":minute-five")
+    if account_seconds == 3:
+        assert (
+            row["orders"][0]["recorded_at"]
+            == (future_market.start + timedelta(seconds=303)).isoformat()
+        )
+    else:
+        assert row is None
+        assert journal.opportunities()[-1]["decision"] == "entry_window_closed"
+        assert journal.entry_decided(future_market.slug, "minute-five")
+
+
+def test_known_minute_five_contract_enters_before_optional_horizon_discovery(
+    venue, journal, stream_feed, clock, future_market, actual_fills
+):
+    clock.current = future_market.start + timedelta(seconds=300)
+    venue.bid, venue.ask, venue.fill_price = "0.88", "0.90", "0.90"
+    publish(venue, stream_feed, clock)
+    discover = venue.client.discover_market
+    discovery_times = []
+
+    def slow_five_minute_discovery(horizon_seconds=900):
+        if horizon_seconds == 300:
+            discovery_times.append(clock.current)
+            clock.current += timedelta(seconds=10)
+        return discover(horizon_seconds)
+
+    venue.client.discover_market = slow_five_minute_discovery
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.market = future_market  # Already following this contract before minute five.
+    trader.tick()
+    assert len(actual_fills) == 1
+    row = journal.get(future_market.slug + ":minute-five")
+    assert (
+        row["orders"][0]["recorded_at"]
+        == (future_market.start + timedelta(seconds=300)).isoformat()
+    )
+    assert not discovery_times
+
+    clock.current = future_market.start + timedelta(seconds=306)
+    trader.tick()
+    assert discovery_times
+    assert len(actual_fills) == 1
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_minute_five_defers_old_settlement_but_blocks_unsettled_live_shares(
+    venue, journal, stream_feed, clock, future_market, actual_fills, retained
+):
+    clock.current = future_market.start + timedelta(seconds=300)
+    venue.bid, venue.ask, venue.fill_price = "0.88", "0.90", "0.90"
+    publish(venue, stream_feed, clock)
+    book = stream_feed.books.book(future_market)
+    ended = replace(
+        future_market,
+        slug="previous-minute-five-contract",
+        start=future_market.start - timedelta(minutes=15),
+        end=future_market.start,
+    )
+    clock.current = ended.start + timedelta(seconds=300)
+    book = replace(book, slug=ended.slug, timestamp=clock.current)
+    plan = venue.client.buy_plan(ended, book, "up", Decimal("2"), deadline=ended.end)
+    journal.reserve_entry(plan, ended.end, settings=dict(bot.MINUTE_FIVE_SETTINGS))
+    old_id = ended.slug + ":minute-five"
+    journal.finish_order(old_id, Decimal("0.5"), Decimal("0.45"), Decimal("0.01"))
+    if not retained:
+        journal.reserve_exit(old_id, venue.client.sell_plan(ended, book, "up", Decimal("0.5")))
+        journal.finish_order(old_id, Decimal("0.5"), Decimal("0.44"), Decimal("0.01"))
+    old_row = journal.get(old_id)
+    clock.current = future_market.start + timedelta(seconds=300)
+    handler = venue.on_request
+    settlement_times = []
+
+    def slow_settlement(request):
+        if request.url.path == f"/v1/markets/{ended.slug}/settlement":
+            settlement_times.append(clock.current)
+            clock.current += timedelta(seconds=10)
+            return httpx.Response(404, json={"error": "Not resolved"})
+        return handler(request)
+
+    venue.on_request = slow_settlement
+    trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
+    trader.tick()
+    assert not settlement_times
+    assert journal.get(old_id) == old_row
+    assert len(actual_fills) == (0 if retained else 1)
+    if retained:
+        assert journal.opportunities()[-1]["decision"] == "position_monitoring_unavailable"
+    else:
+        assert (
+            journal.get(future_market.slug + ":minute-five")["orders"][0]["recorded_at"]
+            == (future_market.start + timedelta(seconds=300)).isoformat()
+        )
+
+    clock.current = future_market.start + timedelta(seconds=306)
+    trader.tick()
+    assert settlement_times
+    assert len(actual_fills) == (0 if retained else 1)
 
 
 @pytest.mark.parametrize(
