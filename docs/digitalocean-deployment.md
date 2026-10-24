@@ -103,8 +103,10 @@ do not launch another process, journal or host against this account. Ordinary
 application deployment keeps the existing baseline command until the operator
 explicitly configures an experiment.
 
-Keep the selected, verified model outside application releases, for example at
+Keep operator-fitted models outside application releases, for example at
 `/var/lib/polymarket-us/models/candidate.json`, readable by `polymarket-us`.
+The shipped paired artifact selected below is versioned with its application
+release so that inference code and the selected artifact move together.
 Record its file hash and canonical model tag before activation. During the
 documented maintenance procedure, pause the updater, confirm both the journal
 and provider account are flat, stop the existing service, and preserve a
@@ -152,6 +154,15 @@ To return to baseline-only entries, use the same flat maintenance procedure to
 remove only this experiment drop-in, reload systemd and resume the existing
 service. Keep its journal, model artifact and experiment records for reporting.
 Completing an issue or recording a comparison does not stop the trading service.
+
+The continuous deployment's model command is versioned in
+[exit-aware-model.conf](../deploy/exit-aware-model.conf). Install it as
+`/etc/systemd/system/polymarket-us.service.d/experiment.conf` after the matching
+release passes main CI and is deployed, preserving a backup of the prior
+override. Reload systemd and restart only at an existing flat-account/journal,
+quiet-window maintenance point. It selects the paired artifact and a new
+immutable model cohort; it preserves simultaneous strategies, the persistent
+journal and all shared limits. Future ordinary releases retain that override.
 
 ## Automatic updates
 

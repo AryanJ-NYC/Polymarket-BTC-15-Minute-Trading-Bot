@@ -354,3 +354,51 @@ def test_shutdown_signal_finishes_tick_before_closing_journal(signum, tmp_path, 
     monkeypatch.setattr(bot, "TradingBot", Trader)
     assert bot.main() == 0
     assert phases == ["submit-started", "accounting-finished", "closed"]
+
+
+def test_selected_model_override_loads_paired_artifact_in_a_distinct_continuous_cohort(
+    venue, journal, books, tmp_path
+):
+    import shlex
+    from pathlib import Path
+
+    from test_model_bot import saved_model
+
+    from bot import TradingBot
+    from exit_candidate import ExitCandidate
+    from probability_model import load_model
+
+    root = Path(__file__).resolve().parents[1]
+    commands = [
+        line.partition("=")[2]
+        for line in (root / "deploy/exit-aware-model.conf").read_text().splitlines()
+        if line.startswith("ExecStart=")
+    ]
+    assert commands[0] == ""
+    args = shlex.split(commands[1])
+    model_path = root / Path(args[args.index("--model") + 1]).relative_to(
+        "/opt/polymarket-us/current"
+    )
+    model = load_model(model_path)
+    assert isinstance(model, ExitCandidate)
+    assert "--live" in args and "--simultaneous" in args
+    assert "--duration" not in args and "--one-trade" not in args and "--no-kelly" not in args
+    old = TradingBot(
+        venue.client,
+        journal,
+        books,
+        model=saved_model(tmp_path),
+        experiment_id="btc-five-20261022-a0201afd",
+        simultaneous=True,
+    )
+    identifier = args[args.index("--experiment-id") + 1]
+    selected = TradingBot(
+        venue.client, journal, books, model=model, experiment_id=identifier, simultaneous=True
+    )
+    assert selected.experiment["id"] != old.experiment["id"]
+    assert selected._model_settings["entry_bankroll_fraction"] == "0.04"
+    assert selected._model_settings["kelly_multiplier"] == "0.25"
+    assert selected._model_settings["exit_policy"] == "model-loss-15-v1"
+    assert selected._model_settings["entry_filter"] == "expected-net-proceeds-positive-v1"
+    assert journal.saved_experiment(old.experiment["id"]) == old.experiment
+    assert journal.saved_experiment(selected.experiment["id"]) == selected.experiment
