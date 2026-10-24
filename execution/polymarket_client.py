@@ -707,6 +707,7 @@ CENT = Decimal("0.01")
 BOOK_MAX_AGE_SECONDS = 35
 BOOK_FUTURE_TOLERANCE_SECONDS = 5
 QUOTE_REASONS = {
+    "candidate_entry_rejected": "Candidate expected net proceeds do not support this entry",
     "plan_expired": "Order plan has expired",
     "stream_generation_changed": "Order book connection/subscription generation changed",
     "entry_deadline_elapsed": "Entry deadline elapsed",

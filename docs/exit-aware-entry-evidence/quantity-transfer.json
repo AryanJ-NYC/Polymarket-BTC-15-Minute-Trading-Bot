@@ -1,0 +1,1009 @@
+{
+  "actual_trades": 99,
+  "below_one": 82,
+  "below_ten": 99,
+  "changed": [
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "-0.1232",
+      "classification_changed": true,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-17-0645z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.16"
+    }
+  ],
+  "rows": [
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.09",
+      "actual_pnl": "-1.3583",
+      "classification_changed": false,
+      "quantity": "5.21",
+      "slug": "cpc-btc-updown-15m-2026-09-26-0200z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.17"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.10",
+      "actual_pnl": "-1.5486",
+      "classification_changed": false,
+      "quantity": "6.13",
+      "slug": "cpc-btc-updown-15m-2026-09-26-0230z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.16"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "2.7296",
+      "classification_changed": false,
+      "quantity": "5.32",
+      "slug": "cpc-btc-updown-15m-2026-09-26-0245z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.2018",
+      "classification_changed": false,
+      "quantity": "3.53",
+      "slug": "cpc-btc-updown-15m-2026-09-26-0345z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.5970",
+      "classification_changed": false,
+      "quantity": "4.55",
+      "slug": "cpc-btc-updown-15m-2026-09-26-0500z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.4080",
+      "classification_changed": false,
+      "quantity": "4.38",
+      "slug": "cpc-btc-updown-15m-2026-09-26-0630z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "1.1756",
+      "classification_changed": false,
+      "quantity": "5.19",
+      "slug": "cpc-btc-updown-15m-2026-09-26-0930z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.8284",
+      "classification_changed": false,
+      "quantity": "4.88",
+      "slug": "cpc-btc-updown-15m-2026-09-26-0945z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.05",
+      "actual_pnl": "-2.4690",
+      "classification_changed": false,
+      "quantity": "3.65",
+      "slug": "cpc-btc-updown-15m-2026-09-26-1100z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.14"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.2768",
+      "classification_changed": false,
+      "quantity": "4.24",
+      "slug": "cpc-btc-updown-15m-2026-09-26-1115z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.03",
+      "actual_pnl": "-2.7876",
+      "classification_changed": false,
+      "quantity": "6.04",
+      "slug": "cpc-btc-updown-15m-2026-09-26-1400z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.06"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.3144",
+      "classification_changed": false,
+      "quantity": "4.18",
+      "slug": "cpc-btc-updown-15m-2026-09-26-1715z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "2.7667",
+      "classification_changed": false,
+      "quantity": "5.39",
+      "slug": "cpc-btc-updown-15m-2026-09-26-2000z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "2.8100",
+      "classification_changed": false,
+      "quantity": "5.82",
+      "slug": "cpc-btc-updown-15m-2026-09-26-2130z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "1.2825",
+      "classification_changed": false,
+      "quantity": "5.41",
+      "slug": "cpc-btc-updown-15m-2026-09-26-2145z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.03",
+      "actual_pnl": "-3.7684",
+      "classification_changed": false,
+      "quantity": "4.48",
+      "slug": "cpc-btc-updown-15m-2026-09-26-2215z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.06"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "2.6334",
+      "classification_changed": false,
+      "quantity": "6.38",
+      "slug": "cpc-btc-updown-15m-2026-09-26-2330z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0988",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-09-29-0000z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1276",
+      "classification_changed": false,
+      "quantity": "0.86",
+      "slug": "cpc-btc-updown-15m-2026-09-29-0515z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0022",
+      "classification_changed": false,
+      "quantity": "0.02",
+      "slug": "cpc-btc-updown-15m-2026-09-29-0715z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1916",
+      "classification_changed": false,
+      "quantity": "0.63",
+      "slug": "cpc-btc-updown-15m-2026-09-29-1045z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.7228",
+      "classification_changed": false,
+      "quantity": "0.99",
+      "slug": "cpc-btc-updown-15m-2026-09-29-1315z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.03"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.02",
+      "actual_pnl": "-0.3468",
+      "classification_changed": false,
+      "quantity": "0.99",
+      "slug": "cpc-btc-updown-15m-2026-09-29-1730z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.17"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1781",
+      "classification_changed": false,
+      "quantity": "0.99",
+      "slug": "cpc-btc-updown-15m-2026-09-29-1815z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.2008",
+      "classification_changed": false,
+      "quantity": "0.68",
+      "slug": "cpc-btc-updown-15m-2026-09-29-2345z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0754",
+      "classification_changed": false,
+      "quantity": "0.13",
+      "slug": "cpc-btc-updown-15m-2026-10-03-0145z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.15"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0156",
+      "classification_changed": false,
+      "quantity": "0.13",
+      "slug": "cpc-btc-updown-15m-2026-10-03-0200z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.5460",
+      "classification_changed": false,
+      "quantity": "0.80",
+      "slug": "cpc-btc-updown-15m-2026-10-03-0430z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.04"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "-0.0660",
+      "classification_changed": false,
+      "quantity": "0.11",
+      "slug": "cpc-btc-updown-15m-2026-10-03-0630z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.2060",
+      "classification_changed": false,
+      "quantity": "0.80",
+      "slug": "cpc-btc-updown-15m-2026-10-03-1000z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0164",
+      "classification_changed": false,
+      "quantity": "0.04",
+      "slug": "cpc-btc-updown-15m-2026-10-03-1030z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1947",
+      "classification_changed": false,
+      "quantity": "0.89",
+      "slug": "cpc-btc-updown-15m-2026-10-03-1800z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0962",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-10-04-2245z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.08"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0868",
+      "classification_changed": false,
+      "quantity": "0.14",
+      "slug": "cpc-btc-updown-15m-2026-10-05-1930z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0351",
+      "classification_changed": false,
+      "quantity": "0.27",
+      "slug": "cpc-btc-updown-15m-2026-10-05-2245z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "-0.0165",
+      "classification_changed": false,
+      "quantity": "0.03",
+      "slug": "cpc-btc-updown-15m-2026-10-06-1600z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0320",
+      "classification_changed": false,
+      "quantity": "0.08",
+      "slug": "cpc-btc-updown-15m-2026-10-06-1615z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0252",
+      "classification_changed": false,
+      "quantity": "0.09",
+      "slug": "cpc-btc-updown-15m-2026-10-06-2115z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.15"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0215",
+      "classification_changed": false,
+      "quantity": "0.05",
+      "slug": "cpc-btc-updown-15m-2026-10-06-2300z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.1248",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-10-07-0400z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.12"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.1456",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-07-1500z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.01"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0258",
+      "classification_changed": false,
+      "quantity": "0.06",
+      "slug": "cpc-btc-updown-15m-2026-10-07-1615z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.01"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "-0.1484",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-07-1815z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0738",
+      "classification_changed": false,
+      "quantity": "0.18",
+      "slug": "cpc-btc-updown-15m-2026-10-09-0700z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0520",
+      "classification_changed": false,
+      "quantity": "0.13",
+      "slug": "cpc-btc-updown-15m-2026-10-09-0830z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.10"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0812",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-09-1800z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0104",
+      "classification_changed": false,
+      "quantity": "0.04",
+      "slug": "cpc-btc-updown-15m-2026-10-09-2030z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.14"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0176",
+      "classification_changed": false,
+      "quantity": "0.08",
+      "slug": "cpc-btc-updown-15m-2026-10-09-2300z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0210",
+      "classification_changed": false,
+      "quantity": "0.15",
+      "slug": "cpc-btc-updown-15m-2026-10-10-0815z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0605",
+      "classification_changed": false,
+      "quantity": "0.11",
+      "slug": "cpc-btc-updown-15m-2026-10-10-1600z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.1176",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-10-1845z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.04"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0294",
+      "classification_changed": false,
+      "quantity": "0.21",
+      "slug": "cpc-btc-updown-15m-2026-10-11-1000z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0693",
+      "classification_changed": false,
+      "quantity": "0.21",
+      "slug": "cpc-btc-updown-15m-2026-10-11-1345z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.17"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "-0.1078",
+      "classification_changed": false,
+      "quantity": "0.22",
+      "slug": "cpc-btc-updown-15m-2026-10-12-0100z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0432",
+      "classification_changed": false,
+      "quantity": "0.08",
+      "slug": "cpc-btc-updown-15m-2026-10-12-0830z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0612",
+      "classification_changed": false,
+      "quantity": "0.18",
+      "slug": "cpc-btc-updown-15m-2026-10-13-0030z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.09"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0572",
+      "classification_changed": false,
+      "quantity": "0.11",
+      "slug": "cpc-btc-updown-15m-2026-10-13-1515z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0160",
+      "classification_changed": false,
+      "quantity": "0.04",
+      "slug": "cpc-btc-updown-15m-2026-10-14-0130z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.02"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0825",
+      "classification_changed": false,
+      "quantity": "0.15",
+      "slug": "cpc-btc-updown-15m-2026-10-14-0715z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1456",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-14-1700z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0864",
+      "classification_changed": false,
+      "quantity": "0.24",
+      "slug": "cpc-btc-updown-15m-2026-10-15-0045z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.06"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0644",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-15-1630z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0638",
+      "classification_changed": false,
+      "quantity": "0.11",
+      "slug": "cpc-btc-updown-15m-2026-10-15-2230z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0306",
+      "classification_changed": false,
+      "quantity": "0.09",
+      "slug": "cpc-btc-updown-15m-2026-10-16-1045z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.02"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0324",
+      "classification_changed": false,
+      "quantity": "0.09",
+      "slug": "cpc-btc-updown-15m-2026-10-16-1400z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.01"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "-0.1232",
+      "classification_changed": true,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-17-0645z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.16"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0055",
+      "classification_changed": false,
+      "quantity": "0.05",
+      "slug": "cpc-btc-updown-15m-2026-10-17-0900z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.14"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1560",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-10-18-0015z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0396",
+      "classification_changed": false,
+      "quantity": "0.11",
+      "slug": "cpc-btc-updown-15m-2026-10-18-0545z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.01"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.1014",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-10-18-1515z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.01"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "-0.0646",
+      "classification_changed": false,
+      "quantity": "0.17",
+      "slug": "cpc-btc-updown-15m-2026-10-18-1715z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1560",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-10-18-2245z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0065",
+      "classification_changed": false,
+      "quantity": "0.01",
+      "slug": "cpc-btc-updown-15m-2026-10-18-2330z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0715",
+      "classification_changed": false,
+      "quantity": "0.13",
+      "slug": "cpc-btc-updown-15m-2026-10-19-0115z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.09"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0999",
+      "classification_changed": false,
+      "quantity": "0.27",
+      "slug": "cpc-btc-updown-15m-2026-10-19-1045z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0936",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-10-19-1300z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1204",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-19-1315z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0228",
+      "classification_changed": false,
+      "quantity": "0.06",
+      "slug": "cpc-btc-updown-15m-2026-10-19-1500z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.04"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "-0.1000",
+      "classification_changed": false,
+      "quantity": "0.20",
+      "slug": "cpc-btc-updown-15m-2026-10-19-2030z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0021",
+      "classification_changed": false,
+      "quantity": "0.03",
+      "slug": "cpc-btc-updown-15m-2026-10-19-2045z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.16"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0483",
+      "classification_changed": false,
+      "quantity": "0.07",
+      "slug": "cpc-btc-updown-15m-2026-10-20-0045z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.01"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0330",
+      "classification_changed": false,
+      "quantity": "0.11",
+      "slug": "cpc-btc-updown-15m-2026-10-20-0215z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.1170",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-10-20-1700z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.11"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0154",
+      "classification_changed": false,
+      "quantity": "0.14",
+      "slug": "cpc-btc-updown-15m-2026-10-20-1900z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.17"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0544",
+      "classification_changed": false,
+      "quantity": "0.17",
+      "slug": "cpc-btc-updown-15m-2026-10-20-1945z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0840",
+      "classification_changed": false,
+      "quantity": "0.24",
+      "slug": "cpc-btc-updown-15m-2026-10-20-2215z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0550",
+      "classification_changed": false,
+      "quantity": "0.11",
+      "slug": "cpc-btc-updown-15m-2026-10-21-0000z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.12"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.1736",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-21-0315z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.02"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0784",
+      "classification_changed": false,
+      "quantity": "0.16",
+      "slug": "cpc-btc-updown-15m-2026-10-21-0330z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0800",
+      "classification_changed": false,
+      "quantity": "0.25",
+      "slug": "cpc-btc-updown-15m-2026-10-21-0600z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.1300",
+      "classification_changed": false,
+      "quantity": "0.26",
+      "slug": "cpc-btc-updown-15m-2026-10-21-0800z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.05"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1148",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-21-0845z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0186",
+      "classification_changed": false,
+      "quantity": "0.06",
+      "slug": "cpc-btc-updown-15m-2026-10-21-0915z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.17"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0713",
+      "classification_changed": false,
+      "quantity": "0.23",
+      "slug": "cpc-btc-updown-15m-2026-10-21-0945z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.1036",
+      "classification_changed": false,
+      "quantity": "0.28",
+      "slug": "cpc-btc-updown-15m-2026-10-21-1015z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0392",
+      "classification_changed": false,
+      "quantity": "0.14",
+      "slug": "cpc-btc-updown-15m-2026-10-21-1045z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "settlement",
+      "actual_exit_fee": "0",
+      "actual_pnl": "0.0522",
+      "classification_changed": false,
+      "quantity": "0.18",
+      "slug": "cpc-btc-updown-15m-2026-10-21-1630z",
+      "ten_share_exit": "settlement",
+      "ten_share_exit_fee": "0"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0360",
+      "classification_changed": false,
+      "quantity": "0.24",
+      "slug": "cpc-btc-updown-15m-2026-10-21-1945z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.17"
+    },
+    {
+      "actual_exit": "stop15",
+      "actual_exit_fee": "0.00",
+      "actual_pnl": "-0.0067",
+      "classification_changed": false,
+      "quantity": "0.01",
+      "slug": "cpc-btc-updown-15m-2026-10-21-2015z",
+      "ten_share_exit": "stop15",
+      "ten_share_exit_fee": "0.05"
+    }
+  ]
+}

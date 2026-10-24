@@ -210,6 +210,18 @@ def _opportunity_report(opportunities):
         if row["decision"] == "book_unavailable" or row.get("quote_reason") is not None
     )
     return {
+        "entry_filter_evaluations": dict(
+            sorted(
+                Counter(
+                    (row.get("settings") or {})
+                    .get("admission", {})
+                    .get("reason", "payoff_model_unavailable")
+                    for row in opportunities
+                    if row["decision"].startswith("candidate_")
+                ).items()
+            )
+        ),
+        "entry_filter_basis": "Gate evaluations (including repeated final preflights), not fills; rejected outcomes are hypothetical and excluded from actual P&L.",
         "observed_contract_count": len({row["slug"] for row in opportunities}),
         "opportunity_count": len(opportunities),
         "opportunity_decisions": dict(sorted(decisions.items())),
@@ -627,6 +639,9 @@ COMPARISON_FIELDS = (
     "timing_preset",
     "policy_version",
     "model_tag",
+    "settlement_model",
+    "payout_model",
+    "entry_filter",
     "entry_start_seconds",
     "entry_end_seconds",
     "minimum_snapshots",

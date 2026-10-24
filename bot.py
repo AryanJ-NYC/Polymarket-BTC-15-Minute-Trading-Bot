@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import signal
+import sqlite3
 import sys
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -50,7 +52,9 @@ from execution.risk import (
     kelly_fraction,
 )
 from execution.trade_journal import TradeJournal, entry_key, pending_plan
-from probability_model import ProbabilityModel, load_model
+from exit_candidate import POLICY as CANDIDATE_POLICY
+from exit_candidate import ExitCandidate
+from probability_model import ProbabilityModel, UnavailableModel, load_model
 
 
 def main() -> int:
@@ -105,7 +109,16 @@ def main() -> int:
     shutdown = Event()
     previous_handlers = {}
     try:
-        model = load_model(args.model) if args.model is not None else None
+        model = None
+        if args.model is not None:
+            try:
+                model = load_model(args.model)
+            except ValueError as exc:
+                state_path = ROOT / "logs" / f"us-{'live' if args.live else 'paper'}.sqlite"
+                if not _saved_recovery_available(state_path):
+                    raise
+                logger.error("Model entries disabled; saved holdings will recover: {}", exc)
+                model = UnavailableModel()
         _validate_experiment(args.experiment_id, model, args.simultaneous)
         if args.kelly and model is None:
             raise ValueError("--kelly requires --model")
@@ -223,7 +236,7 @@ class TradingBot:
         *,
         live: bool = False,
         one_trade: bool = False,
-        model: ProbabilityModel | None = None,
+        model: ProbabilityModel | ExitCandidate | UnavailableModel | None = None,
         extra_cost: Decimal = Decimal("0"),
         context: ContextRefresher | None = None,
         experiment_id: str | None = None,
@@ -307,47 +320,83 @@ class TradingBot:
                 entry_bankroll_fraction=str(KELLY_MAX_BANKROLL_FRACTION),
                 kelly_multiplier=str(KELLY_MULTIPLIER),
             )
+        if isinstance(model, ExitCandidate):
+            if not all(
+                self._model_settings.get(key) == value
+                for key, value in CANDIDATE_POLICY["settings"].items()
+            ):
+                raise ValueError("Paired candidate requires quarter Kelly, 4% cap and stop15")
+            self._model_settings.update(
+                policy_version="btc-15m-exit-aware-v1",
+                settlement_model=model.settlement_tag,
+                payout_model=model.payout_tag,
+                entry_filter=CANDIDATE_POLICY["entry_filter"],
+            )
         if experiment_id is not None:
             requested_id = experiment_id
             if kelly:
                 experiment_id = _kelly_experiment_id(requested_id)
-            self.experiment = journal.start_experiment(
-                experiment_id,
-                {
-                    "assignment_version": "same-contract-v1"
+            configuration = {
+                "assignment_version": "same-contract-v1" if simultaneous else "sha256-contract-v1",
+                "model_tag": model.tag,
+                "extra_cost_usd": str(extra_cost),
+                "baseline_settings": self._baseline_settings,
+                **(
+                    {
+                        "model_settings": self._model_settings,
+                        "requested_experiment_id": requested_id,
+                    }
+                    if kelly
+                    else {}
+                ),
+                **(
+                    {
+                        "baseline_windows": TIMING_WINDOWS,
+                        "minute_five_settings": MINUTE_FIVE_SETTINGS,
+                        "model_settings": self._model_settings,
+                        "entry_order": "sha256-contract-v1",
+                    }
                     if simultaneous
-                    else "sha256-contract-v1",
-                    "model_tag": model.tag,
-                    "extra_cost_usd": str(extra_cost),
-                    "baseline_settings": self._baseline_settings,
-                    **(
-                        {
-                            "model_settings": self._model_settings,
-                            "requested_experiment_id": requested_id,
-                        }
-                        if kelly
-                        else {}
-                    ),
-                    **(
-                        {
-                            "baseline_windows": TIMING_WINDOWS,
-                            "minute_five_settings": MINUTE_FIVE_SETTINGS,
-                            "model_settings": self._model_settings,
-                            "entry_order": "sha256-contract-v1",
-                        }
-                        if simultaneous
-                        else {}
-                    ),
-                },
-            )
-            logger.info(
-                "Experiment {} (requested {}) | model {} | whole contracts from {} | shared bankroll limits | simultaneous={}",
-                experiment_id,
-                requested_id,
-                model.tag,
-                self.experiment["eligible_from"],
-                simultaneous,
-            )
+                    else {}
+                ),
+            }
+            if isinstance(model, UnavailableModel):
+                self.experiment = journal.saved_experiment(experiment_id)
+            else:
+                try:
+                    self.experiment = journal.start_experiment(experiment_id, configuration)
+                except ValueError as exc:
+                    if not isinstance(model, ExitCandidate) or "different configuration" not in str(
+                        exc
+                    ):
+                        raise
+                    self.experiment = journal.saved_experiment(experiment_id)
+                    self.model = UnavailableModel()
+                    logger.error("Model cohort changed; entries disabled, saved holdings recover")
+            if isinstance(self.model, UnavailableModel):
+                if self.experiment is not None:
+                    saved = self.experiment["configuration"]
+                    self.simultaneous = saved["assignment_version"] == "same-contract-v1"
+                    self.model = UnavailableModel(saved["model_tag"])
+                    self._baseline_settings = dict(saved["baseline_settings"])
+                    self._model_settings = dict(saved.get("model_settings", self._model_settings))
+                    if "model_settings" not in saved:
+                        self._model_settings.update(
+                            model_tag=saved["model_tag"], model={"unavailable": True}
+                        )
+                else:
+                    # No legitimate enrollment exists. Recover holdings without
+                    # inventing assignments or enabling baseline-only trading.
+                    self.simultaneous = False
+            if self.experiment is not None:
+                logger.info(
+                    "Experiment {} (requested {}) | model {} | whole contracts from {} | shared bankroll limits | simultaneous={}",
+                    experiment_id,
+                    requested_id,
+                    model.tag,
+                    self.experiment["eligible_from"],
+                    self.simultaneous,
+                )
         self.next_outcome_attempt = 0.0
         self.outcome_cursor = ""
         self.next_data_attempt = 0.0
@@ -671,6 +720,11 @@ class TradingBot:
     def _consider_entry(
         self, market, book, *, unavailable: bool, settings: dict, context: dict | None
     ) -> None:
+        if "model_tag" in settings and isinstance(self.model, UnavailableModel):
+            self.journal.record_opportunity(
+                market, book, "candidate_payoff_model_unavailable", settings=settings
+            )
+            return
         if self.journal.entry_attempted(market.slug, settings.get("timing_preset")):
             self.journal.record_opportunity(market, book, "already_attempted", settings=settings)
             return
@@ -914,6 +968,14 @@ class TradingBot:
                 )
             return None, settings
         try:
+            if isinstance(self.model, ExitCandidate) and "entry_filter" in settings:
+                if not self.model.compatible(
+                    horizon_seconds=market.horizon_seconds, start=market.start, settings=settings
+                ):
+                    self.journal.record_opportunity(
+                        market, book, "candidate_payoff_model_unavailable", outcome, settings
+                    )
+                    return None, settings
             if "model_tag" not in settings:
                 plan = self.exchange.buy_plan(
                     market,
@@ -948,7 +1010,42 @@ class TradingBot:
             if capture:
                 self.journal.record_opportunity(market, book, "risk_rejected", outcome, settings)
             return None, settings
+        if "entry_filter" in settings:
+            if not self._candidate_admission(plan, market, book, settings, stage="planned"):
+                return None, settings
         return plan, settings
+
+    def _candidate_admission(self, plan, market, book, settings, *, stage):
+        cost = plan.notional + estimate_fee(market.fee_coefficient, plan.quantity, plan.yes_price)
+        verdict = {"accepted": False, "reason": "payoff_model_unavailable"}
+        if isinstance(self.model, ExitCandidate) and self.model.compatible(
+            horizon_seconds=market.horizon_seconds, start=market.start, settings=settings
+        ):
+            verdict = self.model.admit(
+                midpoint=book.mid,
+                spread=book.asks[0][0] - book.bids[0][0],
+                outcome=plan.outcome,
+                quantity=plan.quantity,
+                entry_cost=cost,
+            )
+        settings["admission"] = {
+            **verdict,
+            "stage": stage,
+            "yes_price": str(plan.yes_price),
+            "quote_timestamp": book.timestamp.isoformat(),
+        }
+        key = entry_key(plan.slug, settings.get("timing_preset"))
+        if self.journal.get(key) is not None:
+            self.journal.update(key, settings=settings)
+        self.journal.record_opportunity(
+            market,
+            book,
+            "candidate_" + verdict["reason"],
+            plan.outcome,
+            settings,
+            intended_order=plan,
+        )
+        return verdict["accepted"]
 
     def _model_plan(self, market, book, budget, settings, bankroll):
         if market.horizon_seconds != 900:
@@ -1395,6 +1492,9 @@ class TradingBot:
             raise ExecutionRejected("executable_price_changed", plan, book, latest)
         if available < plan.quantity:
             raise ExecutionRejected("executable_depth_changed", plan, book, latest)
+        if plan.action == "BUY" and "entry_filter" in (settings or {}):
+            if not self._candidate_admission(plan, market, latest, settings, stage="final"):
+                raise ExecutionRejected("candidate_entry_rejected", plan, book, latest)
 
     def _valuation_book(self, slug):
         market = next(
@@ -1710,6 +1810,24 @@ def _minute_five_outcome(book, settings) -> str | None:
 
 def _unavailable_book(exc: Exception) -> bool:
     return isinstance(exc, ValueError) or retryable_api_error(exc, missing=True)
+
+
+def _saved_recovery_available(path):
+    """An invalid first-run model still fails before account or journal access."""
+    if not path.is_file():
+        return False
+    with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "trades" in tables and any(
+            row.get("state") in {"open", "reserved"} or row.get("pending")
+            for (raw,) in db.execute("SELECT data FROM trades")
+            for row in (json.loads(raw),)
+        ):
+            return True
+        return (
+            "experiments" in tables
+            and db.execute("SELECT 1 FROM experiments LIMIT 1").fetchone() is not None
+        )
 
 
 def _validate_experiment(

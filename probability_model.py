@@ -18,6 +18,8 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
+from exit_candidate import ExitCandidate, load_candidate
+
 
 @dataclass(frozen=True)
 class ProbabilityModel:
@@ -47,16 +49,29 @@ class ProbabilityModel:
         return Decimal(str(_sigmoid(score)))
 
 
-def load_model(path: Path) -> ProbabilityModel:
+def load_model(path: Path) -> ProbabilityModel | ExitCandidate:
     """Validate a versioned, finite JSON artifact; never execute serialized code."""
     try:
         raw = Path(path).read_bytes()
         if len(raw) > 65536:
             raise ValueError("Model artifact exceeds 64 KiB")
         artifact = json.loads(raw, object_pairs_hook=_unique_keys)
+        if isinstance(artifact, dict) and artifact.get("version") == 2:
+            return load_candidate(artifact)
         return _validated_model(artifact)
     except (OSError, UnicodeError, TypeError, KeyError, OverflowError) as exc:
         raise ValueError(f"Cannot load probability model: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class UnavailableModel:
+    """Retain requested model mode while saved-policy holdings recover."""
+
+    tag: str = "unavailable"
+
+    @property
+    def artifact(self):
+        return {"unavailable": True}
 
 
 def fit_model(journal_path: Path, output_path: Path) -> dict:
