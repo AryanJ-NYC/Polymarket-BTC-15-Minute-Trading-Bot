@@ -319,3 +319,13 @@ sockets alone do not prove acknowledged subscriptions, valid quotes or durable d
 Capture separate pre/post identities and old archive-prefix hashes before deploying.
 Rollback stops/disables only `polymarket-kraken-quotes.service`; retain the raw archive
 and release for reproducibility. Collection adds measurements, not profitability.
+
+
+## Public Deribit volatility archive
+
+The separate [DVOL collector](dvol-data.md) preserves free BTC minute-volatility
+responses every30 seconds, including every revision and actual response-completion
+receipt. It runs indefinitely in its own service/archive without changing the
+existing feeds. These observations support future model evaluation; they do not
+establish a profitable strategy. See that document for the capture contract,
+isolated deployment and exact-release QA checklist.
