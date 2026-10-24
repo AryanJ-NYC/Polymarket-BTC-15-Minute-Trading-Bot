@@ -370,8 +370,19 @@ the settlement day. Replayed evidence preserves that reserve. Actual order commi
 sale proceeds stay separate from pooled basis. A recovered order readback can
 leave actual fill order uncertain when other experiments sold in the meantime;
 that case records `unconfirmed_chronology` and unknown exact results instead of
-inferring exchange execution order from local receipt timestamps. Paused known
-markets retain per-window reconciliation, backoff and account-unavailable skips.
+inferring exchange execution order from local receipt timestamps.
+
+A complete, flat shared market with omitted provider fees can also pass admission
+when the provider's own
+before/after settlement identity is exact and its final realized amount differs
+from the recorded gross or fee-inclusive cashflows by at most five cents. All
+quantities, order fees, proceeds and shared resolution evidence must still agree.
+This allowance does not confirm exact P&L or rewrite saved accounting warnings.
+Favorable residuals add no daily capacity; an adverse residual is reserved once
+per market on its latest disputed closure's UTC day. If both gross and net fee
+conventions fit the allowance, use the worse plausible result. Exact matches
+retain the existing fee-inclusive result. Larger or incomplete disputes remain
+blocked. Paused known markets retain per-window reconciliation, backoff and account-unavailable skips.
 
 Use `by_settings` in the existing results output to compare experiments. These
 groups separate the explicit saved timing, baseline, exit, sizing and extra-cost
