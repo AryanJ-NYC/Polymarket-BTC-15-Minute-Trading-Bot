@@ -527,7 +527,9 @@ class TradingBot:
                 )
             logger.info("Entries paused: {} | stream {}", exc, self.books.health())
             return
-        if self.live and not unavailable:
+        # Minute-five validates the account in _consider_entry. A second read
+        # here can consume its entire five-second window before sizing.
+        if self.live and not unavailable and self._minute_five_admission is None:
             try:
                 self._account_guard()
             except (APIError, APIConnectionError, APITimeoutError) as exc:
@@ -1236,6 +1238,10 @@ class TradingBot:
             if market is not None and datetime.now(timezone.utc) < market.end:
                 continue
             setattr(self, attribute, None)
+            if horizon == 300 and self._minute_five_admission is not None:
+                # Its contract is already known. Discover the other horizon
+                # after this one-shot five-second decision has finished.
+                continue
             if horizon == 900 and (
                 self._five_minute_admission is not None or self._five_minute_waiting_snapshot
             ):
@@ -1484,8 +1490,9 @@ class TradingBot:
                         if (
                             self._five_minute_admission is not None
                             or self._five_minute_waiting_snapshot
+                            or self._minute_five_admission is not None
                         ):
-                            # Settle after initial snapshot waiting and this decision.
+                            # Settle after initial snapshot waiting and one-shot decisions.
                             # Retained live shares still pause entry; paper lots
                             # remain funded in the unchanged shared risk checks.
                             unavailable = (self.live and number(row["quantity"]) > 0) or unavailable
