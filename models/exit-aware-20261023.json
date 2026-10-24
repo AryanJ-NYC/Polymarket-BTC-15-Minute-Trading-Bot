@@ -1,0 +1,77 @@
+{
+  "payout": {
+    "coefficients": [
+      0.04725013059089293,
+      -0.03460588275566246,
+      -0.10072323499118585
+    ],
+    "gradient_inf": 2.9832806049540084e-06,
+    "means": [
+      -1.0578023462249553e-16,
+      0.009763918252290041
+    ],
+    "objective": 692.816372401532,
+    "scales": [
+      3.446893900890107,
+      0.03600730988950327
+    ]
+  },
+  "policy": {
+    "entry_filter": "expected-net-proceeds-positive-v1",
+    "features": [
+      "logit_side_midpoint",
+      "spread"
+    ],
+    "form": "sigmoid(logit(midpoint)+intercept+w_logit*z_logit+w_spread*z_spread)",
+    "horizon_seconds": 900,
+    "optimizer": {
+      "ftol": 1e-12,
+      "gradient_inf_limit": 0.0001,
+      "gtol": 1e-08,
+      "maxiter": 1000,
+      "method": "L-BFGS-B"
+    },
+    "quantity_convention": "ten-share-target; gate actual planned quantity and cent fees",
+    "quote_lag_seconds": 60,
+    "regularization": "sum_weighted_fractional_logloss+0.5*sum(all_three_coefficients**2)",
+    "settings": {
+      "entry_bankroll_fraction": "0.04",
+      "entry_end_seconds": 840,
+      "entry_start_seconds": 780,
+      "exit_policy": "model-loss-15-v1",
+      "extra_cost_usd": "0",
+      "kelly_multiplier": "0.25",
+      "sizing_policy": "quarter-kelly-v3",
+      "stop_loss": "-0.15"
+    },
+    "target_exit_observation_seconds": 60,
+    "target_quantity": "10",
+    "training": "strictly-prior-completed-contracts; train-only weighted population scaling"
+  },
+  "settlement": {
+    "coefficients": [
+      -0.07187903612368708,
+      0.06643072625228637,
+      -0.025310441183006144
+    ],
+    "gradient_inf": 2.8952950897012664e-05,
+    "means": [
+      0.05481324198708834,
+      0.00976391825229082
+    ],
+    "objective": 672.3052856035126,
+    "scales": [
+      3.4464580474012134,
+      0.036007309889504714
+    ]
+  },
+  "training": {
+    "contracts": 2838,
+    "cutoff": "2026-10-23T00:00:00+00:00",
+    "max_end": "2026-10-22T23:45:00+00:00",
+    "rows_sha256": "sha256:14b4e2d23370a0bf61b47d25c190ecada9be7cdd5c756d67ef90b9b28aabb2dd",
+    "side_weight": 0.5,
+    "source": "sha256:fea2abb32bf5bc824f47eb84458e038b235bad18dab279f136b45554afa9e66b"
+  },
+  "version": 2
+}

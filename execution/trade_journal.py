@@ -96,6 +96,20 @@ class TradeJournal:
             is not None
         )
 
+    def saved_experiment(self, experiment_id: str) -> dict | None:
+        """Recover an existing definition without inventing a new enrollment."""
+        if not self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiments'"
+        ).fetchone():
+            return None
+        row = self.db.execute(
+            "SELECT data FROM experiments WHERE id = ?", (experiment_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        definition = json.loads(row[0])
+        return self.start_experiment(experiment_id, definition["configuration"])
+
     def start_experiment(self, experiment_id: str, configuration: dict) -> dict:
         """Pin a comparison before its first whole contract, including no-entry runs."""
         if not isinstance(experiment_id, str) or not re.fullmatch(

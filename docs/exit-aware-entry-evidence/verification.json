@@ -1,0 +1,58 @@
+{
+  "fit_max_abs_difference": 0.0,
+  "future_label_mutation_invariant": true,
+  "independent_decimal_target_oracle": true,
+  "newer_book_coverage": {
+    "capture_end": "2026-10-24T00:22:23.485463+00:00",
+    "capture_start": "2026-10-23T22:55:29.123634+00:00",
+    "common_eligible": 1,
+    "common_exclusions": {
+      "no_fresh_book": 4
+    },
+    "contracts": 5,
+    "correction_signals": 0,
+    "excluded": {
+      "partial_capture": 13
+    },
+    "first_after_original_last_end": true,
+    "first_contract": "2026-10-23T23:00:00+00:00",
+    "last_contract_end": "2026-10-24T00:15:00+00:00",
+    "training_cutoff": "2026-10-23T00:00:00+00:00"
+  },
+  "original_summaries": 72,
+  "shipping_artifact_matches_independent_fit": true,
+  "source_hashes_unchanged": true,
+  "source_sha256": {
+    "exit_candidate.py": "abd5aa53e4caf64fde229667dd060fb7a5d4240f87f33915321e5a1f879196eb",
+    "models/exit-aware-20261023.json": "1a56d5bb70888da221fcb93926c1bdc6aac9342d886a39160faaed2b24ac99e6",
+    "tools/evaluate_exit_candidate.py": "c591e94f50624c6b323889534aac4c08fdecfeabe67937fc93161fb7780e5a07",
+    "tools/fit_exit_candidate.py": "05d758309f48b42db8a0e9d3b388c2dc531b569974f39e2ed843c8b24f22f632",
+    "logs/broad-kelly-20261023/compare.py": "b5f6eeaab39b3cff1f7bd23be35f26c066c4bc41fa480d9cf1ee7092d12f3fe4",
+    "logs/entry-economics-20261023/compare.py": "df98056ff355fbfa27dd8d9406bd9d7c7babf6e4a41446c7a4998568d68e850c",
+    "logs/exit-aware-kelly-20261023/PLAN.md": "c1f9a52ca8fed1c57db6ffee70e8c92c8fc1217343aa15fbdac7d3899633cf25",
+    "logs/exit-aware-kelly-20261023/admissions.jsonl.gz": "900b4f3c9d79babb464c441714eb774e1a1f8131ab9edffea94bff447d3babc6",
+    "logs/exit-aware-kelly-20261023/analysis.json": "4b650534e5b6136da9b07969eece2d301d3916a1d8721681c6440df8c565ac77",
+    "logs/exit-aware-kelly-20261023/books.py": "1f213f46ca47df74144beb604a890edd646e6abb7d6d18b571b5186b5d365f0c",
+    "logs/exit-aware-kelly-20261023/compare.py": "7ba57657adb313b67f6df90a3901d413a2b4450c1e6994a318d6c29c8b8b6af7",
+    "logs/exit-aware-kelly-20261023/forecasts.json": "5c03c2b8f3b3c7d9f8ccd26a223b1f013641eaf05e82d9258fe012a9c889bbcb",
+    "logs/exit-aware-kelly-20261023/models.json": "801d6bc6db48ea2dfe2f536e8051e24afbce9e9a9a72555d54e05231e1e75f55",
+    "logs/exit-aware-kelly-20261023/results.json": "023759f1e0b50724ebbba3aa0125b464ed8fb6b83869100c142abd5fd2bdfc60",
+    "logs/exit-aware-kelly-20261023/targets.jsonl.gz": "fea2abb32bf5bc824f47eb84458e038b235bad18dab279f136b45554afa9e66b",
+    "logs/exit-aware-kelly-20261023/trades.jsonl.gz": "042a78d4f0ba2c1327245cf971e5de24299cf45c5c1275722676f6dcf28e093c",
+    "logs/full-kelly-stop15-20261023/comparison.py": "0fca6f3255e9a17760bd8744b0a1535a410f1db7e03ceb9ad5209ed76b0bc8de",
+    "logs/market-correction-kelly-20261023/books.py": "6a12a970879136ce8fd879f5ebccb4752d93ec650e44abf3b58547a6f4765830",
+    "logs/market-correction-kelly-20261023/compare.py": "527132ea8989e230d0c209b9f92038f34ff53eaa9fd7b0c23cc0e0134dad2f2f",
+    "logs/market-correction-kelly-20261023/forecasts.json": "31270aa6e35f1cbaa3da74b3a92111e42c032019d86a6583410d71de3af44353",
+    "logs/market-correction-kelly-20261023/models.json": "7ea5e7e28c45ad812273c42cd4eaa9c43d4049d6d0b337167a1658f56f34415b",
+    "logs/market-correction-kelly-20261023/results.json": "d1dc4d8077619ba96b4c6f22eb23ca320dea2662ca570b943e513152eca0a1f1",
+    "logs/short-horizon-flow-20261023/backtest.py": "7a9eaa9693b0e37d9dea25fbcbb6ffa10ec8c5a442171b3da956066a3b1d2034",
+    "logs/short-horizon-flow-20261023/flow_features.py": "ac8c1e38ba408bc38de005915fc73a39bf0f16533f227cfa5038b2d8bdea665d",
+    "logs/sizing-comparison-20261023/deployed-model.json": "684b9d61b292724c2d0ee2c18ae72dc396b4ae7c0496fd46cf7f980d9b7570b8",
+    "logs/strategy-research-20261022/backtest.py": "cdd8cfd9efd9f4a54664cf140631f99da8a740fb80ea049357f606da703b2636",
+    "logs/venue-print-imbalance-20261023/capture/snapshot/flow.db": "f202a5923d2fe1d9625ecea211bb836540bd6672c8c796dafa837ce1feb0563d",
+    "logs/venue-print-imbalance-20261023/capture/snapshot/replay.db": "bab9beb2995eadf9287dd0855358059b4e4cd1d990c5d751c2b43312196db05f",
+    "logs/winning-algo-20261023/directional.py": "98104f8be8eae81cfd8fca539cd8598cba3d69469792df34c6de5cc4f9325eca",
+    "logs/winning-algo-20261023/replay.py": "55a1dbf5bef79a4029691cc9d0843b2a03168c5201a51d181a41d9a1046f3ae0"
+  },
+  "target_rows": 22908
+}

@@ -817,3 +817,9 @@ and stream generation when available. It excludes raw provider errors, order
 payloads and credentials. Old or unrecognized errors still report `unknown`.
 Minute-five continues to make one durable decision per contract: a rejected
 plan consumes the decision and does not introduce a retry.
+
+The paired exit-aware 15-minute model candidate, its frozen evidence, default
+retention decision and recovery/rollback behavior are documented in
+[exit-aware entries](docs/exit-aware-entries.md). It is available through the
+existing model loader; the existing continuous deployment configuration remains
+selected because newer recorded books provided no execution evidence for adoption.
