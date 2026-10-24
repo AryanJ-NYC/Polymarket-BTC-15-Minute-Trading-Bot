@@ -216,8 +216,12 @@ def test_stop_revalidates_after_slow_account_and_preview_work(
     TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
 
     assert triggered
-    assert creates(venue) == []
+    assert len(creates(venue)) == int(change == "adverse")
     row = journal.get(trade_id)
+    if change == "adverse":
+        assert row["state"] == "closed"
+        assert Decimal(row["proceeds"]) == Decimal("0.79")
+        return
     assert row["quantity"] == "2"
     assert row["pending"] is None
     assert row["order_id"] is None
