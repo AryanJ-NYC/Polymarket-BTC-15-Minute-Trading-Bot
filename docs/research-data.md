@@ -271,3 +271,51 @@ Feed references: [Markets WebSocket](https://docs.polymarket.us/api-reference/we
 [Kraken Futures WebSocket guide](https://docs.kraken.com/exchange/guides/futures/websockets),
 [Multi-M contract guide](https://support.kraken.com/articles/4844429542676-trading-multi-collateral-derivatives),
 [CF's licensed feed](https://docs.cfbenchmarks.com/api/websocket/intro/).
+
+## Public Kraken quote archive
+
+The trade feeds cannot supply simultaneous bid/ask observations when one aggressor
+side does not trade. `tools.collect_kraken_quotes` separately records free public
+Spot v2 BTC/USD `ticker` with `event_trigger: bbo` and Futures PF_XBTUSD `ticker`
+with heartbeat. It never opens an authenticated client, account or trading journal.
+
+```sh
+python -m tools.collect_kraken_quotes --output /path/to/private/quote-data
+```
+
+Each raw frame retains its actual local receipt clock, monotonic clock, session,
+sequence and connection generation, including acknowledgements, malformed frames,
+errors and disconnects. Frames exceeding the 256 KiB transport cap are rejected
+by the socket library and recorded as connection errors/gaps, not complete raw
+frames. The existing archive supplies explicit local queue gaps,
+exclusive output ownership, fsync and disk-reserve behavior. Provider timestamps
+are preserved as supplied; a heartbeat cannot refresh a quote's timestamp.
+
+Spot's `bbo` trigger concerns best-price changes, not every size-only change. Its
+`timestamp` is the ticker-data timestamp. Futures sends all ticker fields together,
+throttled to one second; its `time` is server UTC milliseconds, not a documented
+matching-engine quote-change time. Neither ticker supplies a sequence/checksum
+that proves all provider updates arrived. Equal provider timestamps are legitimate
+and are not a reason to deduplicate records. These streams do not prove executable
+cross-venue hedges or synchronized exchange clocks. Future backtests must use actual
+receipt availability, source-specific timing limits and retained gaps.
+
+Official contracts: [Spot ticker](https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/ticker),
+[Futures ticker](https://docs.kraken.com/exchange/api-reference/futures-websocket/ticker).
+
+On the existing droplet, install a reviewed immutable release with
+`deploy/install-quotes.sh`. Only `polymarket-kraken-quotes.service` is managed. Its
+release is `/opt/polymarket-us/quote-collector/releases/<commit>`, with separate
+`current` and `DEPLOYED_REVISION`; data is `/var/lib/polymarket-kraken-quotes`.
+A dedicated `polymarket-quotes` system user has no trading credentials. The unit
+makes `/etc/polymarket-us` and `/var/lib/polymarket-us` inaccessible, permits writes
+only in its own archive, uses owner-only output, 128 MiB RAM and 10% CPU limits,
+and has unlimited runtime with restart on failure. No automatic update follows
+repository merges. Existing research, partition and trading services are untouched.
+
+Check the source commit, actual process working directory, enabled/active unit,
+`status.json`, durable raw frames from both sources and local drop counts. Connected
+sockets alone do not prove acknowledged subscriptions, valid quotes or durable data.
+Capture separate pre/post identities and old archive-prefix hashes before deploying.
+Rollback stops/disables only `polymarket-kraken-quotes.service`; retain the raw archive
+and release for reproducibility. Collection adds measurements, not profitability.
