@@ -370,7 +370,13 @@ the settlement day. Replayed evidence preserves that reserve. Actual order commi
 sale proceeds stay separate from pooled basis. A recovered order readback can
 leave actual fill order uncertain when other experiments sold in the meantime;
 that case records `unconfirmed_chronology` and unknown exact results instead of
-inferring exchange execution order from local receipt timestamps.
+inferring exchange execution order from local receipt timestamps. A recovered
+readback can pass the complete settled cashflow proof when the whole market has
+no filled sells and its cashflows match exactly. Buy-only totals and payouts do
+not depend on execution order. This can confirm fee-inclusive results and admit
+new entries while preserving the saved delay flag, raw P&L and warnings. A filled
+sale anywhere in the market, or a nonzero cashflow residual, keeps delayed
+readbacks outside this proof.
 
 A complete, flat shared market with omitted provider fees can also pass admission
 when the provider's own

@@ -875,6 +875,7 @@ def _settled_cashflow_adjustment(
     ):
         return None
     quantity = payout = gross = fees = Decimal("0")
+    delayed_readback = has_filled_sell = False
     for row in rows:
         saved = row.get("settlement") or {}
         if (
@@ -894,18 +895,20 @@ def _settled_cashflow_adjustment(
         retained = entry = proceeds = Decimal("0")
         for order in row["orders"]:
             filled = number(order["quantity"])
-            if order["fee"] is None or order.get("readback_delayed") or filled < 0:
+            if order["fee"] is None or filled < 0:
                 return None
             fee = number(order["fee"])
             notional = number(order["notional"])
             if fee < 0 or not 0 <= notional <= filled:
                 return None
+            delayed_readback |= bool(order.get("readback_delayed"))
             fees += fee
             if order["action"] == "BUY":
                 retained += filled
                 entry += notional + fee
                 gross -= notional
             elif order["action"] == "SELL" and filled <= retained:
+                has_filled_sell |= filled > 0
                 retained -= filled
                 proceeds += notional - fee
                 gross += notional
@@ -923,6 +926,11 @@ def _settled_cashflow_adjustment(
             return None
         quantity += retained * (1 if row["outcome"] == "up" else -1)
         payout += row_payout
+    # Recovered buy-only cashflows do not depend on execution chronology.
+    # Any filled sale keeps delayed observations outside this proof, including
+    # when the delayed buy and sale belong to different experiment trades.
+    if delayed_readback and has_filled_sell:
+        return None
     provider_cost = amount(before["cost"])
     realized = amount(after["realized"])
     if before.get("fees") is not None:
@@ -956,9 +964,9 @@ def _settled_cashflow_adjustment(
     differences = {realized - gross - payout, realized - gross - payout + fees}
     if Decimal("0") in differences:
         return Decimal("0")
-    # The residual allowance is for shared market settlements; legacy single-lot
-    # evidence retains its exact proof and existing row-level fee exception.
-    if legacy_single_lot:
+    # Delayed readbacks require exact cashflows; do not combine that evidence
+    # exception with a residual allowance. Legacy lots also retain exact proof.
+    if legacy_single_lot or delayed_readback:
         return None
     bounded = [difference for difference in differences if abs(difference) <= tolerance]
     # If both gross and net conventions fit, reserve the worse plausible result.
