@@ -284,6 +284,14 @@ class Collector:
                 delay = min(60, delay * 2)
             await pause(self.stop, delay)
 
+    def desired_markets(self, now):
+        return {
+            slug
+            for slug, market in self.markets.items()
+            if stamp(market["assetPriceTerms"]["windowStart"]) <= now + 60
+            and stamp(market["assetPriceTerms"]["windowEnd"]) > now
+        }
+
     async def book_loop(self):
         delay = 1
         while not self.stop.is_set():
@@ -378,12 +386,7 @@ class Collector:
                 started = time.monotonic()
                 while not self.stop.is_set() and not broken.is_set():
                     now = time.time()
-                    desired = {
-                        slug
-                        for slug, market in self.markets.items()
-                        if stamp(market["assetPriceTerms"]["windowStart"]) <= now + 60
-                        and stamp(market["assetPriceTerms"]["windowEnd"]) > now
-                    }
+                    desired = self.desired_markets(now)
                     for request, (slug, subscription_type) in list(bindings.items()):
                         if slug not in desired:
                             await asyncio.wait_for(socket.unsubscribe(request), 10)
