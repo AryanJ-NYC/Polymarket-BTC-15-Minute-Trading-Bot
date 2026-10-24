@@ -262,6 +262,60 @@ to a retained release, copy that release's `REVISION` to `DEPLOYED_REVISION`, th
 start the same service and verify new records. Never delete the data directory or
 touch the live journal to repair this collector.
 
+## Hourly partition collection
+
+`tools.collect_partition_data` independently collects one hourly BTC/BRTI Range
+market and the two Above markets at its lower bound and upper bound plus $0.01.
+Their complementary outcomes support researching a three-leg settlement package.
+Collection does not evaluate prices, simulate orders or establish profitability.
+
+```bash
+python -m tools.collect_partition_data --env-file /path/to/.env.us --output logs/partition-data
+```
+
+For expiry T, discovery runs during the minute preceding T−30 minutes. Selection
+uses the latest complete paired event discovery received by that cutoff, with
+raw HTTP bodies, request/receipt clocks and pagination evidence retained. It
+chooses the lower median interior range sorted by numeric bounds and ID, then
+requires unique matching Above contracts and compatible settlement terms. Prices
+and liquidity do not influence selection, and failed selections have no fallback.
+Starting after a cutoff without a saved selection records a missed hour; it does
+not select retrospectively. The next eligible cutoff is automatic.
+
+The collector preserves `partition-state.json` durably and resumes saved selected
+identities after restart, with a new archive session recording the interruption.
+`partition_selection_prepared` precedes the checkpoint and does not prove a
+committed selection. `partition_selected` follows the durable checkpoint;
+`partition_selection_resumed` attests a saved selection on restart. Source
+proofs include the original session and sequence. A crash before checkpointing
+leaves that hour missed on restart, even when a preparation record survived.
+It maintains at most three active markets, with one book and one trade subscription
+per market. Selected identities continue through bounded resolution polling until
+resolved metadata is durably archived. The inherited raw socket bindings, explicit
+gaps, private daily gzip archive and disk reserve have the same meaning as above.
+There are no reference, spot or Futures tasks in this process.
+
+Deploy an exact committed archive to a new
+`/opt/polymarket-us/partition-collector/releases/COMMIT_SHA` directory, write its
+`REVISION`, and run `deploy/install-partition.sh` from that release. This installer
+manages only `polymarket-partition-data.service`, using a fresh environment and
+`/var/lib/polymarket-us/partition-data`. It has no runtime deadline, a 192 MiB
+memory limit and 15% CPU quota. Bot and existing research-collector deployments
+remain independent. To roll back, stop only this service, repoint its `current`
+symlink to a retained compatible release, restore that release's unit and
+`DEPLOYED_REVISION`, run `systemctl daemon-reload`, then start and verify the same
+service. Preserve its archive and checkpoint. On first-install failure with no
+previous release, stop this service and repair the failed installation; do not
+change either existing service.
+
+Inspect its separate `status.json`, current/deployed revision, process and raw
+records. `expected_subscription_count` describes the desired six subscriptions;
+inherited `subscribed` records prove SDK sends, not provider acknowledgements.
+Waiting for a cutoff, connection state or advancing local receipt times alone
+does not prove timely books, complete trades or usable execution evidence.
+Verify selected identities, actual bound messages and provider timestamps before
+using this dataset. `true_brti_available` remains false.
+
 Feed references: [Markets WebSocket](https://docs.polymarket.us/api-reference/websocket/markets),
 [typed crypto contracts](https://docs.polymarket.us/trader-guide/crypto-schema),
 [public reference API](https://docs.polymarket.us/api-reference/asset-prices/overview),
