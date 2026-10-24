@@ -1,0 +1,32 @@
+[Unit]
+Description=Public Kraken BTC spot and perpetual quote archive
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=polymarket-quotes
+Group=polymarket-quotes
+WorkingDirectory=/opt/polymarket-us/quote-collector/current
+ExecStart=/opt/polymarket-us/quote-collector/current/.venv/bin/python -m tools.collect_kraken_quotes --output /var/lib/polymarket-kraken-quotes
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+Restart=on-failure
+RestartSec=15s
+KillSignal=SIGINT
+TimeoutStopSec=60
+MemoryMax=128M
+CPUQuota=10%
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/polymarket-kraken-quotes
+InaccessiblePaths=/etc/polymarket-us /var/lib/polymarket-us
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
