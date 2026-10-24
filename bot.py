@@ -1082,7 +1082,15 @@ class TradingBot:
 
     def _execute(
         self, plan, market, book, *, streamed: bool, trade_id: str, settings: dict | None
-    ) -> None:
+    ) -> bool:
+        """Return true only when a SELL quote can be refreshed without resubmission."""
+
+        def retry_exit(exc):
+            return (
+                plan.action == "SELL"
+                and isinstance(exc, ExecutionRejected)
+                and quote_reason(exc) in {"executable_price_changed", "executable_depth_changed"}
+            )
 
         def record_rejection(exc):
             if plan.action == "BUY" and (settings or {}).get("exit_policy") in {
@@ -1118,7 +1126,7 @@ class TradingBot:
             )
             if not isinstance(exc, ValueError):
                 self._wait_for_data(exc, plan.slug if plan.action == "SELL" else None)
-            return
+            return retry_exit(exc)
         if self.live:
             try:
                 order_id = self.exchange.submit(plan, validate=validate)
@@ -1135,12 +1143,12 @@ class TradingBot:
                     if getattr(exc.cause, "status_code", None) in {401, 403}:
                         raise exc.cause from None
                     self._wait_for_data(exc.cause)
-                return
+                return retry_exit(exc.cause)
             except OrderPreflightError as exc:
                 self.journal.finish_order(trade_id, Decimal("0"), Decimal("0"), Decimal("0"))
                 record_rejection(exc)
                 logger.info("Order preflight rejected: {}", exc)
-                return
+                return False
             except Exception as exc:
                 raise RuntimeError(
                     "An order submission has an unknown outcome; reconcile before restarting. "
@@ -1153,12 +1161,13 @@ class TradingBot:
                 if not isinstance(exc, OrderPending) and not retryable_api_error(exc, missing=True):
                     raise
                 self._wait_for_order(order_id, exc)
-                return
+                return False
             quantity, notional, fee = order_fill(order, plan)
         else:
             quantity, notional = plan.quantity, plan.notional
             fee = estimate_fee(market.fee_coefficient, quantity, plan.yes_price)
         self._finish_order(plan, quantity, notional, fee, trade_id=trade_id)
+        return False
 
     def _finish_order(
         self, plan, quantity, notional, fee, *, trade_id: str, readback_delayed=False
@@ -1373,7 +1382,10 @@ class TradingBot:
             current = self.exchange.sell_plan(market, latest, plan.outcome, plan.quantity)
             yes_price = current.yes_price
             available = current.quantity
-        if yes_price != plan.yes_price:
+        favorable_entry = plan.action == "BUY" and (
+            yes_price < plan.yes_price if plan.outcome == "up" else yes_price > plan.yes_price
+        )
+        if yes_price != plan.yes_price and not favorable_entry:
             raise ExecutionRejected("executable_price_changed", plan, book, latest)
         if available < plan.quantity:
             raise ExecutionRejected("executable_depth_changed", plan, book, latest)
@@ -1496,31 +1508,6 @@ class TradingBot:
                 if market is None:
                     unavailable = True
                     continue
-                try:
-                    book = self.books.book(market)
-                    streamed = True
-                except StreamUnavailable:
-                    if monotonic() < self.next_rest_attempt.get(row["slug"], 0):
-                        unavailable = True
-                        continue
-                    self.next_rest_attempt[row["slug"]] = monotonic() + 3
-                    book = self.exchange.book(market)
-                    streamed = False
-                    logger.info("Position {} using validated REST fallback", row["slug"])
-                sellable, net_value = self.exchange.exit_value(
-                    market, book, row["outcome"], number(row["quantity"])
-                )
-                remaining = number(row["quantity"]) - sellable
-                logger.info(
-                    "Exit depth {} | sellable {} | remainder {} | net ${:.4f}",
-                    row["slug"],
-                    sellable,
-                    remaining,
-                    net_value,
-                )
-                plan = self.exchange.sell_plan(
-                    market, book, row["outcome"], number(row["quantity"])
-                )
             except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
                 if not _unavailable_book(exc):
                     raise
@@ -1528,28 +1515,71 @@ class TradingBot:
                 self._wait_for_data(exc, slug)
                 unavailable = True
                 continue
-            # Allocate cost and prior proceeds to the quoted slice only. With
-            # full depth this is the whole trade's fee-inclusive return.
-            fraction = sellable / number(row["quantity"])
-            change = (number(row["proceeds"]) * fraction + net_value) / (
-                number(row["entry_cost"]) * fraction
-            ) - 1
-            logger.info(
-                "Exit return {} | {} return {:.2%}",
-                row["slug"],
-                "position" if remaining == 0 else "slice (remainder unpriced)",
-                change,
-            )
-            settings = row.get("settings") or self._baseline_settings
-            if change <= number(
-                settings.get("stop_loss", self._baseline_settings["stop_loss"])
-            ) or (
-                settings.get("exit_policy") != "model-loss-15-v1"
-                and remaining == 0
-                and plan.quantity == number(row["quantity"])
-                and change
-                >= number(settings.get("take_profit", self._baseline_settings["take_profit"]))
-            ):
+            # Only a known local quote rejection may refresh once. An actual
+            # submission (even zero/partial/pending) ends this tick for the lot.
+            for _ in range(2):
+                try:
+                    try:
+                        book = self.books.book(market)
+                        streamed = True
+                    except StreamUnavailable:
+                        if monotonic() < self.next_rest_attempt.get(row["slug"], 0):
+                            unavailable = True
+                            break
+                        self.next_rest_attempt[row["slug"]] = monotonic() + 3
+                        book = self.exchange.book(market)
+                        streamed = False
+                        logger.info("Position {} using validated REST fallback", row["slug"])
+                    sellable, net_value = self.exchange.exit_value(
+                        market, book, row["outcome"], number(row["quantity"])
+                    )
+                    remaining = number(row["quantity"]) - sellable
+                    logger.info(
+                        "Exit depth {} | sellable {} | remainder {} | net ${:.4f}",
+                        row["slug"],
+                        sellable,
+                        remaining,
+                        net_value,
+                    )
+                    plan = self.exchange.sell_plan(
+                        market, book, row["outcome"], number(row["quantity"])
+                    )
+                except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
+                    if not _unavailable_book(exc):
+                        raise
+                    slug = (
+                        None
+                        if datetime.now(timezone.utc) >= parse_time(row["end"])
+                        else row["slug"]
+                    )
+                    self._wait_for_data(exc, slug)
+                    unavailable = True
+                    break
+
+                # Allocate cost and prior proceeds to the quoted slice only. With
+                # full depth this is the whole trade's fee-inclusive return.
+                fraction = sellable / number(row["quantity"])
+                change = (number(row["proceeds"]) * fraction + net_value) / (
+                    number(row["entry_cost"]) * fraction
+                ) - 1
+                logger.info(
+                    "Exit return {} | {} return {:.2%}",
+                    row["slug"],
+                    "position" if remaining == 0 else "slice (remainder unpriced)",
+                    change,
+                )
+                settings = row.get("settings") or self._baseline_settings
+                triggered = change <= number(
+                    settings.get("stop_loss", self._baseline_settings["stop_loss"])
+                ) or (
+                    settings.get("exit_policy") != "model-loss-15-v1"
+                    and remaining == 0
+                    and plan.quantity == number(row["quantity"])
+                    and change
+                    >= number(settings.get("take_profit", self._baseline_settings["take_profit"]))
+                )
+                if not triggered:
+                    break
                 if self.live:
                     try:
                         account = self._account_guard()
@@ -1561,7 +1591,7 @@ class TradingBot:
                         logger.warning(
                             "Exit paused: account read unavailable ({})", type(exc).__name__
                         )
-                        continue
+                        break
                     position = account.positions[row["slug"]]
                     available = abs(number(position["qtyAvailableDecimal"]))
                     if available < plan.quantity:
@@ -1569,7 +1599,7 @@ class TradingBot:
                             "Bot position is not fully available for the requested exit"
                         )
                 self.journal.reserve_exit(row["trade_id"], plan)
-                self._execute(
+                retry = self._execute(
                     plan,
                     market,
                     book,
@@ -1577,6 +1607,10 @@ class TradingBot:
                     trade_id=row["trade_id"],
                     settings=row.get("settings"),
                 )
+
+                if not retry:
+                    break
+                row = self.journal.get(row["trade_id"])
 
         return unavailable
 

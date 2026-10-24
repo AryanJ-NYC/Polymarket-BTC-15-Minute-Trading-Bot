@@ -132,7 +132,7 @@ def test_take_profit_requires_whole_holding_in_the_best_price_ioc(
 @pytest.mark.parametrize("source", ["stream", "rest"])
 @pytest.mark.parametrize("stage", ["account", "preview"])
 @pytest.mark.parametrize("change", ["missing_side", "price", "expiry"])
-def test_slow_work_revalidates_one_sided_exits_before_any_create(
+def test_slow_work_revalidates_one_sided_exits_and_bounds_quote_refresh(
     venue, journal, books, stream_feed, clock, source, stage, change
 ):
     market = seed_position(venue, journal, books)
@@ -153,6 +153,7 @@ def test_slow_work_revalidates_one_sided_exits_before_any_create(
                 payload.update(exit_book(venue, "down"))
             else:
                 payload.update(exit_book(venue, price="0.98"))
+                venue.fill_price = "0.98"
             if source == "stream" and change != "expiry":
                 stream_feed.publish(bids=payload["bids"], offers=payload["offers"])
         if request.url.path.endswith("/book"):
@@ -163,6 +164,15 @@ def test_slow_work_revalidates_one_sided_exits_before_any_create(
     TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
 
     assert triggered
+    if source == "stream" and change == "price":
+        creates = [body for _, path, body in venue.calls if path == "/v1/orders"]
+        assert len(creates) == 1
+        assert creates[0]["price"]["value"] == "0.98"
+        row = journal.get(market.slug)
+        assert row["pending"] is None
+        assert Decimal(row["quantity"]) == Decimal("0.5")
+        assert Decimal(row["proceeds"]) == Decimal("0.48")
+        return
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
     assert any(path == "/v1/order/preview" for _, path, _ in venue.calls) is (stage == "preview")
     row = journal.get(market.slug)

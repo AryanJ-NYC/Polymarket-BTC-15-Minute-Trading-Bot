@@ -119,6 +119,12 @@ Temporary read failures retain known order IDs and recover automatically.
   deadline after slow work and immediately before submission, including after
   preview. Known preflight rejections safely release the reserved order;
   ambiguous create outcomes remain pending and are never retried automatically.
+  A favorable BUY quote can pass within the original reserved limit; price,
+  depth, policy, and refreshed model-edge checks still apply. After a SELL is
+  proven unsubmitted because price or depth changed, refresh its quote once in
+  the same tick and recheck the saved exit trigger and account availability.
+  Any submitted IOC, including zero or partial fills, ends that tick's attempt
+  for the experiment trade. Persistent churn waits for the next tick.
 - Reserves a UTC daily loss budget of **10% of current bankroll** against recorded
   net realized losses plus the full cost of still-open positions and the next order.
   Realized profits replenish this budget. This is
