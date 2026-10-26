@@ -556,6 +556,16 @@ Continuous operation has no contract-count shutdown. Start the service without
 Keep one runner and the existing journal backup/recovery procedure. A code merge
 alone does not prove deployment, policy decisions, real fills or settlements.
 
+To stop new entries in selected slots, repeat `--disable-entry SLOT`. Choices
+are `earlier`, `current`, `later`, `minute-five`, `five-minute`, and `model-current`.
+`current` selects only the baseline; `model-current` selects the model, including
+model-only and assigned comparisons. Existing holdings and pending orders still
+reconcile, exit and settle using their saved settings. One-shot policies record
+`strategy_disabled` instead of claiming an admission or waiting for a snapshot.
+These operator restrictions do not rewrite an experiment's immutable definition;
+report their activation time because they change which opportunities can trade.
+Removing a flag permits future entries; consumed one-shot decisions stay consumed.
+
 ## Probability model experiment
 
 Fit a regularized logistic model from the existing journal's observed midpoint,
