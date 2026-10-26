@@ -164,6 +164,15 @@ quiet-window maintenance point. It selects the paired artifact and a new
 immutable model cohort; it preserves simultaneous strategies, the persistent
 journal and all shared limits. Future ordinary releases retain that override.
 
+The current versioned command disables new `minute-five`, baseline `current`,
+and `five-minute` entries at the operator's request after their negative confirmed
+all-history results. Earlier/later baseline entries and the exit-aware model stay
+enabled. Deploy support for `--disable-entry` before installing this command;
+an older runner will reject it. Install the drop-in through the same flat,
+quiet-window procedure above. This is an entry restriction, not a liquidation or
+accounting repair. Record activation separately from the old enrollment; the
+remaining strategies now have different shared-capacity opportunities.
+
 ## Automatic updates
 
 The root-owned `polymarket-update.timer` checks `main` every minute. For each

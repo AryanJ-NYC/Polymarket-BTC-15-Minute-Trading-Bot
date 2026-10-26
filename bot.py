@@ -93,6 +93,13 @@ def main() -> int:
         help="Run three baseline timing entries and one model entry in each contract",
     )
     parser.add_argument(
+        "--disable-entry",
+        action="append",
+        choices=ENTRY_SLOTS,
+        default=[],
+        help="Disable new entries for this slot; repeat as needed. Saved holdings still recover.",
+    )
+    parser.add_argument(
         "--extra-cost-usd",
         default="0",
         help="Additional modeled cost per entry, charged once in EV",
@@ -178,6 +185,7 @@ def main() -> int:
             context=context,
             experiment_id=args.experiment_id,
             simultaneous=args.simultaneous,
+            disabled_entries=frozenset(args.disable_entry),
         )
         logger.info("Starting {} mode; press Ctrl+C to stop", mode_name.upper())
         duration = args.duration or (15 if args.once else None)
@@ -242,8 +250,14 @@ class TradingBot:
         experiment_id: str | None = None,
         simultaneous: bool = False,
         kelly: bool | None = None,
+        disabled_entries: frozenset[str] = frozenset(),
     ):
         _validate_experiment(experiment_id, model, simultaneous)
+        self.disabled_entries = frozenset(disabled_entries)
+        if self.disabled_entries - set(ENTRY_SLOTS):
+            raise ValueError("Unknown disabled entry slot")
+        if self.disabled_entries:
+            logger.warning("New entries disabled for: {}", ", ".join(sorted(self.disabled_entries)))
         kelly = model is not None if kelly is None else kelly
         if kelly and model is None:
             raise ValueError("Kelly sizing requires a model")
@@ -648,6 +662,11 @@ class TradingBot:
             self.market.slug, "minute-five"
         ):
             return
+        if self._entry_disabled(settings):
+            self.journal.record_opportunity(
+                self.market, None, "strategy_disabled", settings=settings
+            )
+            return
         # Commit before quote/account work. A crash, pause or skip consumes this
         # decision, while a later strategy still owns its separate entry slot.
         self.journal.record_opportunity(self.market, None, "decision_started", settings=settings)
@@ -671,6 +690,12 @@ class TradingBot:
         if self.journal.entry_decided(market.slug, "five-minute"):
             return
         elapsed = (datetime.now(timezone.utc) - market.start).total_seconds()
+        if self._entry_disabled(settings):
+            if elapsed >= settings["entry_start_seconds"]:
+                self.journal.record_opportunity(
+                    market, None, "strategy_disabled", settings=settings
+                )
+            return
         if elapsed >= settings["entry_end_seconds"]:
             self.journal.record_opportunity(market, None, "missed_window", settings=settings)
             return
@@ -720,6 +745,9 @@ class TradingBot:
     def _consider_entry(
         self, market, book, *, unavailable: bool, settings: dict, context: dict | None
     ) -> None:
+        if self._entry_disabled(settings):
+            self.journal.record_opportunity(market, book, "strategy_disabled", settings=settings)
+            return
         if "model_tag" in settings and isinstance(self.model, UnavailableModel):
             self.journal.record_opportunity(
                 market, book, "candidate_payoff_model_unavailable", settings=settings
@@ -911,6 +939,12 @@ class TradingBot:
             and self._in_entry_window(settings)
         ):
             self.journal.record_opportunity(self.market, None, decision, settings=settings)
+
+    def _entry_disabled(self, settings: dict) -> bool:
+        slot = (
+            "model-current" if "model_tag" in settings else settings.get("timing_preset", "current")
+        )
+        return slot in self.disabled_entries
 
     def _entry_plan(self, market, book, outcome, account, settings):
         capture = self._in_entry_window(settings, market)
@@ -1887,6 +1921,7 @@ FIVE_MINUTE_SETTINGS = {
 }
 
 TIMING_WINDOWS = (("earlier", 720, 780), ("current", 780, 840), ("later", 840, 870))
+ENTRY_SLOTS = ("earlier", "current", "later", "minute-five", "five-minute", "model-current")
 ROOT = Path(__file__).resolve().parent
 
 
