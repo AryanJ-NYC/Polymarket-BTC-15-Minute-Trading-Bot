@@ -1,4 +1,4 @@
-"""Continuously archive BTC 5m/15m books/trades, reference candles and Kraken trades.
+"""Archive BTC 5m/15m books/trades, reference candles and Kraken spot/futures trades.
 
 Run ``python -m tools.collect_research_data --env-file PATH --output DIRECTORY``.
 Reference candles are NOT licensed raw BRTI. No trading journal is opened.
@@ -22,6 +22,7 @@ import time
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import httpx
@@ -69,6 +70,7 @@ async def collect(env_file: Path, output: Path) -> None:
                 asyncio.create_task(collector.reference_loop()),
                 asyncio.create_task(collector.book_loop()),
                 asyncio.create_task(collector.spot_loop()),
+                asyncio.create_task(collector.futures_loop()),
                 asyncio.create_task(collector.monitor_loop()),
                 asyncio.create_task(stop.wait()),
             ]
@@ -119,6 +121,18 @@ class Collector:
         self.last_spot_snapshot = None
         self.last_spot_trade = None
         self.last_spot_trade_timestamp = None
+        self.futures_connected = False
+        self.futures_trade_subscribed = False
+        self.futures_heartbeat_subscribed = False
+        self.futures_generation = 0
+        self.last_futures_message = None
+        self.last_futures_message_monotonic = None
+        self.last_futures_snapshot = None
+        self.last_futures_trade = None
+        self.last_futures_trade_timestamp = None
+        self.last_futures_liquidation = None
+        self.last_futures_liquidation_timestamp = None
+        self.last_futures_heartbeat = None
 
     async def metadata_loop(self):
         delay = 1
@@ -567,6 +581,217 @@ class Collector:
                         self.last_spot_trade_timestamp = trade["timestamp"]
         return payload
 
+    async def futures_loop(self):
+        delay = 1
+        while not self.stop.is_set():
+            self.archive.check()
+            self.futures_generation += 1
+            generation = self.futures_generation
+            self.last_futures_message_monotonic = None
+            healthy_since = None
+            gap_reason = "connection_closed_or_error"
+            self.archive.emit(
+                "futures_connection_attempt",
+                source=FUTURES_SOURCE,
+                generation=generation,
+                endpoint=FUTURES_URL,
+                product_id=FUTURES_PRODUCT,
+            )
+            try:
+                async with connect(
+                    FUTURES_URL,
+                    open_timeout=10,
+                    close_timeout=5,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_size=1024 * 1024,
+                    max_queue=16,
+                ) as socket:
+                    self.futures_connected = True
+                    self.archive.emit(
+                        "futures_connected", source=FUTURES_SOURCE, generation=generation
+                    )
+                    for request in (
+                        {"event": "subscribe", "feed": "trade", "product_ids": [FUTURES_PRODUCT]},
+                        {"event": "subscribe", "feed": "heartbeat"},
+                    ):
+                        await asyncio.wait_for(socket.send(json.dumps(request)), 10)
+                        self.archive.emit(
+                            "futures_subscription_sent",
+                            source=FUTURES_SOURCE,
+                            generation=generation,
+                            payload=request,
+                        )
+                    started = time.monotonic()
+                    ack_deadline = started + FUTURES_ACK_SECONDS
+                    while not self.stop.is_set():
+                        self.archive.check()
+                        subscribed = (
+                            self.futures_trade_subscribed and self.futures_heartbeat_subscribed
+                        )
+                        last_message = self.last_futures_message_monotonic
+                        idle_deadline = (
+                            started if last_message is None else last_message
+                        ) + FUTURES_IDLE_SECONDS
+                        deadline = idle_deadline if subscribed else min(ack_deadline, idle_deadline)
+                        try:
+                            raw = await asyncio.wait_for(
+                                socket.recv(), max(0, deadline - time.monotonic())
+                            )
+                        except asyncio.TimeoutError:
+                            gap_reason = "idle_timeout" if subscribed else "subscription_timeout"
+                            break
+                        payload = self.record_futures_message(raw, generation)
+                        if not isinstance(payload, dict):
+                            gap_reason = "malformed_message"
+                            break
+                        if payload.get("event") in (
+                            "error",
+                            "subscribed_failed",
+                            "unsubscribed",
+                            "unsubscribed_failed",
+                        ):
+                            gap_reason = "subscription_rejected_or_removed"
+                            self.archive.emit(
+                                "futures_error",
+                                source=FUTURES_SOURCE,
+                                generation=generation,
+                                reason=gap_reason,
+                            )
+                            break
+                        if (
+                            self.futures_trade_subscribed
+                            and self.futures_heartbeat_subscribed
+                            and healthy_since is None
+                        ):
+                            healthy_since = time.monotonic()
+            except Exception as exc:
+                self.archive.check()
+                self.archive.emit(
+                    "futures_error",
+                    source=FUTURES_SOURCE,
+                    generation=generation,
+                    error_class=type(exc).__name__,
+                )
+            finally:
+                self.futures_connected = False
+                self.futures_trade_subscribed = False
+                self.futures_heartbeat_subscribed = False
+                self.archive.emit(
+                    "futures_connection_gap",
+                    source=FUTURES_SOURCE,
+                    generation=generation,
+                    reason="collector_stopping" if self.stop.is_set() else gap_reason,
+                )
+            if healthy_since is not None and time.monotonic() - healthy_since >= 30:
+                delay = 1
+            await pause(self.stop, delay)
+            delay = min(30, delay * 2)
+
+    def record_futures_message(self, raw, generation):
+        received_ns, monotonic_ns = time.time_ns(), time.monotonic_ns()
+        received_at = (
+            datetime.fromtimestamp(received_ns // 1_000_000_000, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+            + f".{received_ns % 1_000_000_000:09d}+00:00"
+        )
+        fields = (
+            {"raw_text": raw}
+            if isinstance(raw, str)
+            else {"raw_bytes_base64": base64.b64encode(raw).decode("ascii")}
+        )
+        payload = None
+        try:
+            payload = json.loads(raw, parse_float=str, parse_constant=reject_json_constant)
+            fields["payload"] = payload
+        except (ValueError, UnicodeError, RecursionError):
+            fields["parse_error"] = "invalid_json"
+        feed = payload.get("feed") if isinstance(payload, dict) else None
+        if generation != self.futures_generation or not self.futures_connected:
+            binding_status = "inactive_generation"
+        elif not isinstance(payload, dict):
+            binding_status = "invalid_payload"
+        elif payload.get("event") == "subscribed":
+            matches = (
+                feed == "trade"
+                and payload.get("product_ids") == [FUTURES_PRODUCT]
+                and "product_id" not in payload
+                or feed == "heartbeat"
+                and "product_ids" not in payload
+                and "product_id" not in payload
+            )
+            binding_status = (
+                "subscription_ack"
+                if matches and "error" not in payload
+                else "subscription_mismatch"
+            )
+        elif "event" in payload:
+            binding_status = "control_message"
+        elif feed in ("trade", "trade_snapshot"):
+            if payload.get("product_id") != FUTURES_PRODUCT:
+                binding_status = "product_mismatch"
+            elif not self.futures_trade_subscribed:
+                binding_status = "unacknowledged_feed"
+            elif feed == "trade":
+                binding_status = "valid_trade" if futures_trade(payload) else "invalid_payload"
+            elif isinstance(payload.get("trades"), list) and all(
+                futures_trade(trade) for trade in payload["trades"]
+            ):
+                binding_status = "valid_snapshot"
+            else:
+                binding_status = "invalid_payload"
+        elif feed == "heartbeat":
+            if not self.futures_heartbeat_subscribed:
+                binding_status = "unacknowledged_feed"
+            elif (
+                type(payload.get("time")) is int
+                and payload["time"] >= 0
+                and "product_id" not in payload
+                and "product_ids" not in payload
+            ):
+                binding_status = "valid_heartbeat"
+            else:
+                binding_status = "invalid_payload"
+        else:
+            binding_status = "unknown_feed"
+        receipt = self.archive.emit(
+            "futures_message",
+            source=FUTURES_SOURCE,
+            generation=generation,
+            binding_status=binding_status,
+            received_ns=received_ns,
+            received_at=received_at,
+            received_monotonic_ns=monotonic_ns,
+            **fields,
+        )
+        # Queue acceptance is not an fsync acknowledgement. Unknown/mismatched
+        # frames remain evidence, but cannot keep this source's health fresh.
+        if receipt is not None and binding_status in (
+            "subscription_ack",
+            "valid_trade",
+            "valid_snapshot",
+            "valid_heartbeat",
+        ):
+            self.last_futures_message = received_at
+            self.last_futures_message_monotonic = monotonic_ns / 1_000_000_000
+            if binding_status == "subscription_ack":
+                if feed == "trade":
+                    self.futures_trade_subscribed = True
+                else:
+                    self.futures_heartbeat_subscribed = True
+            elif binding_status == "valid_snapshot":
+                self.last_futures_snapshot = received_at
+            elif binding_status == "valid_heartbeat":
+                self.last_futures_heartbeat = received_at
+            else:
+                self.last_futures_trade = received_at
+                self.last_futures_trade_timestamp = payload["time"]
+                if payload["type"] == "liquidation":
+                    self.last_futures_liquidation = received_at
+                    self.last_futures_liquidation_timestamp = payload["time"]
+        return payload
+
     async def monitor_loop(self):
         while not self.stop.is_set():
             self.archive.check()
@@ -589,6 +814,21 @@ class Collector:
                     "last_snapshot_received_at": self.last_spot_snapshot,
                     "last_trade_received_at": self.last_spot_trade,
                     "last_trade_provider_timestamp": self.last_spot_trade_timestamp,
+                },
+                "futures": {
+                    "source": FUTURES_SOURCE,
+                    "product_id": FUTURES_PRODUCT,
+                    "connected": self.futures_connected,
+                    "trade_subscribed": self.futures_trade_subscribed,
+                    "heartbeat_subscribed": self.futures_heartbeat_subscribed,
+                    "generation": self.futures_generation,
+                    "last_message_received_at": self.last_futures_message,
+                    "last_heartbeat_received_at": self.last_futures_heartbeat,
+                    "last_snapshot_received_at": self.last_futures_snapshot,
+                    "last_trade_received_at": self.last_futures_trade,
+                    "last_trade_provider_timestamp": self.last_futures_trade_timestamp,
+                    "last_liquidation_received_at": self.last_futures_liquidation,
+                    "last_liquidation_provider_timestamp": self.last_futures_liquidation_timestamp,
                 },
                 "unresolved_market_count": len(self.pending),
                 "true_brti_available": False,
@@ -790,6 +1030,34 @@ def research_market(market):
         return False
 
 
+def futures_trade(payload):
+    """Conservative health shape only; preserve all raw values in the archive."""
+    if not isinstance(payload, dict):
+        return False
+    if not (
+        payload.get("feed") == "trade"
+        and payload.get("product_id") == FUTURES_PRODUCT
+        and isinstance(payload.get("uid"), str)
+        and bool(payload["uid"])
+        and payload.get("side") in ("buy", "sell")
+        and payload.get("type") in ("fill", "liquidation", "termination", "block")
+        and type(payload.get("time")) is int
+        and payload["time"] >= 0
+        and type(payload.get("seq")) is int
+        and payload["seq"] >= 0
+    ):
+        return False
+    try:
+        return all(
+            type(payload.get(field)) in (int, str)
+            and Decimal(payload[field]).is_finite()
+            and Decimal(payload[field]) > 0
+            for field in ("price", "qty")
+        )
+    except InvalidOperation:
+        return False
+
+
 def require_get(request):
     if request.method != "GET":
         raise RuntimeError("Research collector only permits GET HTTP requests")
@@ -837,6 +1105,11 @@ TRADE_SUBSCRIPTION = "SUBSCRIPTION_TYPE_TRADE"
 SPOT_SOURCE = "kraken_spot_btcusd_trade"
 SPOT_ACK_SECONDS = 10
 SPOT_IDLE_SECONDS = 35
+FUTURES_SOURCE = "kraken_futures_pf_xbtusd_trade"
+FUTURES_URL = "wss://futures.kraken.com/ws/v1"
+FUTURES_PRODUCT = "PF_XBTUSD"
+FUTURES_ACK_SECONDS = 10
+FUTURES_IDLE_SECONDS = 35
 HORIZONS = {"5m": 300, "15m": 900}
 QUEUE_SIZE = 4096
 BATCH_SECONDS = 1.0

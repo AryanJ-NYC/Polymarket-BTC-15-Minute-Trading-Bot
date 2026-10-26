@@ -490,10 +490,12 @@ def test_delayed_resolution_backlog_does_not_delay_current_subscriptions(tmp_pat
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("trigger", ["signal", "failure", "spot_failure"])
+@pytest.mark.parametrize(
+    "trigger", ["signal", "failure", "spot_failure", "futures_failure", "futures_task_failure"]
+)
 def test_collect_cancels_blocked_metadata_and_drains_archive(tmp_path, monkeypatch, trigger):
     async def scenario():
-        blocked, cancelled, spot_failed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        blocked, cancelled, provider_failed = asyncio.Event(), asyncio.Event(), asyncio.Event()
         signal_callbacks, closed = {}, []
         loop = asyncio.get_running_loop()
         monkeypatch.setattr(
@@ -532,43 +534,52 @@ def test_collect_cancels_blocked_metadata_and_drains_archive(tmp_path, monkeypat
             close=lambda: closed.append("exchange"),
         )
         monkeypatch.setattr(collector.PolymarketClient, "connect", lambda _: exchange)
-        spot = SpotSocket()
-        if trigger == "spot_failure":
+        spot, futures = SpotSocket(), SpotSocket()
+        if trigger in ("spot_failure", "futures_failure"):
 
-            def fail_spot():
-                spot_failed.set()
-                raise OSError("spot provider unavailable")
+            def fail_provider():
+                provider_failed.set()
+                raise OSError("provider unavailable")
 
-            spot.messages = [fail_spot]
-        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: spot)
+            (spot if trigger == "spot_failure" else futures).messages = [fail_provider]
+
+        def connect(url, **kwargs):
+            return {"wss://ws.kraken.com/v2": spot, collector.FUTURES_URL: futures}[url]
+
+        monkeypatch.setattr(collector, "connect", connect)
         async_client = httpx.AsyncClient
         monkeypatch.setattr(
             collector.httpx,
             "AsyncClient",
             lambda **kwargs: async_client(transport=httpx.MockTransport(handle), **kwargs),
         )
-        if trigger == "failure":
+        if trigger in ("failure", "futures_task_failure"):
 
-            async def failing_monitor(self):
+            async def failing_task(self):
                 await blocked.wait()
-                raise RuntimeError("monitor failed")
+                raise RuntimeError("supervised task failed")
 
-            monkeypatch.setattr(collector.Collector, "monitor_loop", failing_monitor)
+            monkeypatch.setattr(
+                collector.Collector,
+                "futures_loop" if trigger == "futures_task_failure" else "monitor_loop",
+                failing_task,
+            )
         task = asyncio.create_task(collector.collect(tmp_path / "unused.env", tmp_path))
         await asyncio.wait_for(blocked.wait(), 1)
-        if trigger == "spot_failure":
-            await asyncio.wait_for(spot_failed.wait(), 1)
+        if trigger in ("spot_failure", "futures_failure"):
+            await asyncio.wait_for(provider_failed.wait(), 1)
             assert not task.done() and not cancelled.is_set()
             assert not closed
-        if trigger != "failure":
+        if trigger not in ("failure", "futures_task_failure"):
             signal_callbacks[signal.SIGTERM]()
             await asyncio.wait_for(task, 2)
         else:
-            with pytest.raises(RuntimeError, match="monitor failed"):
+            with pytest.raises(RuntimeError, match="supervised task failed"):
                 await asyncio.wait_for(task, 2)
         assert cancelled.is_set()
         assert set(closed) == {"socket", "exchange"}
         assert spot.closed
+        assert futures.closed or trigger == "futures_task_failure"
         assert not signal_callbacks
         assert read_rows(tmp_path)[-1]["kind"] == "collector_stopped"
 
@@ -1298,6 +1309,549 @@ def test_spot_writer_failure_is_fatal_without_provider_retry(tmp_path, monkeypat
     asyncio.run(scenario())
 
 
+def test_futures_archive_preserves_exact_frames_and_separates_receipt_health(tmp_path, monkeypatch):
+    archive, stop = collector.Archive(tmp_path), asyncio.Event()
+    instance = collector.Collector(None, None, archive, stop)
+    instance.futures_connected, instance.futures_generation = True, 1
+    raw = (
+        '{"feed":"trade","product_id":"PF_XBTUSD","uid":"same-uid",'
+        '"side":"sell","type":"liquidation","time":1792806600123,'
+        '"seq":9007199254740993,"price":81000.123456789123456789,'
+        '"qty":0.000000001234567891,"unknown":{"future":true}}'
+    )
+    snapshot = json.dumps(
+        {
+            "feed": "trade_snapshot",
+            "product_id": "PF_XBTUSD",
+            "trades": [futures_trade_message(type="liquidation")],
+        }
+    )
+    frames = [
+        *FUTURES_ACKS,
+        snapshot,
+        raw,
+        raw,
+        raw.encode(),
+        json.dumps(futures_trade_message(type="termination", seq=2)),
+        json.dumps(futures_trade_message(type="block", seq=100)),
+        snapshot,
+        FUTURES_HEARTBEAT,
+        '{"feed":"future-unknown","extra":[1,2]}',
+        "broken",
+        b"\xff\x00",
+    ]
+    try:
+        for frame in frames[:3]:
+            instance.record_futures_message(frame, 1)
+        assert instance.last_futures_snapshot and instance.last_futures_trade is None
+        assert instance.last_futures_liquidation is None
+        for frame in frames[3:6]:
+            instance.record_futures_message(frame, 1)
+        liquidation_receipt = instance.last_futures_liquidation
+        assert liquidation_receipt == instance.last_futures_trade
+        for frame in frames[6:8]:
+            instance.record_futures_message(frame, 1)
+        live_receipt = instance.last_futures_trade
+        for frame in frames[8:]:
+            instance.record_futures_message(frame, 1)
+        assert instance.last_futures_trade == live_receipt
+        assert instance.last_futures_liquidation == liquidation_receipt
+        assert instance.last_futures_liquidation_timestamp == 1792806600123
+        assert instance.last_futures_trade_timestamp == futures_trade_message()["time"]
+
+        async def finish(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", finish)
+        asyncio.run(instance.monitor_loop())
+        status = json.loads((tmp_path / "status.json").read_text())["futures"]
+        assert status["trade_subscribed"] and status["heartbeat_subscribed"]
+        assert status["last_trade_received_at"] == live_receipt
+        assert status["last_liquidation_received_at"] == liquidation_receipt
+        assert status["last_snapshot_received_at"] == instance.last_futures_snapshot
+        assert status["last_message_received_at"] == instance.last_futures_heartbeat
+    finally:
+        archive.close()
+    rows = read_rows(tmp_path)
+    assert len(rows) == len(frames)
+    for row, frame in zip(rows, frames, strict=True):
+        assert row["source"] == collector.FUTURES_SOURCE and row["kind"] == "futures_message"
+        assert row["generation"] == 1 and row["session_id"] == archive.session
+        assert type(row["received_ns"]) is int and type(row["received_monotonic_ns"]) is int
+        seconds, nanos = divmod(row["received_ns"], 1_000_000_000)
+        prefix = datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        assert row["received_at"] == f"{prefix}.{nanos:09d}+00:00"
+        assert (
+            row.get("raw_text")
+            if isinstance(frame, str)
+            else base64.b64decode(row["raw_bytes_base64"])
+        ) == frame
+    assert rows[3]["payload"]["price"] == "81000.123456789123456789"
+    assert rows[3]["payload"]["qty"] == "0.000000001234567891"
+    assert rows[3]["payload"]["seq"] == 9007199254740993
+    assert rows[3]["payload"] == rows[4]["payload"] == rows[5]["payload"]
+    assert [row["payload"]["seq"] for row in rows[6:8]] == [2, 100]
+    assert rows[-3]["binding_status"] == "unknown_feed"
+    assert rows[-2]["parse_error"] == rows[-1]["parse_error"] == "invalid_json"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"event": "subscribed", "feed": "trade"},
+        {"event": "subscribed", "feed": "trade", "product_id": "PF_XBTUSD"},
+        {"event": "subscribed", "feed": "trade", "product_ids": ["PI_XBTUSD"]},
+        {"event": "subscribed", "feed": "trade", "product_ids": ["PF_XBTUSD", "PF_ETHUSD"]},
+        {"event": "subscribed", "feed": "book", "product_ids": ["PF_XBTUSD"]},
+        {"event": "subscribed", "feed": "heartbeat", "product_ids": []},
+        {"event": "subscribed", "feed": "heartbeat", "error": "rejected"},
+        {"event": "subscribed_failed", "feed": "trade", "product_ids": ["PF_XBTUSD"]},
+    ],
+)
+def test_futures_mismatched_ack_does_not_bind_or_refresh_health(tmp_path, payload):
+    archive = FakeArchive(tmp_path)
+    instance = collector.Collector(None, None, archive, asyncio.Event())
+    instance.futures_connected, instance.futures_generation = True, 1
+    instance.record_futures_message(json.dumps(payload), 1)
+    assert archive.rows[-1]["payload"] == payload
+    assert not instance.futures_trade_subscribed and not instance.futures_heartbeat_subscribed
+    assert instance.last_futures_message is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"product_id": "PI_XBTUSD"},
+        {"feed": "ticker"},
+        {"uid": None},
+        {"side": "unknown"},
+        {"type": "unknown"},
+        {"time": True},
+        {"time": "1792806600123"},
+        {"seq": False},
+        {"seq": -1},
+        {"qty": 0},
+        {"price": "NaN"},
+        {"price": {}},
+    ],
+)
+def test_futures_invalid_live_shapes_are_archived_without_refreshing_health(tmp_path, change):
+    archive = FakeArchive(tmp_path)
+    instance = collector.Collector(None, None, archive, asyncio.Event())
+    instance.futures_connected, instance.futures_generation = True, 1
+    for frame in FUTURES_ACKS:
+        instance.record_futures_message(frame, 1)
+    previous = instance.last_futures_message
+    payload = futures_trade_message(**change)
+    instance.record_futures_message(json.dumps(payload), 1)
+    assert archive.rows[-1]["payload"] == payload
+    assert instance.last_futures_message == previous
+    assert instance.last_futures_trade is None and instance.last_futures_liquidation is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"price":NaN}',
+        '{"price":Infinity}',
+        "[" * 2000,
+        "null",
+        "[]",
+    ],
+)
+def test_futures_bad_json_or_nonobjects_are_retained_without_health(tmp_path, raw):
+    archive = FakeArchive(tmp_path)
+    instance = collector.Collector(None, None, archive, asyncio.Event())
+    instance.futures_connected, instance.futures_generation = True, 1
+    instance.record_futures_message(raw, 1)
+    assert archive.rows[-1]["raw_text"] == raw
+    assert archive.rows[-1]["binding_status"] == "invalid_payload"
+    assert instance.last_futures_message is None
+
+
+def test_futures_snapshot_requires_matching_children_but_accepts_empty_snapshot(tmp_path):
+    archive = FakeArchive(tmp_path)
+    instance = collector.Collector(None, None, archive, asyncio.Event())
+    instance.futures_connected, instance.futures_generation = True, 1
+    instance.record_futures_message(FUTURES_ACKS[0], 1)
+    for trades in (None, [None], [futures_trade_message(product_id="PI_XBTUSD")]):
+        instance.record_futures_message(
+            json.dumps(
+                {
+                    "feed": "trade_snapshot",
+                    "product_id": "PF_XBTUSD",
+                    "trades": trades,
+                }
+            ),
+            1,
+        )
+        assert instance.last_futures_snapshot is None
+        assert archive.rows[-1]["binding_status"] == "invalid_payload"
+    instance.record_futures_message(
+        json.dumps(
+            {
+                "feed": "trade_snapshot",
+                "product_id": "PF_XBTUSD",
+                "trades": [],
+            }
+        ),
+        1,
+    )
+    assert instance.last_futures_snapshot
+    assert instance.last_futures_trade is None and instance.last_futures_liquidation is None
+
+
+def test_futures_data_before_ack_and_retired_generation_cannot_refresh_health(tmp_path):
+    archive = FakeArchive(tmp_path)
+    instance = collector.Collector(None, None, archive, asyncio.Event())
+    instance.futures_connected, instance.futures_generation = True, 2
+    raw = json.dumps(futures_trade_message(type="liquidation"))
+    for frame in (raw, FUTURES_HEARTBEAT):
+        instance.record_futures_message(frame, 2)
+        assert archive.rows[-1]["binding_status"] == "unacknowledged_feed"
+    for frame in (*FUTURES_ACKS, raw, FUTURES_HEARTBEAT):
+        instance.record_futures_message(frame, 1)
+        assert archive.rows[-1]["binding_status"] == "inactive_generation"
+    assert not instance.futures_trade_subscribed and not instance.futures_heartbeat_subscribed
+    assert instance.last_futures_message is None
+    for frame in FUTURES_ACKS:
+        instance.record_futures_message(frame, 2)
+    instance.record_futures_message(raw, 2)
+    previous = instance.last_futures_message
+    instance.futures_connected = False
+    instance.record_futures_message(raw, 2)
+    assert archive.rows[-1]["binding_status"] == "inactive_generation"
+    assert instance.last_futures_message == previous
+
+
+@pytest.mark.parametrize("kind", ["trade_ack", "heartbeat_ack", "snapshot", "trade", "heartbeat"])
+def test_futures_queue_rejection_does_not_advance_health_or_binding(tmp_path, kind):
+    archive = FakeArchive(tmp_path)
+    instance = collector.Collector(None, None, archive, asyncio.Event())
+    instance.futures_connected, instance.futures_generation = True, 1
+    if kind not in ("trade_ack", "heartbeat_ack"):
+        for frame in FUTURES_ACKS:
+            instance.record_futures_message(frame, 1)
+    previous = dict(vars(instance))
+    accepted = archive.emit
+    archive.emit = lambda *args, **kwargs: None
+    frames = {
+        "trade_ack": FUTURES_ACKS[0],
+        "heartbeat_ack": FUTURES_ACKS[1],
+        "snapshot": json.dumps(
+            {
+                "feed": "trade_snapshot",
+                "product_id": "PF_XBTUSD",
+                "trades": [],
+            }
+        ),
+        "trade": json.dumps(futures_trade_message(type="liquidation")),
+        "heartbeat": FUTURES_HEARTBEAT,
+    }
+    instance.record_futures_message(frames[kind], 1)
+    assert vars(instance) == previous
+    archive.emit = accepted
+    instance.record_futures_message(frames[kind], 1)
+    assert vars(instance) != previous
+
+
+def test_futures_reconnects_independently_and_rebinds_each_generation(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        instance = collector.Collector(None, None, archive, stop)
+        instance.connected, instance.generation = True, 42
+        instance.spot_connected, instance.spot_subscribed, instance.spot_generation = True, True, 9
+        created, options, delays = [], [], []
+
+        def finish():
+            assert instance.futures_trade_subscribed and instance.futures_heartbeat_subscribed
+            previous = instance.last_futures_message
+            instance.record_futures_message(json.dumps(futures_trade_message()), 1)
+            assert archive.rows[-1]["binding_status"] == "inactive_generation"
+            assert instance.last_futures_message == previous
+            stop.set()
+            return FUTURES_HEARTBEAT
+
+        scripts = [
+            [*FUTURES_ACKS, ConnectionError("provider disconnected")],
+            ['{"event":"subscribed_failed","feed":"trade","product_ids":["PF_XBTUSD"]}'],
+            [*FUTURES_ACKS, finish],
+        ]
+
+        def factory(url, **kwargs):
+            assert url == collector.FUTURES_URL
+            assert (
+                not instance.futures_trade_subscribed and not instance.futures_heartbeat_subscribed
+            )
+            options.append(kwargs)
+            socket = SpotSocket(scripts[len(created)])
+            created.append(socket)
+            return socket
+
+        async def immediate(event, seconds):
+            delays.append(seconds)
+            await asyncio.sleep(0)
+
+        monkeypatch.setattr(collector, "connect", factory)
+        monkeypatch.setattr(collector, "pause", immediate)
+        await instance.futures_loop()
+        assert len(created) == 3 and all(socket.closed for socket in created)
+        assert all(socket.sent == FUTURES_SUBSCRIPTIONS for socket in created)
+        assert delays[:2] == [1, 2]
+        assert all(
+            value
+            == {
+                "open_timeout": 10,
+                "close_timeout": 5,
+                "ping_interval": 20,
+                "ping_timeout": 20,
+                "max_size": 1024 * 1024,
+                "max_queue": 16,
+            }
+            for value in options
+        )
+        assert instance.futures_generation == 3 and not instance.futures_connected
+        assert not instance.futures_trade_subscribed and not instance.futures_heartbeat_subscribed
+        assert instance.connected and instance.generation == 42
+        assert (
+            instance.spot_connected and instance.spot_subscribed and instance.spot_generation == 9
+        )
+        gaps = [row for row in archive.rows if row["kind"] == "futures_connection_gap"]
+        assert [row["generation"] for row in gaps] == [1, 2, 3]
+        assert gaps[1]["reason"] == "subscription_rejected_or_removed"
+        assert gaps[2]["reason"] == "collector_stopping"
+        assert not any(
+            row["kind"] in ("spot_connection_gap", "connection_gap") for row in archive.rows
+        )
+
+    asyncio.run(scenario())
+
+
+def test_futures_heartbeats_keep_quiet_trade_feed_open_without_trade_health(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        socket = SpotSocket(FUTURES_ACKS)
+        original_recv, heartbeats = socket.recv, []
+
+        async def recv():
+            if socket.messages:
+                return await original_recv()
+            await asyncio.sleep(0.005)
+            heartbeats.append(True)
+            if len(heartbeats) == 10:
+                stop.set()
+            return FUTURES_HEARTBEAT
+
+        socket.recv = recv
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+        monkeypatch.setattr(collector, "FUTURES_ACK_SECONDS", 0.02)
+        monkeypatch.setattr(collector, "FUTURES_IDLE_SECONDS", 0.02)
+        instance = collector.Collector(None, None, archive, stop)
+        await asyncio.wait_for(instance.futures_loop(), 1)
+        assert len(heartbeats) == 10 and instance.futures_generation == 1 and socket.closed
+        assert instance.last_futures_heartbeat is not None
+        assert instance.last_futures_trade is None and instance.last_futures_liquidation is None
+        assert [
+            row["reason"] for row in archive.rows if row["kind"] == "futures_connection_gap"
+        ] == ["collector_stopping"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "mode", ["no_ack", "heartbeat_only", "trade_only", "idle", "wrong_product"]
+)
+def test_futures_ack_and_bound_message_deadlines_cannot_be_extended_by_other_frames(
+    tmp_path, monkeypatch, mode
+):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        messages = {
+            "no_ack": [],
+            "heartbeat_only": [FUTURES_ACKS[1]],
+            "trade_only": [FUTURES_ACKS[0]],
+            "idle": FUTURES_ACKS,
+            "wrong_product": FUTURES_ACKS,
+        }[mode]
+        socket = SpotSocket(messages)
+        original_recv = socket.recv
+
+        async def recv():
+            if socket.messages or mode == "idle":
+                return await original_recv()
+            await asyncio.sleep(0.001)
+            return (
+                json.dumps(futures_trade_message(product_id="PF_ETHUSD"))
+                if mode == "wrong_product"
+                else FUTURES_HEARTBEAT
+            )
+
+        socket.recv = recv
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+        monkeypatch.setattr(collector, "FUTURES_ACK_SECONDS", 0.02)
+        monkeypatch.setattr(collector, "FUTURES_IDLE_SECONDS", 0.03)
+
+        async def finish(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", finish)
+        instance = collector.Collector(None, None, archive, stop)
+        await asyncio.wait_for(instance.futures_loop(), 1)
+        assert socket.closed and instance.futures_generation == 1
+        gaps = [row for row in archive.rows if row["kind"] == "futures_connection_gap"]
+        assert gaps[0]["reason"] == (
+            "idle_timeout" if mode in ("idle", "wrong_product") else "subscription_timeout"
+        )
+        assert instance.last_futures_trade is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "raw,reason",
+    [
+        ("broken", "malformed_message"),
+        ("null", "malformed_message"),
+        ("[]", "malformed_message"),
+        ('{"event":"error","message":"Invalid feed"}', "subscription_rejected_or_removed"),
+        ('{"event":"unsubscribed","feed":"heartbeat"}', "subscription_rejected_or_removed"),
+    ],
+)
+def test_futures_rejections_or_malformed_frames_are_saved_before_reconnect(
+    tmp_path, monkeypatch, raw, reason
+):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        socket = SpotSocket([*FUTURES_ACKS, raw])
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+
+        async def finish(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector, "pause", finish)
+        instance = collector.Collector(None, None, archive, stop)
+        await asyncio.wait_for(instance.futures_loop(), 1)
+        messages = [row for row in archive.rows if row["kind"] == "futures_message"]
+        assert messages[-1]["raw_text"] == raw and socket.closed
+        assert (
+            next(row for row in archive.rows if row["kind"] == "futures_connection_gap")["reason"]
+            == reason
+        )
+        assert not instance.futures_trade_subscribed and not instance.futures_heartbeat_subscribed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stage", ["connect", "send", "receive", "backoff"])
+def test_futures_cancellation_closes_socket_without_retry(tmp_path, monkeypatch, stage):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        blocked, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def block():
+            blocked.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        class BlockingSocket(SpotSocket):
+            async def __aenter__(self):
+                if stage == "connect":
+                    await block()
+                return self
+
+            async def send(self, message):
+                if stage == "send":
+                    await block()
+                await super().send(message)
+
+            async def recv(self):
+                if stage == "backoff":
+                    raise OSError("provider unavailable")
+                await block()
+
+        socket = BlockingSocket()
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+        if stage == "backoff":
+
+            async def blocked_pause(event, seconds):
+                await block()
+
+            monkeypatch.setattr(collector, "pause", blocked_pause)
+        instance = collector.Collector(None, None, archive, stop)
+        task = asyncio.create_task(instance.futures_loop())
+        await asyncio.wait_for(blocked.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cancelled.is_set() and instance.futures_generation == 1
+        assert not instance.futures_connected and not instance.futures_trade_subscribed
+        assert not instance.futures_heartbeat_subscribed
+        if stage != "connect":
+            assert socket.closed
+
+    asyncio.run(scenario())
+
+
+def test_futures_subscription_send_timeout_retries_locally(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = FakeArchive(tmp_path), asyncio.Event()
+        cancelled = asyncio.Event()
+
+        class BlockingSocket(SpotSocket):
+            async def send(self, message):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+        socket = BlockingSocket()
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+        wait_for = asyncio.wait_for
+        deadlines = []
+
+        async def short_timeout(awaitable, timeout):
+            deadlines.append(timeout)
+            return await wait_for(awaitable, 0.01 if timeout == 10 else timeout)
+
+        async def finish(event, seconds):
+            event.set()
+
+        monkeypatch.setattr(collector.asyncio, "wait_for", short_timeout)
+        monkeypatch.setattr(collector, "pause", finish)
+        instance = collector.Collector(None, None, archive, stop)
+        await wait_for(instance.futures_loop(), 1)
+        assert deadlines == [10] and cancelled.is_set() and socket.closed
+        assert instance.futures_generation == 1
+        assert any(row.get("error_class") == "TimeoutError" for row in archive.rows)
+
+    asyncio.run(scenario())
+
+
+def test_futures_writer_failure_is_fatal_without_provider_retry(tmp_path, monkeypatch):
+    async def scenario():
+        archive, stop = collector.Archive(tmp_path), asyncio.Event()
+
+        def fail_writer():
+            archive.error = OSError("disk failure")
+            return FUTURES_HEARTBEAT
+
+        socket = SpotSocket([*FUTURES_ACKS, fail_writer])
+        monkeypatch.setattr(collector, "connect", lambda *args, **kwargs: socket)
+        instance = collector.Collector(None, None, archive, stop)
+        try:
+            with pytest.raises(RuntimeError, match="Research archive writer stopped"):
+                await instance.futures_loop()
+            assert socket.closed and instance.futures_generation == 1
+            assert not instance.futures_connected
+        finally:
+            archive.error = None
+            archive.close()
+
+    asyncio.run(scenario())
+
+
 class MarketSocket:
     def __init__(self, receive):
         self.receive, self.callbacks, self.subscriptions, self.closed = receive, {}, {}, False
@@ -1403,6 +1957,21 @@ def utc_at(seconds):
     return (datetime(2026, 10, 23, tzinfo=timezone.utc) + timedelta(seconds=seconds)).isoformat()
 
 
+def futures_trade_message(**changes):
+    return {
+        "feed": "trade",
+        "product_id": "PF_XBTUSD",
+        "uid": "synthetic-trade-id",
+        "side": "buy",
+        "type": "fill",
+        "seq": 1,
+        "time": 1792806600124,
+        "price": 81000,
+        "qty": 1,
+        **changes,
+    }
+
+
 def read_rows(directory):
     return [
         json.loads(line)
@@ -1416,3 +1985,12 @@ SPOT_SUBSCRIPTION = {
     "method": "subscribe",
     "params": {"channel": "trade", "symbol": ["BTC/USD"], "snapshot": True},
 }
+FUTURES_SUBSCRIPTIONS = [
+    {"event": "subscribe", "feed": "trade", "product_ids": ["PF_XBTUSD"]},
+    {"event": "subscribe", "feed": "heartbeat"},
+]
+FUTURES_ACKS = [
+    '{"event":"subscribed","feed":"trade","product_ids":["PF_XBTUSD"]}',
+    '{"event":"subscribed","feed":"heartbeat"}',
+]
+FUTURES_HEARTBEAT = '{"feed":"heartbeat","time":1792806600123}'
