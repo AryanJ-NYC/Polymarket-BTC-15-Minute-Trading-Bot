@@ -25,7 +25,6 @@ class OrderNotifications:
         self._revision = 0
         self._watched = {}
         self._snapshot_count = 0
-        self._last_message = 0
 
     def start(self):
         with self._condition:
@@ -51,7 +50,6 @@ class OrderNotifications:
                     self._stopped
                     or (
                         self._ready
-                        and monotonic() - self._last_message <= 35
                         and self._generation == revision[0]
                         and self._watched.get(order_id, revision[1]) > revision[1]
                     )
@@ -67,7 +65,7 @@ class OrderNotifications:
         with self._condition:
             return {
                 "generation": self._generation,
-                "ready": self._ready and monotonic() - self._last_message <= 35,
+                "ready": self._ready,
                 "watched": len(self._watched),
             }
 
@@ -91,7 +89,6 @@ class OrderNotifications:
                 self._broken = False
                 self._ready = False
                 self._snapshot_count = 0
-                self._last_message = monotonic()
                 snapshot_deadline = monotonic() + 35
             request = f"orders-{generation}"
             try:
@@ -104,13 +101,17 @@ class OrderNotifications:
                 if self._stopped:
                     continue
                 await asyncio.wait_for(socket.subscribe_orders(request), timeout=10)
+                if self._stopped:
+                    continue
+                await asyncio.wait_for(
+                    socket.subscribe_all(
+                        f"snapshot-{generation}", "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"
+                    ),
+                    timeout=10,
+                )
                 while not self._stopped:
                     with self._condition:
-                        if (
-                            self._broken
-                            or monotonic() - self._last_message > 35
-                            or (not self._ready and monotonic() >= snapshot_deadline)
-                        ):
+                        if self._broken or (not self._ready and monotonic() >= snapshot_deadline):
                             break
                         if self._ready:
                             failures = 0
@@ -142,13 +143,24 @@ class OrderNotifications:
                 if not isinstance(message, dict) or "error" in message:
                     raise ValueError("Invalid envelope")
                 if "heartbeat" in message:
-                    self._last_message = monotonic()
                     return
-                if message.get("requestId") != f"orders-{generation}" or message.get(
-                    "subscriptionType"
-                ) not in {"SUBSCRIPTION_TYPE_ORDER", "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"}:
+                if message.get("requestId") not in {
+                    f"orders-{generation}",
+                    f"snapshot-{generation}",
+                } or message.get("subscriptionType") not in {
+                    "SUBSCRIPTION_TYPE_ORDER",
+                    "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT",
+                }:
                     return
                 if "orderSubscriptionSnapshot" in message:
+                    # Some documented variants also send automatic snapshots on
+                    # the update subscription. Only our explicit request owns
+                    # readiness, so duplicate automatic responses cannot reset it.
+                    if (
+                        message.get("requestId") != f"snapshot-{generation}"
+                        or message.get("subscriptionType") != "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"
+                    ):
+                        return
                     if self._ready:
                         raise ValueError("Unexpected new snapshot")
                     snapshot = message["orderSubscriptionSnapshot"]
@@ -164,6 +176,7 @@ class OrderNotifications:
                 elif (
                     "orderSubscriptionUpdate" in message
                     and message.get("subscriptionType") == "SUBSCRIPTION_TYPE_ORDER"
+                    and message.get("requestId") == f"orders-{generation}"
                 ):
                     order = message["orderSubscriptionUpdate"]["execution"]["order"]
                     order_id = _order_id(order)
@@ -176,7 +189,6 @@ class OrderNotifications:
                         self._condition.notify_all()
                 else:
                     raise ValueError("Unknown order envelope")
-                self._last_message = monotonic()
             except (KeyError, TypeError, ValueError):
                 self._ready = False
                 self._broken = True

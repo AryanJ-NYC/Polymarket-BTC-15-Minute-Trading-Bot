@@ -11,10 +11,45 @@ from execution.order_notifications import OrderNotifications
 from execution.polymarket_client import parse_market
 
 
-@pytest.mark.parametrize(
-    "subscription_type", ["SUBSCRIPTION_TYPE_ORDER", "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"]
-)
-def test_snapshot_requires_eof_before_advisory_updates(subscription_type):
+def test_explicit_snapshot_subscription_is_required_and_quiet_accounts_stay_ready(monkeypatch):
+    import execution.order_notifications as module
+
+    elapsed = [100.0]
+    monkeypatch.setattr(module, "monotonic", lambda: elapsed[0])
+    with receiver() as (notifications, factory):
+        socket = factory.ready()
+        wait_for(lambda: len(socket.subscriptions) == 2)
+        assert socket.subscriptions == [
+            ("orders-1", None),
+            ("snapshot-1", "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"),
+        ]
+        socket.deliver(snapshot(socket, True, "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"))
+        elapsed[0] = 200.0
+        # An account can legitimately have no order traffic for minutes. This is
+        # readiness for advisory hints, not freshness of cached accounting data.
+        assert notifications.health()["ready"]
+        assert notifications.health()["generation"] == 1
+
+
+@pytest.mark.parametrize("automatic_first", [False, True])
+def test_automatic_snapshots_do_not_conflict_with_explicit_readiness(automatic_first):
+    with receiver() as (notifications, factory):
+        socket = factory.ready()
+        automatic = snapshot(socket, True, "SUBSCRIPTION_TYPE_ORDER")
+        if automatic_first:
+            socket.deliver(automatic)
+            assert not notifications.health()["ready"]
+        socket.deliver(snapshot(socket, True))
+        if not automatic_first:
+            socket.deliver(automatic)
+        assert notifications.health()["ready"]
+        revision = notifications.revision("known")
+        socket.deliver(update(socket, "known", "ORDER_STATE_FILLED"))
+        assert notifications.wait("known", revision, 0)
+
+
+def test_snapshot_requires_eof_before_advisory_updates():
+    subscription_type = "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"
     with receiver() as (notifications, factory):
         socket = factory.ready()
         revision = notifications.revision("known")
@@ -187,7 +222,7 @@ class PrivateFactory:
 
     def ready(self):
         socket = self.created.get(timeout=5)
-        wait_for(lambda: socket.subscriptions)
+        wait_for(lambda: len(socket.subscriptions) == 2)
         return socket
 
 
@@ -219,9 +254,13 @@ class HeldConnectSocket(PrivateSocket):
         self.listeners["open"]()
 
 
-def snapshot(socket, eof, subscription_type="SUBSCRIPTION_TYPE_ORDER"):
+def snapshot(socket, eof, subscription_type="SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"):
     return {
-        "requestId": socket.subscriptions[-1][0],
+        "requestId": (
+            socket.subscriptions[1][0]
+            if subscription_type == "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT"
+            else socket.subscriptions[0][0]
+        ),
         "subscriptionType": subscription_type,
         "orderSubscriptionSnapshot": {"orders": [], "eof": eof},
     }
@@ -229,7 +268,7 @@ def snapshot(socket, eof, subscription_type="SUBSCRIPTION_TYPE_ORDER"):
 
 def update(socket, order_id, state):
     return {
-        "requestId": socket.subscriptions[-1][0],
+        "requestId": socket.subscriptions[0][0],
         "subscriptionType": "SUBSCRIPTION_TYPE_ORDER",
         "orderSubscriptionUpdate": {"execution": {"order": {"id": order_id, "state": state}}},
     }

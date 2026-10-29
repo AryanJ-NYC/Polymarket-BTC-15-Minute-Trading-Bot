@@ -53,3 +53,9 @@ Protocol basis: [direct create](https://docs.polymarket.us/api-reference/orders/
 [private stream](https://docs.polymarket.us/api-reference/websocket/private), and the pinned
 `polymarket-us==2.4.1` SDK. No FIX migration, infrastructure change, strategy/risk change,
 or additional slippage accompanies these changes.
+
+Read-only rollout verification on October 29 established that the live service requires
+an explicit `SUBSCRIPTION_TYPE_ORDER_SNAPSHOT` subscription in addition to order updates.
+The generic private documentation's automatic-snapshot example is insufficient for
+this endpoint. Empty snapshots with `eof=true` are valid; quiet accounts need no order
+traffic to retain advisory readiness. Snapshot completeness does not establish a fill.
