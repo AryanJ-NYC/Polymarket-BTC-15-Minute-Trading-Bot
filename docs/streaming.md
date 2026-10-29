@@ -200,3 +200,9 @@ Stream receipt-to-decision latency includes sampling wait, the local context
 snapshot read, and strategy computation. REST receipt-to-decision and provider network
 latency remain explicitly unavailable in this observer. No result establishes
 profitability or live-order execution behavior.
+
+When discovery has no desired contracts, the receiver reports `idle` and does not
+reconnect solely for missing book traffic. Resuming subscriptions starts a bounded
+silence window; it does not refresh message timestamps or make any quote usable.
+Active subscriptions retain the existing silence timeout and explicit socket-error
+recovery. Repeated refresh of an active desired set cannot postpone that timeout.

@@ -45,6 +45,7 @@ class MarketStream:
         self._generation = 0
         self._sequence = 0
         self._last_message: float | None = None
+        self._subscription_started: float | None = None
         self._reason = "not_started"
         self._counts = dict(snapshots=0, duplicates=0, malformed=0, rejected=0, reconnects=0)
         self._backoff = 0.0
@@ -181,7 +182,11 @@ class MarketStream:
                     with self._lock:
                         if self._broken:
                             raise StreamUnavailable("Socket disconnected")
-                        if monotonic() - self._last_message > SILENCE_TIMEOUT:
+                        if (
+                            self._subscriptions
+                            and monotonic() - max(self._last_message, self._subscription_started)
+                            > SILENCE_TIMEOUT
+                        ):
                             self._invalidate("silent_stream")
                             raise StreamUnavailable("Socket is silent")
                     try:
@@ -197,6 +202,7 @@ class MarketStream:
                 with self._lock:
                     self._invalidate("closed" if self._stopped else self._reason)
                     self._subscriptions.clear()
+                    self._subscription_started = None
                     self._retired.clear()
                     self._timestamps.clear()
                 if socket:
@@ -238,6 +244,12 @@ class MarketStream:
         with self._lock:
             if self._stopped or self._broken:
                 return
+            # No market means no book traffic is expected. On resuming after
+            # idle discovery, allow a full silence window for the first message;
+            # never refresh this deadline for an already active subscription.
+            if not self._subscriptions:
+                self._subscription_started = monotonic() if self._desired else None
+                self._reason = "awaiting_snapshot" if self._desired else "idle"
             additions = []
             for slug, market in self._desired.items():
                 if slug not in self._subscriptions:
