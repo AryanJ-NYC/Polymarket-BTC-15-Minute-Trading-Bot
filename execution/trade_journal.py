@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 from time import monotonic
 
+from execution.latency import correlation, timed
 from execution.polymarket_client import (
     Book,
     Market,
@@ -277,6 +278,7 @@ class TradeJournal:
         with self.db:
             self.db.execute("INSERT INTO contract_outcomes VALUES (?, ?)", (slug, json.dumps(data)))
 
+    @timed("reservation")
     def reserve_entry(self, plan: Plan, end: datetime, *, settings: dict | None = None) -> bool:
         """Commit one attempt per contract/experiment before order placement."""
         preset = (settings or {}).get("timing_preset")
@@ -295,6 +297,7 @@ class TradeJournal:
             "proceeds": "0",
             "pnl": None,
             "pending": _pack_plan(plan),
+            "timing_attempt": correlation(),
             "order_id": None,
             "orders": [],
             "settings": settings,
@@ -307,6 +310,7 @@ class TradeJournal:
             )
         return result.rowcount == 1
 
+    @timed("reservation")
     def reserve_exit(self, trade_id: str, plan: Plan) -> None:
         data = self.get(trade_id)
         if not data or data["pending"] or data["state"] != "open":
@@ -317,8 +321,11 @@ class TradeJournal:
             or plan.quantity > number(data["quantity"])
         ):
             raise ValueError("Exit does not belong to this experiment trade")
-        self.update(data["trade_id"], pending=_pack_plan(plan), order_id=None)
+        self.update(
+            data["trade_id"], pending=_pack_plan(plan), order_id=None, timing_attempt=correlation()
+        )
 
+    @timed("journal_update")
     def update(self, trade_id: str, **fields) -> None:
         data = self.get(trade_id)
         if data is None:
@@ -329,6 +336,7 @@ class TradeJournal:
                 "UPDATE trades SET data = ? WHERE slug = ?", (json.dumps(data), trade_id)
             )
 
+    @timed("journal_final")
     def finish_order(
         self,
         trade_id: str,
@@ -354,6 +362,7 @@ class TradeJournal:
                 "average_price": str(notional / quantity) if quantity else None,
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
                 "readback_delayed": readback_delayed,
+                "timing_attempt": data.get("timing_attempt"),
                 "request": data["pending"],
             }
         ]

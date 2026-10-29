@@ -25,6 +25,7 @@ from core.strategy_brain.strategies.btc_15min_strategy import (
     BASELINE_POLICY_VERSION,
     BTCStrategy15Min,
 )
+from execution.latency import attempt, mark, quote, timed, tracing
 from execution.market_stream import MarketStream, StreamUnavailable
 from execution.polymarket_client import (
     ExecutionRejected,
@@ -170,6 +171,8 @@ def main() -> int:
         journal = TradeJournal(ROOT / "logs" / f"us-{mode_name}.sqlite")
         books = exchange.market_stream()
         books.start()
+        if args.live:
+            exchange.start_order_notifications()
         if model is None or args.experiment_id is not None:
             context = ContextRefresher()
             context.start()
@@ -191,6 +194,8 @@ def main() -> int:
         duration = args.duration or (15 if args.once else None)
         deadline = monotonic() + duration if duration else None
         while not shutdown.is_set():
+            books.updates.clear()
+            tick_started = monotonic()
             bot.tick()
             if (
                 shutdown.is_set()
@@ -200,7 +205,13 @@ def main() -> int:
             ):
                 break
             delay = 3 if deadline is None else min(3, max(0, deadline - monotonic()))
-            shutdown.wait(delay)
+            if bot.reactive():
+                # Coalesce bursts and keep one serial admission owner. Sampling
+                # remains in strategy.observe's existing three-second gate.
+                shutdown.wait(max(0, 0.25 - (monotonic() - tick_started)))
+                books.wait_for_update(shutdown, max(0, delay - (monotonic() - tick_started)))
+            else:
+                shutdown.wait(delay)
         return 0
     except KeyboardInterrupt:
         logger.info("Stopped. Open trades remain recorded for the next run.")
@@ -420,6 +431,8 @@ class TradingBot:
         self.position_markets = {}
         self.observations = 0
         self.last_health = None
+        self.last_order_health = None
+        self._entry_account_failed = False
         self._minute_five_admission = None
         self._five_minute_admission = None
         self._five_minute_waiting_snapshot = False
@@ -474,7 +487,41 @@ class TradingBot:
             return False
         return self.journal.get(self.trade_id)["state"] in {"closed", "unfilled"}
 
+    def reactive(self) -> bool:
+        """Wake on quotes only for active entry windows or price-managed holdings."""
+        if monotonic() < self.next_data_attempt:
+            return False
+        now = datetime.now(timezone.utc)
+        if any(
+            row["state"] == "open"
+            and now < parse_time(row["end"])
+            and not row["pending"]
+            and (row.get("settings") or {}).get("exit_policy")
+            not in {"settlement-only-v1", "model-settlement-v1"}
+            for row in self.journal.records()
+        ):
+            return True
+        candidates = (
+            [(self.market, self._settings_for_arm(arm)) for arm in self._entry_arms()]
+            if self.market is not None
+            else []
+        )
+        candidates += [
+            (self.market, MINUTE_FIVE_SETTINGS),
+            (self.five_minute_market, FIVE_MINUTE_SETTINGS),
+        ]
+        for market, settings in candidates:
+            if (
+                market is not None
+                and not self._entry_disabled(settings)
+                and self._in_entry_window(settings, market)
+                and not self.journal.entry_attempted(market.slug, settings.get("timing_preset"))
+            ):
+                return True
+        return False
+
     def tick(self) -> None:
+        self._entry_account_failed = False
         try:
             self._tick()
             # Reconciliation and time-sensitive admissions finish first. Read-only
@@ -532,6 +579,10 @@ class TradingBot:
         if state != self.last_health:
             logger.info("Market stream health: {}", health)
             self.last_health = state
+        order_health = self.exchange.order_notification_health()
+        if order_health != self.last_order_health:
+            logger.info("Order notification health: {}", order_health)
+            self.last_order_health = order_health
         unavailable = self._manage_positions()
         if monotonic() < self.next_data_attempt:
             self._record_pause("exchange_backoff")
@@ -590,21 +641,8 @@ class TradingBot:
                 )
             logger.info("Entries paused: {} | stream {}", exc, self.books.health())
             return
-        # Minute-five validates the account in _consider_entry. A second read
-        # here can consume its entire five-second window before sizing.
-        if self.live and not unavailable and self._minute_five_admission is None:
-            try:
-                self._account_guard()
-            except (APIError, APIConnectionError, APITimeoutError) as exc:
-                if not _unavailable_book(exc):
-                    raise
-                self._wait_for_data(exc)
-                for settings in admissions:
-                    self.journal.record_opportunity(
-                        self.market, book, "account_unavailable", settings=settings
-                    )
-                logger.warning("Entries paused: account read unavailable ({})", type(exc).__name__)
-                return
+        # Fresh account admission happens only after an eligible decision, inside
+        # _consider_entry. Never cache or share it across serial reservations.
         context = (
             self.context.snapshot()
             if self.context is not None and (self.simultaneous or not self._uses_model)
@@ -742,9 +780,15 @@ class TradingBot:
         self.observations += 1
         self._consider_entry(market, book, unavailable=unavailable, settings=settings, context=None)
 
+    @attempt("entry")
     def _consider_entry(
         self, market, book, *, unavailable: bool, settings: dict, context: dict | None
     ) -> None:
+        quote(book)
+        mark("decision_start")
+        if self._entry_account_failed:
+            self.journal.record_opportunity(market, book, "account_unavailable", settings=settings)
+            return
         if self._entry_disabled(settings):
             self.journal.record_opportunity(market, book, "strategy_disabled", settings=settings)
             return
@@ -789,6 +833,7 @@ class TradingBot:
                 return
         if settings.get("timing_preset") == "five-minute":
             self.journal.record_opportunity(market, book, "eligible_entry", outcome, settings)
+        mark("signal_end")
         # Account work may be slow; only current quotes and funds can size an entry.
         try:
             if not self._in_entry_window(settings, market):
@@ -811,11 +856,17 @@ class TradingBot:
             ):
                 self.journal.record_opportunity(market, book, "price_changed", outcome, settings)
                 return
-            account = (
-                self._account_guard()
-                if self.live
-                else self.exchange.account(book_source=self._valuation_book)
-            )
+            try:
+                account = (
+                    self._account_guard()
+                    if self.live
+                    else self.exchange.account(book_source=self._valuation_book)
+                )
+            except (APIError, APIConnectionError, APITimeoutError):
+                # A failed shared account read blocks remaining arms this tick.
+                # The next decision still requires a new read, never cached state.
+                self._entry_account_failed = True
+                raise
             if not self._in_entry_window(settings, market):
                 self.journal.record_opportunity(
                     market, book, "entry_window_closed", outcome, settings
@@ -829,7 +880,9 @@ class TradingBot:
             ):
                 self.journal.record_opportunity(market, book, "price_changed", outcome, settings)
                 return
+            quote(book, "sizing")
             plan, settings = self._entry_plan(market, book, outcome, account, settings)
+            mark("decision_end")
             if plan is None:
                 return
             if any(
@@ -946,6 +999,7 @@ class TradingBot:
         )
         return slot in self.disabled_entries
 
+    @timed("sizing")
     def _entry_plan(self, market, book, outcome, account, settings):
         capture = self._in_entry_window(settings, market)
         if account.bankroll is None:
@@ -1334,20 +1388,23 @@ class TradingBot:
                     "An order submission has an unknown outcome. Inspect Polymarket US orders "
                     "and the reserved journal request before restarting; never retry it blindly."
                 )
-            plan = pending_plan(row)
-            try:
-                order = self.exchange.cancel(row["order_id"], row["slug"])
-            except (APIError, APIConnectionError, APITimeoutError, OrderPending) as exc:
-                if not isinstance(exc, OrderPending) and not retryable_api_error(exc, missing=True):
-                    raise
-                complete = False
-                self._wait_for_order(row["order_id"], exc)
-                if monotonic() < self.next_data_attempt:
-                    break
-                continue
-            self._finish_order(
-                plan, *order_fill(order, plan), trade_id=row["trade_id"], readback_delayed=True
-            )
+            with tracing("reconciliation", row.get("timing_attempt")):
+                plan = pending_plan(row)
+                try:
+                    order = self.exchange.cancel(row["order_id"], row["slug"])
+                except (APIError, APIConnectionError, APITimeoutError, OrderPending) as exc:
+                    if not isinstance(exc, OrderPending) and not retryable_api_error(
+                        exc, missing=True
+                    ):
+                        raise
+                    complete = False
+                    self._wait_for_order(row["order_id"], exc)
+                    if monotonic() < self.next_data_attempt:
+                        break
+                    continue
+                self._finish_order(
+                    plan, *order_fill(order, plan), trade_id=row["trade_id"], readback_delayed=True
+                )
 
         return complete
 
@@ -1462,6 +1519,7 @@ class TradingBot:
         if datetime.now(timezone.utc) >= plan.expires_at:
             raise ExecutionRejected("plan_expired", plan, book)
         latest = self.books.book(market) if streamed else self.exchange.book(market)
+        quote(latest, "validation")
         if plan.action == "BUY" and (settings or {}).get("timing_preset") == "five-minute":
             self.journal.record_opportunity(
                 market,
@@ -1656,102 +1714,103 @@ class TradingBot:
                 self._wait_for_data(exc, slug)
                 unavailable = True
                 continue
-            # Only a known local quote rejection may refresh once. An actual
-            # submission (even zero/partial/pending) ends this tick for the lot.
-            for _ in range(2):
+            unavailable = self._manage_exit(row, market) or unavailable
+        return unavailable
+
+    @attempt("exit")
+    def _manage_exit(self, row, market) -> bool:
+        unavailable = False
+        mark("decision_start")
+        # Only a known local quote rejection may refresh once. An actual
+        # submission (even zero/partial/pending) ends this tick for the lot.
+        for _ in range(2):
+            try:
                 try:
-                    try:
-                        book = self.books.book(market)
-                        streamed = True
-                    except StreamUnavailable:
-                        if monotonic() < self.next_rest_attempt.get(row["slug"], 0):
-                            unavailable = True
-                            break
-                        self.next_rest_attempt[row["slug"]] = monotonic() + 3
-                        book = self.exchange.book(market)
-                        streamed = False
-                        logger.info("Position {} using validated REST fallback", row["slug"])
-                    sellable, net_value = self.exchange.exit_value(
-                        market, book, row["outcome"], number(row["quantity"])
-                    )
-                    remaining = number(row["quantity"]) - sellable
-                    logger.info(
-                        "Exit depth {} | sellable {} | remainder {} | net ${:.4f}",
-                        row["slug"],
-                        sellable,
-                        remaining,
-                        net_value,
-                    )
-                    plan = self.exchange.sell_plan(
-                        market, book, row["outcome"], number(row["quantity"])
-                    )
-                except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
+                    book = self.books.book(market)
+                    streamed = True
+                except StreamUnavailable:
+                    if monotonic() < self.next_rest_attempt.get(row["slug"], 0):
+                        unavailable = True
+                        break
+                    self.next_rest_attempt[row["slug"]] = monotonic() + 3
+                    book = self.exchange.book(market)
+                    streamed = False
+                    logger.info("Position {} using validated REST fallback", row["slug"])
+                quote(book)
+                sellable, net_value = self.exchange.exit_value(
+                    market, book, row["outcome"], number(row["quantity"])
+                )
+                remaining = number(row["quantity"]) - sellable
+                logger.info(
+                    "Exit depth {} | sellable {} | remainder {} | net ${:.4f}",
+                    row["slug"],
+                    sellable,
+                    remaining,
+                    net_value,
+                )
+                plan = self.exchange.sell_plan(
+                    market, book, row["outcome"], number(row["quantity"])
+                )
+            except (ValueError, APIError, APIConnectionError, APITimeoutError) as exc:
+                if not _unavailable_book(exc):
+                    raise
+                slug = None if datetime.now(timezone.utc) >= parse_time(row["end"]) else row["slug"]
+                self._wait_for_data(exc, slug)
+                unavailable = True
+                break
+
+            # Allocate cost and prior proceeds to the quoted slice only. With
+            # full depth this is the whole trade's fee-inclusive return.
+            fraction = sellable / number(row["quantity"])
+            change = (number(row["proceeds"]) * fraction + net_value) / (
+                number(row["entry_cost"]) * fraction
+            ) - 1
+            logger.info(
+                "Exit return {} | {} return {:.2%}",
+                row["slug"],
+                "position" if remaining == 0 else "slice (remainder unpriced)",
+                change,
+            )
+            settings = row.get("settings") or self._baseline_settings
+            triggered = change <= number(
+                settings.get("stop_loss", self._baseline_settings["stop_loss"])
+            ) or (
+                settings.get("exit_policy") != "model-loss-15-v1"
+                and remaining == 0
+                and plan.quantity == number(row["quantity"])
+                and change
+                >= number(settings.get("take_profit", self._baseline_settings["take_profit"]))
+            )
+            if not triggered:
+                break
+            mark("decision_end")
+            if self.live:
+                try:
+                    account = self._account_guard()
+                except (APIError, APIConnectionError, APITimeoutError) as exc:
                     if not _unavailable_book(exc):
                         raise
-                    slug = (
-                        None
-                        if datetime.now(timezone.utc) >= parse_time(row["end"])
-                        else row["slug"]
-                    )
-                    self._wait_for_data(exc, slug)
+                    self._wait_for_data(exc)
                     unavailable = True
+                    logger.warning("Exit paused: account read unavailable ({})", type(exc).__name__)
                     break
+                position = account.positions[row["slug"]]
+                available = abs(number(position["qtyAvailableDecimal"]))
+                if available < plan.quantity:
+                    raise RuntimeError("Bot position is not fully available for the requested exit")
+            self.journal.reserve_exit(row["trade_id"], plan)
+            retry = self._execute(
+                plan,
+                market,
+                book,
+                streamed=streamed,
+                trade_id=row["trade_id"],
+                settings=row.get("settings"),
+            )
 
-                # Allocate cost and prior proceeds to the quoted slice only. With
-                # full depth this is the whole trade's fee-inclusive return.
-                fraction = sellable / number(row["quantity"])
-                change = (number(row["proceeds"]) * fraction + net_value) / (
-                    number(row["entry_cost"]) * fraction
-                ) - 1
-                logger.info(
-                    "Exit return {} | {} return {:.2%}",
-                    row["slug"],
-                    "position" if remaining == 0 else "slice (remainder unpriced)",
-                    change,
-                )
-                settings = row.get("settings") or self._baseline_settings
-                triggered = change <= number(
-                    settings.get("stop_loss", self._baseline_settings["stop_loss"])
-                ) or (
-                    settings.get("exit_policy") != "model-loss-15-v1"
-                    and remaining == 0
-                    and plan.quantity == number(row["quantity"])
-                    and change
-                    >= number(settings.get("take_profit", self._baseline_settings["take_profit"]))
-                )
-                if not triggered:
-                    break
-                if self.live:
-                    try:
-                        account = self._account_guard()
-                    except (APIError, APIConnectionError, APITimeoutError) as exc:
-                        if not _unavailable_book(exc):
-                            raise
-                        self._wait_for_data(exc)
-                        unavailable = True
-                        logger.warning(
-                            "Exit paused: account read unavailable ({})", type(exc).__name__
-                        )
-                        break
-                    position = account.positions[row["slug"]]
-                    available = abs(number(position["qtyAvailableDecimal"]))
-                    if available < plan.quantity:
-                        raise RuntimeError(
-                            "Bot position is not fully available for the requested exit"
-                        )
-                self.journal.reserve_exit(row["trade_id"], plan)
-                retry = self._execute(
-                    plan,
-                    market,
-                    book,
-                    streamed=streamed,
-                    trade_id=row["trade_id"],
-                    settings=row.get("settings"),
-                )
-
-                if not retry:
-                    break
-                row = self.journal.get(row["trade_id"])
+            if not retry:
+                break
+            row = self.journal.get(row["trade_id"])
 
         return unavailable
 

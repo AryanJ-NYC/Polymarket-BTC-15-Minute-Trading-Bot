@@ -117,12 +117,18 @@ sizing. Actual collected commission comes from terminal execution readback and
 can differ from the estimate. Missing commission remains unknown; explicit zero
 remains zero. Do not substitute estimates for actual P&L.
 
-Reserve the journal attempt before submission. Preview must preserve the market,
-intent, order type, time-in-force, quantity and price. Check plan expiry before
-and after preview. A known pre-create expiry records an unfilled attempt; a lost
-create response remains unresolved. Once an order ID is saved, recover that ID
-with bounded reads, cancel only that known order if necessary, and validate its
-terminal state and cumulative fills. The runner never cancels all account orders.
+Reserve the journal attempt before submission. Create directly after checking a copied
+request against the reserved contract, intent, LIMIT/IOC terms, automatic indicator,
+synchronous execution, quantity and USD price. Reject extra fields and mutation during
+the final quote/deadline validation. Preview is an optional parameter/fill estimate:
+the US create endpoint and pinned SDK require no preview token. It neither reserves
+liquidity nor replaces final validation, so it is no longer on the submission path.
+
+A known pre-create rejection records an unfilled attempt; a lost create response
+remains unresolved. Once an order ID is saved, recover that ID with bounded reads,
+cancel only that known order if necessary, and validate terminal cumulative fills.
+Private order notifications can shorten known-ID retry waits, but REST remains the
+accounting authority. The runner never cancels all account orders.
 
 References: [order semantics](https://docs.polymarket.us/concepts/orders),
 [create order](https://docs.polymarket.us/api-reference/orders/create-order),
@@ -150,8 +156,13 @@ expired holdings awaiting settlement make bankroll unavailable. Zero equity is
 valid but cannot fund an entry. These conditions block new entries while keeping
 account-ownership and exit checks usable.
 
-Balance, position and book reads are sequential rather than atomic. Re-read the
-account before the definitive entry sizing decision. Funded exposure and daily
+Balance, paginated positions and open-orders requests run concurrently, joined before
+admission. They are fresh reads, not an atomic snapshot or a cache. Open orders has no
+documented pagination; advertised incomplete responses fail closed. A sibling failure
+stops subsequent position pages; requests already in flight finish before the runner
+handles the error and any shared cooldown. Fresh marks follow the completed reads.
+Read the account once after an eligible decision, before definitive entry sizing;
+each subsequent serial admission gets its own fresh check. Funded exposure and daily
 loss capacity follow the [journal policy](../README.md#bankroll-sizing).
 
 References: [balances](https://docs.polymarket.us/api-reference/account/get-account-balances),
@@ -259,3 +270,5 @@ comparisons keep their existing restrictions on entry windows and open trades.
 Longer provider `Retry-After` values remain mandatory and can still affect later entries.
 
 Reference: [rate limits](https://docs.polymarket.us/api-reference/rate-limits).
+
+See [execution latency](execution-latency.md) for timing definitions and reporting.

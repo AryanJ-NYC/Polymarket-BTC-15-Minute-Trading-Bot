@@ -335,11 +335,19 @@ def test_price_tick_and_nonfinite_values_fail_closed(venue):
         parse_market(venue.market)
 
 
-def test_preview_mismatch_never_creates_order(venue):
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("marketSlug", "wrong-contract"),
+        ("quantity", 100),
+        ("tif", "TIME_IN_FORCE_GOOD_TILL_CANCEL"),
+    ],
+)
+def test_request_mismatch_never_creates_order(venue, field, value):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
-    venue.preview_mismatch = True
-    with pytest.raises(ValueError, match="preview changed"):
+    plan.request[field] = value
+    with pytest.raises(ValueError, match="does not match"):
         venue.client.submit(plan)
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
 
@@ -353,14 +361,17 @@ def test_expired_plan_cannot_submit(venue, clock):
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
-def test_preview_cannot_push_buy_past_entry_cutoff(venue, clock):
+def test_validation_cannot_push_buy_past_entry_cutoff(venue, clock):
     market = parse_market(venue.market)
     clock.current = market.start + timedelta(minutes=13, seconds=59)
     venue.timestamp = clock.current.isoformat()
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
-    venue.preview_delay = 2
-    with pytest.raises(ValueError, match="expired during preview"):
-        venue.client.submit(plan)
+
+    def validate():
+        clock.current += timedelta(seconds=2)
+
+    with pytest.raises(ValueError, match="expired during validation"):
+        venue.client.submit(plan, validate=validate)
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
 
 
@@ -539,28 +550,21 @@ def test_malformed_book_numbers_are_unavailable(venue, bad_number):
         venue.client.book(parse_market(venue.market))
 
 
-def test_entry_cutoff_is_rechecked_after_preview(venue, clock, monkeypatch):
+def test_request_mutation_during_validation_never_creates_order(venue):
     from execution.polymarket_client import OrderPreflightError
 
     market = parse_market(venue.market)
-    clock.current = market.start + timedelta(minutes=13, seconds=59)
-    venue.timestamp = clock.current.isoformat()
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
-    assert plan.expires_at == market.start + timedelta(minutes=14)
-    preview = venue.sdk.orders.preview
 
-    def delayed_preview(request):
-        result = preview(request)
-        clock.current += timedelta(seconds=2)
-        return result
+    def validate():
+        plan.request["quantity"] = 100
 
-    monkeypatch.setattr(venue.sdk.orders, "preview", delayed_preview)
-    with pytest.raises(OrderPreflightError, match="expired during preview"):
-        venue.client.submit(plan)
+    with pytest.raises(OrderPreflightError, match="changed during validation"):
+        venue.client.submit(plan, validate=validate)
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
 
 
-def test_validation_rechecks_latest_quote_after_preview(venue):
+def test_final_validation_failure_prevents_create(venue):
     from execution.polymarket_client import OrderPreflightError
 
     market = parse_market(venue.market)
@@ -569,12 +573,11 @@ def test_validation_rechecks_latest_quote_after_preview(venue):
 
     def validate():
         validations.append(True)
-        if len(validations) == 2:
-            raise ValueError("Stream disconnected during preview")
+        raise ValueError("Stream disconnected before create")
 
     with pytest.raises(OrderPreflightError, match="Order preflight failed"):
         venue.client.submit(plan, validate=validate)
-    assert len(validations) == 2
+    assert len(validations) == 1
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
 
 
@@ -597,18 +600,17 @@ def test_malformed_rest_envelope_is_unavailable(venue, monkeypatch, response):
         venue.client.book(parse_market(venue.market))
 
 
-def test_preview_errors_do_not_expose_authenticated_payload(venue, monkeypatch):
+def test_validation_errors_do_not_expose_authenticated_payload(venue):
     from execution.polymarket_client import OrderPreflightError
 
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
 
-    def reject(_):
+    def reject():
         raise ValueError("private-key X-PM-Signature authenticated-provider-response")
 
-    monkeypatch.setattr(venue.sdk.orders, "preview", reject)
     with pytest.raises(OrderPreflightError) as error:
-        venue.client.submit(plan)
+        venue.client.submit(plan, validate=reject)
     assert "private-key" not in str(error.value)
     assert "Signature" not in str(error.value)
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
@@ -814,14 +816,14 @@ def test_stale_source_marks_preserve_account_reads_without_metadata(venue, clock
     )
 
 
-def test_provider_preview_failure_preserves_recovery_cause_without_create_or_secrets(venue):
+def test_validation_rest_failure_preserves_recovery_cause_without_create_or_secrets(venue):
     from execution.polymarket_client import OrderNotSubmitted, OrderPreflightError
 
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
 
-    def reject_preview(request):
-        if request.url.path == "/v1/order/preview":
+    def reject_book(request):
+        if request.url.path == f"/v1/markets/{market.slug}/book":
             return httpx.Response(
                 429,
                 headers={"Retry-After": "60", "X-Private": "private-header-value"},
@@ -829,9 +831,9 @@ def test_provider_preview_failure_preserves_recovery_cause_without_create_or_sec
             )
         return None
 
-    venue.on_request = reject_preview
+    venue.on_request = reject_book
     with pytest.raises(OrderNotSubmitted) as error:
-        venue.client.submit(plan)
+        venue.client.submit(plan, validate=lambda: venue.client.book(market))
     assert isinstance(error.value, OrderPreflightError)
     assert error.value.cause.status_code == 429
     assert error.value.cause.response.headers["Retry-After"] == "60"

@@ -104,8 +104,6 @@ def venue(market_row, clock):
             self.fill_price = "0.6400"
             self.order = None
             self.fail_create = False
-            self.preview_mismatch = False
-            self.preview_delay = 0
             self.settlement = None
             self.timestamp = clock.current.isoformat()
             self.bid = "0.63"
@@ -123,6 +121,9 @@ def venue(market_row, clock):
             )
             self.sdk._http.close()
             self.sdk._http = httpx.Client(transport=httpx.MockTransport(self.handle))
+            from stream_fakes import FakeSocket
+
+            self.sdk.ws.private = FakeSocket
             self.client = PolymarketClient(self.sdk)
 
         def handle(self, request):
@@ -184,11 +185,6 @@ def venue(market_row, clock):
                         "offers": [{"px": {"value": self.ask, "currency": "USD"}, "qty": "40"}],
                     }
                 }
-            elif path == "/v1/order/preview":
-                clock.current += timedelta(seconds=self.preview_delay)
-                body = {"order": copy.deepcopy(payload["request"])}
-                if self.preview_mismatch:
-                    body["order"]["quantity"] = 999
             elif path == "/v1/orders" and request.method == "POST":
                 if self.fail_create:
                     raise httpx.ReadTimeout("fake lost response", request=request)
@@ -269,3 +265,23 @@ def journal(tmp_path):
     result = journal_module.TradeJournal(tmp_path / "paper.sqlite")
     yield result
     result.close()
+
+
+@pytest.fixture
+def before_validation(venue, monkeypatch):
+    """Change external state at the real client's final validation boundary."""
+
+    def install(callback):
+        submit = venue.client.submit
+
+        def submit_with_change(plan, *, validate=None):
+            def final_validation():
+                callback(plan)
+                if validate is not None:
+                    validate()
+
+            return submit(plan, validate=final_validation)
+
+        monkeypatch.setattr(venue.client, "submit", submit_with_change)
+
+    return install

@@ -128,8 +128,8 @@ def test_one_live_runner_executes_both_assigned_arms_in_the_same_journal(
     assert sum(method == "POST" and path == "/v1/orders" for method, path, _ in venue.calls) == 2
 
 
-def test_assigned_model_rechecks_ev_after_preview_before_creating_live_order(
-    venue, journal, clock, tmp_path, books, stream_feed
+def test_assigned_model_rechecks_ev_after_final_validation_before_creating_live_order(
+    before_validation, venue, journal, clock, tmp_path, books, stream_feed
 ):
     model = saved_model(
         tmp_path,
@@ -142,13 +142,14 @@ def test_assigned_model_rechecks_ev_after_preview_before_creating_live_order(
     warm_up(trader, venue, clock, stream_feed)
     # Time alone changes this real saved model's prediction while the executable
     # quote remains identical and fresh, isolating the model pre-create EV check.
-    venue.preview_delay = 0.5
+    before_validation(
+        lambda plan: setattr(clock, "current", clock.current + timedelta(seconds=0.5))
+    )
     trader.tick()
     row = journal.records()[0]
     assert row["state"] == "unfilled"
     assert row["pending"] is None
     assert row["settings"]["experiment"]["arm"] == "model"
-    assert any(path == "/v1/order/preview" for _, path, _ in venue.calls)
     assert not any(method == "POST" and path == "/v1/orders" for method, path, _ in venue.calls)
 
 
@@ -157,17 +158,32 @@ def test_assigned_model_rechecks_ev_after_preview_before_creating_live_order(
 )
 @pytest.mark.parametrize("unavailable", ["book", "account"])
 def test_early_unavailable_opportunities_keep_their_experiment_and_arm(
-    venue, journal, clock, tmp_path, books, stream_feed, experiment_id, arm, unavailable
+    venue,
+    journal,
+    clock,
+    tmp_path,
+    books,
+    stream_feed,
+    monkeypatch,
+    experiment_id,
+    arm,
+    unavailable,
 ):
     model = saved_model(tmp_path, 0.8)
     trader = enrolled_trader(venue, journal, clock, books, model, experiment_id)
+    warm_up(trader, venue, clock, stream_feed)
+    if unavailable == "account":
+        # Admission now reads the account only after an eligible signal.
+        monkeypatch.setattr(trader.strategy, "decide", lambda *_: "up")
     if unavailable == "book":
         stream_feed.disconnect()
     else:
         venue.failures[("GET", "/v1/account/balances")] = [503]
     trader.tick()
     observation = journal.opportunities()[-1]
-    assert observation["decision"] == f"{unavailable}_unavailable"
+    assert observation["decision"] == (
+        "book_unavailable" if unavailable == "book" else "plan_rejected"
+    )
     assert observation["settings"]["experiment"] == {
         "id": experiment_id,
         "arm": arm,

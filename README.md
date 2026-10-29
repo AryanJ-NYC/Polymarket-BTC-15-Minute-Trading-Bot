@@ -116,8 +116,7 @@ Temporary read failures retain known order IDs and recover automatically.
   quantity. Maximum five open positions. The default model Kelly policy below
   uses an edge-dependent target capped at 4% instead of the baseline's 2% target.
 - Rechecks eligible book generation, executable price/depth, freshness, and entry
-  deadline after slow work and immediately before submission, including after
-  preview. Known preflight rejections safely release the reserved order;
+  deadline after slow work and during final validation immediately before submission. Known preflight rejections safely release the reserved order;
   ambiguous create outcomes remain pending and are never retried automatically.
   A favorable BUY quote can pass within the original reserved limit; price,
   depth, policy, and refreshed model-edge checks still apply. After a SELL is
@@ -250,9 +249,9 @@ requests until Retry-After (at least 30 seconds); stream receipt continues.
 Owned-contract metadata/book fallback limits apply to that contract, allowing
 reconciliation and other owned positions to continue.
 Cancellation acknowledgments also require terminal readback before accounting.
-Preflight/preview failures proven to precede create release their reservation as
+Preflight failures proven to precede create release their reservation as
 unfilled; failures after create begins keep the reservation for reconciliation.
-Baseline BUY plans expire at the selected timing window's end even when preview
+Baseline BUY plans expire at the selected timing window's end even when final validation
 or account requests take time. Model entries retain their current 13:00-14:00 window.
 Logs include the failed HTTP method/path and status without response bodies.
 
@@ -288,7 +287,7 @@ python -m pip check
 
 Tests replace HTTP transport at the official SDK seam; they do not need your
 keys or submit real orders. They exercise YES/NO prices, fees and minimum sizes,
-preview/terminal readback, partial fills, restart safety, real paper accounting,
+direct create/terminal readback, partial fills, restart safety, real paper accounting,
 loss budgets, and read-only defaults.
 
 Source map: [bot.py](bot.py) owns the loop; [the exchange client](execution/polymarket_client.py)
@@ -612,7 +611,7 @@ strictly positive result may enter. Baseline and `--no-kelly` model entries use
 a 2% target; default model entries use quarter Kelly capped at 4%, as below.
 All policies share 10% funded exposure and 10% daily loss budgets, with existing
 depth and five-position checks. Slow account reads and order
-preview cannot extend the minute-14 cutoff.
+final validation cannot extend the minute-14 cutoff.
 
 Decision settings retain the full model JSON, its SHA-256 tag, q, candidate
 quantities, prices, fee bounds and EV. `results_report.py` adds `by_policy` metrics
@@ -672,7 +671,7 @@ from the target before sizing and remains part of the EV check.
 
 Sizing uses the refreshed account bankroll and available buying power. The
 existing shared 10% funded exposure, 10% daily net-loss budget and five-position
-limits still apply. Final quote checks, including after preview, also reject a
+limits still apply. Final quote checks, immediately before create, also reject a
 planned stake if the refreshed probability no longer supports its size.
 
 New Kelly model trades save `model-loss-15-v1`: attempt a bounded IOC sale when
@@ -832,3 +831,6 @@ The continuous model selects the paired exit-aware 15-minute artifact through
 [the service override](deploy/exit-aware-model.conf), following the operator's
 October 24 activation instruction. Its frozen evidence, activation decision and
 recovery/rollback behavior are documented in [exit-aware entries](docs/exit-aware-entries.md).
+
+Execution scheduling, timing fields and offline latency reports are documented in
+[execution latency](docs/execution-latency.md).

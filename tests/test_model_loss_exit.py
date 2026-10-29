@@ -191,18 +191,17 @@ def test_unexecutable_stop_never_invents_a_fill(
     assert journal.exposure() == Decimal("1.20")
 
 
-@pytest.mark.parametrize("stage", ["account", "preview"])
+@pytest.mark.parametrize("stage", ["account", "final_validation"])
 @pytest.mark.parametrize("change", ["adverse", "recovered", "missing", "depth"])
-def test_stop_revalidates_after_slow_account_and_preview_work(
-    venue, journal, books, stream_feed, stage, change
+def test_stop_revalidates_after_slow_account_and_final_validation_work(
+    before_validation, venue, journal, books, stream_feed, stage, change
 ):
     market, trade_id = seed_model_trade(venue, journal, books)
     publish_exit(venue, stream_feed, "up", "0.52")
     triggered = []
 
-    def move_book(request):
-        target = "/v1/account/balances" if stage == "account" else "/v1/order/preview"
-        if request.url.path == target and not triggered:
+    def move_book(_):
+        if not triggered:
             triggered.append(True)
             publish_exit(
                 venue,
@@ -212,7 +211,12 @@ def test_stop_revalidates_after_slow_account_and_preview_work(
                 quantity="0.001" if change == "depth" else "100",
             )
 
-    venue.on_request = move_book
+    if stage == "account":
+        venue.on_request = lambda request: (
+            move_book(request) if request.url.path == "/v1/account/balances" else None
+        )
+    else:
+        before_validation(move_book)
     TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
 
     assert triggered

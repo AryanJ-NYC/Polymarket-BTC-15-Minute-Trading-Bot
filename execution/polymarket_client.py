@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path
+from threading import Event
 from time import monotonic, sleep, time_ns
 
 from dotenv import dotenv_values
 from loguru import logger
 from polymarket_us import APIConnectionError, APIError, APITimeoutError, NotFoundError, PolymarketUS
 
+from execution.latency import mark, stage, timed
+
 
 class PolymarketClient:
     def __init__(self, client: PolymarketUS):
         self.client = client
+        self.order_notifications = None
 
     @classmethod
     def connect(cls, env_file: Path) -> PolymarketClient:
@@ -29,41 +36,96 @@ class PolymarketClient:
         return cls(PolymarketUS(key_id=key_id, secret_key=secret, timeout=10, max_retries=0))
 
     def close(self) -> None:
+        if self.order_notifications is not None:
+            self.order_notifications.close()
         self.client.close()
+
+    def order_notification_health(self) -> dict | None:
+        return None if self.order_notifications is None else self.order_notifications.health()
+
+    def start_order_notifications(self) -> None:
+        from execution.order_notifications import OrderNotifications
+
+        if self.order_notifications is None:
+            self.order_notifications = OrderNotifications(self.client.ws.private)
+            self.order_notifications.start()
 
     def market_stream(self):
         from execution.market_stream import MarketStream
 
         return MarketStream(self.client.ws.markets)
 
+    @timed("account")
     def account(self, *, book_source: Callable[[str], Book] | None = None) -> Account:
-        balances = self._fresh_get("/v1/account/balances")["balances"]
+        # The SDK uses a thread-safe httpx.Client and per-request auth headers.
+        # Join all reads (including failures) before another admission can begin.
+        stopped = Event()
+
+        def read_account(read):
+            try:
+                return read(stopped)
+            except Exception:
+                stopped.set()
+                raise
+
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="account-read") as pool:
+            jobs = [
+                pool.submit(copy_context().run, read_account, read)
+                for read in (self._balances, self._positions, self._open_orders)
+            ]
+            results = []
+            errors = []
+            for job in jobs:
+                try:
+                    results.append(job.result())
+                except Exception as exc:
+                    errors.append(exc)
+            if errors:
+                # A concurrent 429 must still impose the shared runner cooldown.
+                actual = [e for e in errors if not isinstance(e, _AccountReadAborted)]
+                raise next((e for e in actual if getattr(e, "status_code", None) == 429), actual[0])
+        balances, positions, orders = results
         usd = [row for row in balances if row["currency"] == "USD"]
         if len(usd) != 1:
             raise ValueError("Expected exactly one USD account balance")
         buying_power = number(usd[0]["buyingPower"])
+        for position in positions.values():
+            position_quantity(position)
+        bankroll = self._bankroll(usd[0], positions, book_source)
+        return Account(buying_power, positions, orders, bankroll)
+
+    @timed("account_balances")
+    def _balances(self, stopped):
+        return self._fresh_get("/v1/account/balances")["balances"]
+
+    @timed("account_positions")
+    def _positions(self, stopped):
         positions = {}
         cursor = None
+        seen = set()
         for _ in range(100):
+            if cursor and stopped.is_set():
+                raise _AccountReadAborted("Concurrent account read failed")
             params = {"limit": 100}
             if cursor:
                 params["cursor"] = cursor
             page = self._fresh_get("/v1/portfolio/positions", params)
             positions.update(page["positions"])
             if page.get("eof") is True:
-                break
-            next_cursor = page.get("nextCursor")
-            if not next_cursor or next_cursor == cursor:
+                return positions
+            cursor = page.get("nextCursor")
+            if not cursor or cursor in seen:
                 raise ValueError("Incomplete positions pagination")
-            cursor = next_cursor
-        else:
-            raise ValueError("Positions pagination limit reached")
-        orders = self.client.orders.list()["orders"]
-        # Validate quantity fields rather than treating missing data as zero.
-        for position in positions.values():
-            position_quantity(position)
-        bankroll = self._bankroll(usd[0], positions, book_source)
-        return Account(buying_power, positions, orders, bankroll)
+            seen.add(cursor)
+        raise ValueError("Positions pagination limit reached")
+
+    @timed("account_orders")
+    def _open_orders(self, stopped):
+        # US open orders has no documented pagination parameters.
+        page = self._fresh_get("/v1/orders/open")
+        if page.get("nextCursor") or page.get("eof") is False:
+            raise ValueError("Incomplete open orders response")
+        return page["orders"]
 
     def discover_market(self, horizon_seconds: int = 900) -> Market | None:
         """Discover by typed asset terms and measurement windows, never slug guesses."""
@@ -111,6 +173,7 @@ class PolymarketClient:
         validate_book(market, book)
         return book
 
+    @timed("plan_construction")
     def buy_plan(
         self,
         market: Market,
@@ -139,6 +202,7 @@ class PolymarketClient:
             raise ValueError("Budget or visible depth is below the minimum trade quantity")
         return _plan(market, book, outcome, "BUY", yes_price, quantity, fee_bound, deadline)
 
+    @timed("plan_construction")
     def sell_plan(self, market: Market, book: Book, outcome: str, quantity: Decimal) -> Plan:
         validate_book(market, book)
         if outcome not in {"up", "down"} or not quantity.is_finite() or quantity <= ZERO:
@@ -177,46 +241,63 @@ class PolymarketClient:
         return quantity - remaining, net
 
     def submit(self, plan: Plan, *, validate: Callable[[], None] | None = None) -> str:
-        """Preview and submit exactly once, returning the exchange-assigned ID.
+        """Validate locally and submit exactly once, returning the exchange-assigned ID.
 
         The caller must durably reserve the attempt before entering this method.
         OrderPreflightError guarantees create was never called. Other failures
         remain unresolved until reconciled and must never be blindly retried.
         """
         try:
-            if datetime.now(timezone.utc) >= plan.expires_at:
-                raise OrderPreflightError("Order plan has expired")
-            if validate:
-                validate()
-            preview = self.client.orders.preview({"request": plan.request})["order"]
-            for field in ("marketSlug", "intent", "type", "tif"):
-                if preview.get(field) != plan.request[field]:
-                    raise OrderPreflightError(
-                        "Order preview changed the requested contract or order terms"
-                    )
-            if (
-                number(preview["quantity"]) != plan.quantity
-                or amount(preview["price"]) != plan.yes_price
-            ):
-                raise OrderPreflightError("Order preview changed the requested price or quantity")
-            if validate:
-                validate()
-            if datetime.now(timezone.utc) >= plan.expires_at:
-                raise OrderPreflightError("Order plan expired during preview")
+            with stage("final_validation"):
+                if datetime.now(timezone.utc) >= plan.expires_at:
+                    raise OrderPreflightError("Order plan has expired")
+                request = deepcopy(plan.request)
+                expected = {
+                    "marketSlug": plan.slug,
+                    "intent": f"ORDER_INTENT_{plan.action}_{'LONG' if plan.outcome == 'up' else 'SHORT'}",
+                    "type": "ORDER_TYPE_LIMIT",
+                    "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                    "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+                    "synchronousExecution": True,
+                }
+                if (
+                    plan.action not in {"BUY", "SELL"}
+                    or plan.outcome not in {"up", "down"}
+                    or set(request) != set(expected) | {"price", "quantity"}
+                    or any(request.get(key) != value for key, value in expected.items())
+                    or number(request["quantity"]) != plan.quantity
+                    or plan.quantity <= ZERO
+                    or amount(request["price"]) != plan.yes_price
+                    or not ZERO < plan.yes_price < ONE
+                ):
+                    raise OrderPreflightError("Order request does not match the reserved plan")
+                if validate:
+                    validate()
+                if plan.request != request:
+                    raise OrderPreflightError("Order request changed during validation")
+                if datetime.now(timezone.utc) >= plan.expires_at:
+                    raise OrderPreflightError("Order plan expired during validation")
         except OrderPreflightError:
             raise
         except Exception as exc:
             raise OrderNotSubmitted(exc) from None
-        result = self.client.orders.create(plan.request)
+        with stage("create"):
+            result = self.client.orders.create(request)
         order_id = result["id"]
         if not isinstance(order_id, str) or not order_id:
             raise ValueError("Order response did not include an order ID")
+        with stage("acknowledgement"):
+            pass
         return order_id
 
+    @timed("readback")
     def order(self, order_id: str) -> dict:
         # Only repeat reads of an already-known ID. Never enable SDK-wide retries:
         # a lost create response cannot safely be replayed.
         for attempt in range(3):
+            revision = (
+                self.order_notifications.revision(order_id) if self.order_notifications else None
+            )
             try:
                 order = self._fresh_get(f"/v1/order/{order_id}")["order"]
                 break
@@ -226,9 +307,16 @@ class PolymarketClient:
                 if getattr(exc, "status_code", None) == 429:
                     raise  # The runner honors Retry-After without further requests.
                 logger.warning("Retrying order {} readback: {}", order_id, api_error_summary(exc))
-                sleep(2**attempt)
+                with stage("confirmation_wait"):
+                    if self.order_notifications is None:
+                        sleep(2**attempt)
+                    else:
+                        if self.order_notifications.wait(order_id, revision, 2**attempt):
+                            mark("stream_confirmation_hint")
         if order["id"] != order_id:
             raise ValueError("Order readback ID mismatch")
+        if self.order_notifications is not None and order.get("state") in TERMINAL_STATES:
+            self.order_notifications.forget(order_id)
         return order
 
     def cancel(self, order_id: str, slug: str) -> dict:
@@ -741,3 +829,7 @@ TERMINAL_STATES = {
     "ORDER_STATE_REJECTED",
     "ORDER_STATE_EXPIRED",
 }
+
+
+class _AccountReadAborted(ValueError):
+    """A sibling account read failed; no more pages may start."""

@@ -259,37 +259,30 @@ def test_disabled_five_minute_modes_do_not_defer_startup_fifteen_minute_discover
 
 
 @pytest.mark.parametrize("change", ["deadline", "upper_band", "side", "depth"])
-def test_preview_changes_are_terminal_and_capture_the_last_quote(
-    venue, journal, stream_feed, clock, five_minute_market, actual_fills, change
+def test_final_validation_changes_are_terminal_and_capture_the_last_quote(
+    before_validation, venue, journal, stream_feed, clock, five_minute_market, actual_fills, change
 ):
     publish_five(venue, stream_feed, clock, five_minute_market)
-    handler = venue.on_request
 
-    def during_preview(request):
-        if request.url.path == "/v1/order/preview":
-            if change == "deadline":
-                clock.current += timedelta(seconds=5)
+    def during_final_validation(plan):
+        if change == "deadline":
+            clock.current += timedelta(seconds=5)
+        else:
+            clock.current += timedelta(microseconds=1)
+            if change == "upper_band":
+                publish_five(venue, stream_feed, clock, five_minute_market, bid="0.96", ask="0.98")
+            elif change == "side":
+                publish_five(venue, stream_feed, clock, five_minute_market, bid="0.10", ask="0.12")
             else:
-                clock.current += timedelta(microseconds=1)
-                if change == "upper_band":
-                    publish_five(
-                        venue, stream_feed, clock, five_minute_market, bid="0.96", ask="0.98"
-                    )
-                elif change == "side":
-                    publish_five(
-                        venue, stream_feed, clock, five_minute_market, bid="0.10", ask="0.12"
-                    )
-                else:
-                    publish_five(
-                        venue,
-                        stream_feed,
-                        clock,
-                        five_minute_market,
-                        offers=[{"px": {"value": "0.90", "currency": "USD"}, "qty": "0.01"}],
-                    )
-        return handler(request)
+                publish_five(
+                    venue,
+                    stream_feed,
+                    clock,
+                    five_minute_market,
+                    offers=[{"px": {"value": "0.90", "currency": "USD"}, "qty": "0.01"}],
+                )
 
-    venue.on_request = during_preview
+    before_validation(during_final_validation)
     bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
     assert not actual_fills
     row = journal.get(five_minute_market.slug + ":five-minute")

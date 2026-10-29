@@ -62,8 +62,9 @@ def test_live_order_failure_cannot_enter_via_paper_default(
     assert all(method == "GET" for method, _, _ in venue.calls)
 
 
-def test_manual_position_or_open_order_blocks_live_writes(venue, journal, books):
+def test_manual_position_or_open_order_blocks_live_writes(venue, journal, books, monkeypatch):
     trader = TradingBot(venue.client, journal, books, live=True)
+    monkeypatch.setattr(trader.strategy, "decide", lambda *_: "up")
     venue.positions = {"manual-position": {"netPositionDecimal": "0.25", "expired": False}}
     with pytest.raises(RuntimeError, match="positions differ"):
         trader.tick()
@@ -476,13 +477,10 @@ def test_live_runner_sizes_from_account_with_daily_limit(
     "later_equity,later_power,maximum",
     [("20", "20", "0.40"), ("100", "0.40", "0.40"), ("0", "0", "0")],
 )
-def test_lower_second_account_snapshot_resizes_or_skips(
+def test_fresh_admission_account_resizes_or_skips(
     venue, journal, monkeypatch, later_equity, later_power, maximum, books, stream_feed
 ):
-    venue.balance_snapshots = [
-        dict(venue.balance),
-        {**venue.balance, "currentBalance": later_equity, "buyingPower": later_power},
-    ]
+    venue.balance.update(currentBalance=later_equity, buyingPower=later_power)
     # Small enough to remain a valid fake partial fill after a budget reduction.
     venue.fill_quantity = 0.1
     trader = TradingBot(venue.client, journal, books, live=True)
@@ -502,7 +500,7 @@ def test_lower_second_account_snapshot_resizes_or_skips(
 def test_live_entry_refreshes_initially_unusable_account(
     venue, journal, monkeypatch, clock, cash, buying_power, books, stream_feed
 ):
-    clock.current += timedelta(seconds=49)  # Last eligible second of the entry window.
+    clock.current += timedelta(seconds=46)  # Leave time for a second eligible decision.
     venue.timestamp = clock.current.isoformat()
     stream_feed.publish()
     venue.balance_snapshots = [
@@ -511,6 +509,12 @@ def test_live_entry_refreshes_initially_unusable_account(
     ]
     trader = TradingBot(venue.client, journal, books, live=True)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
+    trader.tick()
+    assert journal.records() == []
+    assert sum(path == "/v1/account/balances" for _, path, _ in venue.calls) == 1
+    clock.current += timedelta(seconds=3)
+    venue.timestamp = clock.current.isoformat()
+    stream_feed.publish()
     trader.tick()
     assert journal.get(venue.market["slug"])["state"] == "open"
     assert sum(path == "/v1/account/balances" for _, path, _ in venue.calls) == 2
@@ -524,10 +528,9 @@ def test_live_entry_refreshes_initially_unusable_account(
 def test_later_credited_gain_loss_deposit_or_withdrawal_changes_entry(
     venue, journal, monkeypatch, cash, budget, books, stream_feed
 ):
-    venue.balance_snapshots = [
-        dict(venue.balance),
-        {**venue.balance, "currentBalance": cash, "buyingPower": cash},
-    ]
+    # A prior read must not be cached for admission.
+    assert venue.client.account().bankroll == Decimal("100")
+    venue.balance.update(currentBalance=cash, buyingPower=cash)
     trader = TradingBot(venue.client, journal, books, live=True)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
@@ -683,7 +686,7 @@ def test_decision_delay_resizes_from_fresh_account_and_latest_stream_quote(
     request = next(body for _, path, body in venue.calls if path == "/v1/orders")
     assert request["price"]["value"] == "0.66"
     assert Decimal(str(request["quantity"])) == Decimal("0.59")
-    assert sum(path == "/v1/account/balances" for _, path, _ in venue.calls) == 2
+    assert sum(path == "/v1/account/balances" for _, path, _ in venue.calls) == 1
     assert not any(path.endswith("/book") for _, path, _ in venue.calls)
     row = journal.get(venue.market["slug"])
     assert row["settings"]["entry_bankroll_fraction"] == "0.02"
@@ -878,13 +881,18 @@ def test_one_position_read_outage_does_not_skip_other_position_exit(
 
 
 @pytest.mark.parametrize("failure", ["mismatch", 409, 503, 429])
-def test_failed_preview_releases_reservation_without_creating_order(
-    venue, journal, monkeypatch, failure, books, stream_feed
+def test_failed_final_validation_releases_reservation_without_creating_order(
+    venue, journal, monkeypatch, failure, books, stream_feed, before_validation
 ):
-    if failure == "mismatch":
-        venue.preview_mismatch = True
-    else:
-        venue.failures[("POST", "/v1/order/preview")] = [failure]
+    def reject(plan):
+        if failure == "mismatch":
+            plan.request["quantity"] = 100
+        else:
+            market = parse_market(venue.market)
+            venue.failures[("GET", f"/v1/markets/{market.slug}/book")] = [failure]
+            venue.client.book(market)
+
+    before_validation(reject)
     trader = TradingBot(venue.client, journal, books, live=True)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
@@ -1064,7 +1072,7 @@ def test_pending_partial_exit_can_expire_while_other_position_is_managed(
     )
 
 
-@pytest.mark.parametrize("stage", ["discovery", "initial_account", "final_account", "exit_account"])
+@pytest.mark.parametrize("stage", ["discovery", "entry_account", "exit_account"])
 def test_shared_rest_rate_limit_stops_further_requests_in_current_tick_and_cooldown(
     venue, journal, books, monkeypatch, stage
 ):
@@ -1086,10 +1094,7 @@ def test_shared_rest_rate_limit_stops_further_requests_in_current_tick_and_coold
         target = (
             path == "/v1/markets"
             if stage == "discovery"
-            else (
-                path == "/v1/account/balances"
-                and balances[0] == (2 if stage == "final_account" else 1)
-            )
+            else (path == "/v1/account/balances" and balances[0] == 1)
         )
         if target and not failed[0]:
             failed[0] = True
@@ -1102,7 +1107,13 @@ def test_shared_rest_rate_limit_stops_further_requests_in_current_tick_and_coold
     trader.tick()
     assert failed[0]
     assert trader.next_data_attempt == 160.0
-    assert venue.calls[-1][1] == ("/v1/markets" if stage == "discovery" else "/v1/account/balances")
+    target = "/v1/markets" if stage == "discovery" else "/v1/account/balances"
+    failed_index = next(i for i, (_, path, _) in enumerate(venue.calls) if path == target)
+    # Independent account siblings may already be in flight when 429 arrives.
+    assert all(
+        path in {"/v1/portfolio/positions", "/v1/orders/open"}
+        for _, path, _ in venue.calls[failed_index + 1 :]
+    )
     count = len(venue.calls)
     trader.tick()
     elapsed[0] = 159.9
@@ -1112,9 +1123,9 @@ def test_shared_rest_rate_limit_stops_further_requests_in_current_tick_and_coold
     assert not any(method == "POST" for method, _, _ in venue.calls)
 
 
-@pytest.mark.parametrize("stage", ["preview", "readback"])
+@pytest.mark.parametrize("stage", ["final_validation", "readback"])
 def test_exit_rate_limit_prevents_same_tick_rest_reads_for_other_owned_positions(
-    venue, journal, books, monkeypatch, stage
+    venue, journal, books, monkeypatch, stage, before_validation
 ):
     monkeypatch.setattr(bot, "monotonic", lambda: 100.0)
     market = parse_market(venue.market)
@@ -1129,7 +1140,13 @@ def test_exit_rate_limit_prevents_same_tick_rest_reads_for_other_owned_positions
         journal.finish_order(slug, Decimal("1"), Decimal("0.95"), Decimal("0.01"))
         venue.positions[slug] = {"netPositionDecimal": "1", "qtyAvailableDecimal": "1"}
     other = journal.get("other-owned-after-rate-limit")
-    target = "/v1/order/preview" if stage == "preview" else "/v1/order/bot-order-1"
+    target = (
+        f"/v1/markets/{market.slug}/book"
+        if stage == "final_validation"
+        else "/v1/order/bot-order-1"
+    )
+    if stage == "final_validation":
+        before_validation(lambda plan: venue.client.book(market))
     venue.on_request = lambda request: (
         httpx.Response(429, headers={"Retry-After": "60"}, json={"error": "limited"})
         if request.url.path == target
@@ -1140,7 +1157,9 @@ def test_exit_rate_limit_prevents_same_tick_rest_reads_for_other_owned_positions
     assert trader.next_data_attempt == 160.0
     assert venue.calls[-1][1] == target
     assert journal.get("other-owned-after-rate-limit") == other
-    assert not any(path.endswith("/book") for _, path, _ in venue.calls)
+    assert sum(path.endswith("/book") for _, path, _ in venue.calls) == (
+        stage == "final_validation"
+    )
     creates = [body for _, path, body in venue.calls if path == "/v1/orders"]
     assert len(creates) == (stage == "readback")
     assert all(body["marketSlug"] == market.slug for body in creates)

@@ -1,8 +1,8 @@
 # Authenticated market-data streaming
 
 Paper and live runs use the official Polymarket US SDK's authenticated **market**
-WebSocket, subscribed to full `marketData` books. This stream is market data; order,
-account, settlement, and reconciliation operations continue through REST. The
+WebSocket, subscribed to full `marketData` books. Account, settlement, and authoritative reconciliation operations continue through
+REST; a separate private order subscription accelerates known-ID readback retries. The
 `--check` command is an authenticated REST diagnostic.
 
 The receiver owns its socket on a separate thread. It validates complete snapshots
@@ -59,8 +59,8 @@ the trading loop while socket receipt continues independently.
 
 The trading loop rechecks the latest eligible quote and entry deadline after slow
 context/account work and again around submission. An exit using REST fallback
-refreshes its book before and after preview; a changed executable price, reduced
-depth or missing required side prevents submission. Spending caps, preview
+refreshes its book during final validation; a changed executable price, reduced
+depth or missing required side prevents submission. Spending caps, request
 validation, duplicate reservations, and actual-fill accounting still apply. A
 shutdown signal finishes the current serialized trading tick, then closes the
 receiver, journal, and REST client. Stream closure wakes the receiver and joins
@@ -206,3 +206,29 @@ reconnect solely for missing book traffic. Resuming subscriptions starts a bound
 silence window; it does not refresh message timestamps or make any quote usable.
 Active subscriptions retain the existing silence timeout and explicit socket-error
 recovery. Repeated refresh of an active desired set cannot postpone that timeout.
+
+
+## Quote-driven scheduling and private confirmations
+
+Inside enabled entry windows or while price-managed holdings remain, validated new
+book snapshots wake the serial runner. Bursts coalesce at a minimum 250 ms loop interval;
+ordinary three-second timer wakes remain the fallback. Only the trading thread makes
+decisions/reservations; socket callbacks cannot trade. The existing three-second distinct
+snapshot history sampler remains unchanged, so receiving more messages cannot accelerate
+warmup. Disabled strategies, cooldowns, one-shot decisions and admission priority remain
+unchanged. This lowers scheduling wait, not a strategy window or price constraint.
+
+Live runs also subscribe through the pinned SDK's private order socket. A complete
+connection-local open-order snapshot (`eof`) is required before notifications can shorten
+REST retry waits. Snapshot and update messages never establish cash, ownership, fees or
+fills. Partial and terminal updates for watched known IDs are advisory wakeups only;
+REST readback retains the existing terminal-state/quantity/price/fee checks. Duplicates
+or reordered hints may cause a bounded extra read, never an accounting mutation. Missing,
+incomplete or stale stream state leaves the bounded REST fallback in force.
+
+Each connection has a fresh generation and subscription. Invalid envelopes, disconnects,
+silence or incomplete snapshot timeout clear readiness and reconnect with capped backoff.
+No replay cursor or REST/stream global ordering is assumed. The watched-ID map is capped
+at 64; terminal readback removes its ID. Private socket failure does not permit an order
+resubmission. Health logs contain readiness/generation/counts only. Private notifications
+measure confirmation separately from time-to-submit; see [execution latency](execution-latency.md).
