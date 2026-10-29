@@ -441,3 +441,60 @@ def test_shutdown_stops_after_first_pending_subscription_operation(
         # A failing shutdown must not leak its receiver into subsequent tests.
         threading.Event().wait(0.2)
         stream.close()
+
+
+@pytest.mark.parametrize("initially_subscribed", [False, True])
+@pytest.mark.parametrize("receive_snapshot", [False, True])
+def test_idle_discovery_does_not_reconnect_and_new_subscription_gets_grace(
+    venue, market_row, monkeypatch, initially_subscribed, receive_snapshot
+):
+    import execution.market_stream as stream_module
+
+    receipt_clock = [100.0]
+    monkeypatch.setattr(stream_module, "monotonic", lambda: receipt_clock[0])
+    monkeypatch.setattr("execution.polymarket_client.monotonic", lambda: receipt_clock[0])
+    monkeypatch.setattr(stream_module, "CHECK_INTERVAL", 0.001)
+    monkeypatch.setattr(stream_module, "RECONNECT_BASE", 0)
+    cycles = []
+    original = stream_module.MarketStream._sync_subscriptions
+
+    async def observe_cycle(self, socket, generation):
+        await original(self, socket, generation)
+        cycles.append(generation)
+
+    monkeypatch.setattr(stream_module.MarketStream, "_sync_subscriptions", observe_cycle)
+    factory = SocketFactory()
+    market = parse_market(market_row)
+    with started_stream(factory, [market] if initially_subscribed else []) as stream:
+        if initially_subscribed:
+            socket = factory.ready()
+            stream.set_markets([])
+            wait_for(lambda: len(socket.unsubscriptions) == 1)
+        wait_for(lambda: len(cycles) >= 2)
+        receipt_clock[0] += 120
+        before = len(cycles)
+        wait_for(lambda: len(cycles) >= before + 3)
+        assert stream.health()["reconnects"] == 0
+        assert stream.health()["cached_books"] == 0
+        stream.set_markets([market])
+        socket = factory.ready()
+        before = len(cycles)
+        wait_for(lambda: len(cycles) >= before + 3)
+        assert stream.health()["generation"] == 1
+        with pytest.raises(StreamUnavailable):
+            stream.book(market)
+        if receive_snapshot:
+            socket.publish(snapshot(socket, market_row, venue.timestamp))
+            wait_for(lambda: stream.health()["snapshots"] == 1)
+            assert stream.book(market).generation == 1
+        # Repeated desired-set refreshes cannot keep a silent active stream alive.
+        receipt_clock[0] += 30
+        stream.set_markets([market])
+        before = len(cycles)
+        wait_for(lambda: len(cycles) >= before + 3)
+        assert stream.health()["reconnects"] == 0
+        receipt_clock[0] += 6
+        factory.ready(1)
+        assert stream.health()["reconnects"] == 1
+        with pytest.raises(StreamUnavailable):
+            stream.book(market)
