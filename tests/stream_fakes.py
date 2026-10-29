@@ -34,6 +34,9 @@ class FakeSocket:
         self.loop = asyncio.get_running_loop()
         self.listeners["open"]()
 
+    async def subscribe_orders(self, request_id):
+        self.subscriptions.append((request_id, []))
+
     async def subscribe_market_data(self, request_id, slugs):
         self.subscriptions.append((request_id, slugs))
 

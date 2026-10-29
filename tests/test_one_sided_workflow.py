@@ -130,10 +130,10 @@ def test_take_profit_requires_whole_holding_in_the_best_price_ioc(
 
 
 @pytest.mark.parametrize("source", ["stream", "rest"])
-@pytest.mark.parametrize("stage", ["account", "preview"])
+@pytest.mark.parametrize("stage", ["account", "final_validation"])
 @pytest.mark.parametrize("change", ["missing_side", "price", "expiry"])
 def test_slow_work_revalidates_one_sided_exits_and_bounds_quote_refresh(
-    venue, journal, books, stream_feed, clock, source, stage, change
+    before_validation, venue, journal, books, stream_feed, clock, source, stage, change
 ):
     market = seed_position(venue, journal, books)
     payload = exit_book(venue)
@@ -143,9 +143,8 @@ def test_slow_work_revalidates_one_sided_exits_and_bounds_quote_refresh(
         stream_feed.disconnect()
     triggered = []
 
-    def during_slow_work(request):
-        target = "/v1/account/balances" if stage == "account" else "/v1/order/preview"
-        if request.url.path == target and not triggered:
+    def change_quote(_):
+        if not triggered:
             triggered.append(True)
             if change == "expiry":
                 clock.current = market.end
@@ -156,11 +155,17 @@ def test_slow_work_revalidates_one_sided_exits_and_bounds_quote_refresh(
                 venue.fill_price = "0.98"
             if source == "stream" and change != "expiry":
                 stream_feed.publish(bids=payload["bids"], offers=payload["offers"])
+
+    def during_slow_work(request):
+        if stage == "account" and request.url.path == "/v1/account/balances":
+            change_quote(request)
         if request.url.path.endswith("/book"):
             return httpx.Response(200, json={"marketData": payload})
         return None
 
     venue.on_request = during_slow_work
+    if stage == "final_validation":
+        before_validation(change_quote)
     TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
 
     assert triggered
@@ -174,7 +179,6 @@ def test_slow_work_revalidates_one_sided_exits_and_bounds_quote_refresh(
         assert Decimal(row["proceeds"]) == Decimal("0.48")
         return
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
-    assert any(path == "/v1/order/preview" for _, path, _ in venue.calls) is (stage == "preview")
     row = journal.get(market.slug)
     assert row["pending"] is None
     assert row["order_id"] is None
@@ -184,8 +188,8 @@ def test_slow_work_revalidates_one_sided_exits_and_bounds_quote_refresh(
 
 
 @pytest.mark.parametrize("outcome", ["up", "down"])
-def test_required_side_loss_at_same_timestamp_during_preview_cannot_use_cached_liquidity(
-    venue, journal, books, stream_feed, outcome
+def test_required_side_loss_at_same_timestamp_during_final_validation_cannot_use_cached_liquidity(
+    before_validation, venue, journal, books, stream_feed, outcome
 ):
     market = seed_position(venue, journal, books, outcome)
     initial = exit_book(venue, outcome)
@@ -193,25 +197,23 @@ def test_required_side_loss_at_same_timestamp_during_preview_cannot_use_cached_l
     stream_feed.publish(bids=initial["bids"], offers=initial["offers"])
     original_timestamp = books.book(market).timestamp
 
-    def during_preview(request):
-        if request.url.path == "/v1/order/preview":
-            opposite = exit_book(venue, "down" if outcome == "up" else "up")
-            before = books.health()["duplicates"]
-            stream_feed.socket.publish(
-                snapshot(
-                    stream_feed.socket,
-                    venue.market,
-                    original_timestamp.isoformat(),
-                    bids=opposite["bids"],
-                    offers=opposite["offers"],
-                )
+    def during_final_validation(plan):
+        opposite = exit_book(venue, "down" if outcome == "up" else "up")
+        before = books.health()["duplicates"]
+        stream_feed.socket.publish(
+            snapshot(
+                stream_feed.socket,
+                venue.market,
+                original_timestamp.isoformat(),
+                bids=opposite["bids"],
+                offers=opposite["offers"],
             )
-            wait_for(lambda: books.health()["duplicates"] == before + 1)
+        )
+        wait_for(lambda: books.health()["duplicates"] == before + 1)
         return None
 
-    venue.on_request = during_preview
+    before_validation(during_final_validation)
     TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
-    assert any(path == "/v1/order/preview" for _, path, _ in venue.calls)
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
     assert books.health()["cached_books"] == 0
     row = journal.get(market.slug)
@@ -255,9 +257,9 @@ def test_one_sided_entry_is_captured_without_history_or_a_fabricated_mark(
     assert not any(path.endswith("/book") for _, path, _ in venue.calls)
 
 
-@pytest.mark.parametrize("stage", ["account", "preview"])
+@pytest.mark.parametrize("stage", ["account", "final_validation"])
 def test_rest_revalidation_failure_keeps_the_exit_known_unsubmitted(
-    venue, journal, books, stream_feed, stage
+    before_validation, venue, journal, books, stream_feed, stage
 ):
     market = seed_position(venue, journal, books)
     payload = exit_book(venue)
@@ -265,9 +267,7 @@ def test_rest_revalidation_failure_keeps_the_exit_known_unsubmitted(
     failed = []
 
     def failed_quote(request):
-        if request.url.path == (
-            "/v1/account/balances" if stage == "account" else "/v1/order/preview"
-        ):
+        if stage == "account" and request.url.path == "/v1/account/balances":
             failed.append(True)
         if request.url.path.endswith("/book"):
             if failed:
@@ -276,6 +276,8 @@ def test_rest_revalidation_failure_keeps_the_exit_known_unsubmitted(
         return None
 
     venue.on_request = failed_quote
+    if stage == "final_validation":
+        before_validation(lambda plan: failed.append(True))
     TradingBot(venue.client, journal, books, live=True, one_trade=True).tick()
     row = journal.get(market.slug)
     assert row["pending"] is None

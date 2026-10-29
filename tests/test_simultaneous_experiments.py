@@ -14,8 +14,16 @@ from results_report import summarize
 
 
 @pytest.mark.parametrize("identity", ["all-four", "model-first"])
-def test_slow_first_preview_keeps_second_policys_expired_window_visible(
-    venue, journal, stream_feed, clock, monkeypatch, future_market, tmp_path, identity
+def test_slow_first_final_validation_keeps_second_policys_expired_window_visible(
+    before_validation,
+    venue,
+    journal,
+    stream_feed,
+    clock,
+    monkeypatch,
+    future_market,
+    tmp_path,
+    identity,
 ):
     clock.current = future_market.start
     trader = bot.TradingBot(
@@ -32,7 +40,7 @@ def test_slow_first_preview_keeps_second_policys_expired_window_visible(
     clock.current = future_market.start + timedelta(seconds=839)
     publish(venue, stream_feed, clock)
     warm(trader.strategy, stream_feed.books.book(future_market), clock, monkeypatch)
-    venue.preview_delay = 2
+    before_validation(lambda plan: setattr(clock, "current", clock.current + timedelta(seconds=2)))
     trader.tick()
     assert len(journal.records()) == 1
     assert journal.records()[0]["state"] == "unfilled"
@@ -190,6 +198,7 @@ def test_shared_outage_preserves_both_active_policy_observations(
     )
     clock.current = future_market.start + timedelta(seconds=780)
     publish(venue, stream_feed, clock)
+    warm(trader.strategy, stream_feed.books.book(future_market), clock, monkeypatch)
     if unavailable == "book":
         stream_feed.disconnect()
     else:
@@ -199,7 +208,9 @@ def test_shared_outage_preserves_both_active_policy_observations(
     observations = journal.opportunities()
     assert len(observations) == 2
     assert {row["settings"]["experiment"]["arm"] for row in observations} == {"baseline", "model"}
-    assert {row["decision"] for row in observations} == {unavailable + "_unavailable"}
+    assert {row["decision"] for row in observations} == (
+        {"book_unavailable"} if unavailable == "book" else {"plan_rejected", "account_unavailable"}
+    )
 
 
 @pytest.mark.parametrize("identity,priority", [("all-four", "model"), ("model-first", "baseline")])

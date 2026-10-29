@@ -77,8 +77,8 @@ def test_model_enters_up_with_fee_bound_and_records_actual_partial_fill(
         journal.close()
 
 
-def test_preview_crossing_cutoff_skips_without_unknown_submission(
-    venue, tmp_path, clock, monkeypatch, books, stream_feed
+def test_final_validation_crossing_cutoff_skips_without_unknown_submission(
+    before_validation, venue, tmp_path, clock, monkeypatch, books, stream_feed
 ):
     journal = TradeJournal(tmp_path / "cutoff.sqlite")
     try:
@@ -89,16 +89,9 @@ def test_preview_crossing_cutoff_skips_without_unknown_submission(
         clock.current += timedelta(seconds=50)
         venue.timestamp = clock.current.isoformat()
         publish_book(stream_feed, venue, clock)
-        original = venue.handle
-
-        def delayed_preview(request):
-            response = original(request)
-            if request.url.path == "/v1/order/preview":
-                clock.current += timedelta(seconds=11)
-            return response
-
-        venue.sdk._http.close()
-        venue.sdk._http = httpx.Client(transport=httpx.MockTransport(delayed_preview))
+        before_validation(
+            lambda plan: setattr(clock, "current", clock.current + timedelta(seconds=11))
+        )
         trader.tick()
         assert journal.records()[0]["state"] == "unfilled"
         assert journal.records()[0]["pending"] is None
@@ -182,7 +175,7 @@ def test_refreshed_book_removes_apparent_edge(venue, tmp_path, clock, books, str
             nonlocal balances
             if request.url.path == "/v1/account/balances":
                 balances += 1
-                if balances == 2:
+                if balances == 1:
                     venue.bid, venue.ask = "0.79", "0.81"
                     publish_book(stream_feed, venue, clock)
             return None
@@ -233,7 +226,7 @@ def test_account_reads_crossing_cutoff_do_not_reserve(venue, tmp_path, clock, bo
             response = original(request)
             if request.url.path == "/v1/account/balances":
                 balances += 1
-                if balances == 2:
+                if balances == 1:
                     clock.current += timedelta(seconds=11)
             return response
 
@@ -365,7 +358,6 @@ def test_model_uses_refreshed_bankroll_and_buying_power(
         )
         warm_up(trader, venue, clock, stream_feed)
         venue.balance_snapshots = [
-            {**venue.balance, "currentBalance": 0.0, "buyingPower": 0.0},
             {**venue.balance, "currentBalance": 500.0, "buyingPower": buying_power},
         ]
         trader.tick()
@@ -573,28 +565,26 @@ def publish_book(stream_feed, venue, clock, *, quantity="100"):
     wait_for(lambda: stream_feed.books.health()["snapshots"] == before + 1)
 
 
-def test_preview_rejects_model_edge_lost_when_opposite_quote_changes(
-    venue, tmp_path, clock, books, stream_feed
+def test_final_validation_rejects_model_edge_lost_when_opposite_quote_changes(
+    before_validation, venue, tmp_path, clock, books, stream_feed
 ):
     model = saved_model(tmp_path, 0.8, coefficients=[5.0, 0.0, 0.0], intercept=math.log(4) - 7)
-    journal = TradeJournal(tmp_path / "preview-edge.sqlite")
+    journal = TradeJournal(tmp_path / "final_validation-edge.sqlite")
     try:
         trader = TradingBot(venue.client, journal, books, live=True, model=model, kelly=False)
         warm_up(trader, venue, clock, stream_feed)
 
-        def changed_opposite_quote(request):
-            if request.url.path == "/v1/order/preview":
-                venue.bid = "0.59"  # Up ask/depth stay fixed; midpoint changes model q.
-                publish_book(stream_feed, venue, clock)
+        def changed_opposite_quote(plan):
+            venue.bid = "0.59"
+            publish_book(stream_feed, venue, clock)
             return None
 
-        venue.on_request = changed_opposite_quote
+        before_validation(changed_opposite_quote)
         trader.tick()
         row = journal.records()[0]
         assert row["state"] == "unfilled"
         assert row["pending"] is None
         assert Decimal(row["settings"]["prediction"]["q_up"]) == pytest.approx(Decimal("0.8"))
-        assert any(path == "/v1/order/preview" for _, path, _ in venue.calls)
         assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
     finally:
         journal.close()

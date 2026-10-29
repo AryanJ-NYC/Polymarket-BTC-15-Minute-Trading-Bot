@@ -34,7 +34,9 @@ def test_held_context_request_does_not_block_baseline_entry_or_serial_writes(
         caller = threading.get_ident()
         exchange_threads = []
         journal_threads = []
-        venue.on_request = lambda _: exchange_threads.append(threading.get_ident())
+        venue.on_request = lambda request: exchange_threads.append(
+            (request.method, request.url.path, threading.get_ident())
+        )
         original_update = journal.update
 
         def record_thread(*args, **kwargs):
@@ -54,7 +56,18 @@ def test_held_context_request_does_not_block_baseline_entry_or_serial_writes(
         assert row["settings"]["context"][blocked_source]["available"] is False
         assert journal.opportunities()[-1]["settings"]["context"] == row["settings"]["context"]
         assert sum(path == "/v1/orders" for _, path, _ in venue.calls) == 1
-        assert exchange_threads and set(exchange_threads) == {caller}
+        account_paths = {"/v1/account/balances", "/v1/portfolio/positions", "/v1/orders/open"}
+        assert exchange_threads
+        assert all(
+            thread == caller
+            for method, path, thread in exchange_threads
+            if path not in account_paths
+        )
+        assert all(
+            method == "GET" and thread != caller
+            for method, path, thread in exchange_threads
+            if path in account_paths
+        )
         assert journal_threads and set(journal_threads) == {caller}
         assert set(http.threads).isdisjoint({caller})
     finally:
@@ -144,7 +157,7 @@ def test_context_completion_during_account_read_preserves_selected_snapshot_and_
         def complete_after_decision(request):
             if request.url.path == "/v1/account/balances":
                 account_reads.append(request)
-                if len(account_reads) == 2:
+                if len(account_reads) == 1:
                     http.release.set()
                     wait_for(lambda: all(state["available"] for state in read_snapshot().values()))
                     if cross_cutoff:
@@ -152,7 +165,7 @@ def test_context_completion_during_account_read_preserves_selected_snapshot_and_
 
         venue.on_request = complete_after_decision
         trader.tick()
-        assert len(account_reads) == 2
+        assert len(account_reads) == 1
         assert len(selected_snapshots) == 1
         assert all(state["available"] for state in read_snapshot().values())
         opportunity = journal.opportunities()[-1]

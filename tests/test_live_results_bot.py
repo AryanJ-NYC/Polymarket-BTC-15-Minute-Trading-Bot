@@ -468,8 +468,8 @@ def test_restart_subscribes_to_owned_contract_before_accounting_and_pending_exit
 
 
 @pytest.mark.parametrize("policy", ["entry_end", "up_midpoint", "down_midpoint"])
-def test_preview_revalidation_uses_current_policy_window_and_direction(
-    venue, journal, books, stream_feed, clock, monkeypatch, policy
+def test_final_validation_revalidation_uses_current_policy_window_and_direction(
+    before_validation, venue, journal, books, stream_feed, clock, monkeypatch, policy
 ):
     outcome = "down" if policy == "down_midpoint" else "up"
     if outcome == "down":
@@ -482,21 +482,19 @@ def test_preview_revalidation_uses_current_policy_window_and_direction(
         stream_feed.publish()
     monkeypatch.setattr(trader.strategy, "decide", lambda *_: outcome)
 
-    def during_preview(request):
-        if request.url.path == "/v1/order/preview":
-            if policy == "entry_end":
-                clock.current += timedelta(seconds=6)
-                venue.timestamp = clock.current.isoformat()
-            elif policy == "up_midpoint":
-                venue.bid = "0.53"  # Mid .59 violates policy; executable Up ask remains .65.
-            else:
-                venue.ask = "0.47"  # Mid .41 violates policy; executable Down bid remains .35.
-            stream_feed.publish()
+    def during_final_validation(plan):
+        if policy == "entry_end":
+            clock.current += timedelta(seconds=6)
+            venue.timestamp = clock.current.isoformat()
+        elif policy == "up_midpoint":
+            venue.bid = "0.53"
+        else:
+            venue.ask = "0.47"
+        stream_feed.publish()
         return None
 
-    venue.on_request = during_preview
+    before_validation(during_final_validation)
     trader.tick()
-    assert any(path == "/v1/order/preview" for _, path, _ in venue.calls)
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
     row = journal.get(venue.market["slug"])
     assert row["state"] == "unfilled"

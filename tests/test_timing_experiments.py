@@ -257,8 +257,16 @@ def test_normal_warmup_still_needs_twenty_distinct_three_second_samples(
 
 
 @pytest.mark.parametrize("seconds,preset", [(779, "earlier"), (839, "current"), (869, "later")])
-def test_preview_cannot_spill_an_attempt_into_the_next_window(
-    venue, journal, stream_feed, clock, monkeypatch, future_market, seconds, preset
+def test_final_validation_cannot_spill_an_attempt_into_the_next_window(
+    before_validation,
+    venue,
+    journal,
+    stream_feed,
+    clock,
+    monkeypatch,
+    future_market,
+    seconds,
+    preset,
 ):
     clock.current = future_market.start + timedelta(seconds=seconds)
     publish(venue, stream_feed, clock)
@@ -266,7 +274,7 @@ def test_preview_cannot_spill_an_attempt_into_the_next_window(
         venue.client, journal, stream_feed.books, live=True, context=bullish_context()
     )
     warm(trader.strategy, stream_feed.books.book(future_market), clock, monkeypatch)
-    venue.preview_delay = 2
+    before_validation(lambda plan: setattr(clock, "current", clock.current + timedelta(seconds=2)))
     trader.tick()
     row = journal.records()[0]
     assert row["settings"]["timing_preset"] == preset

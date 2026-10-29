@@ -111,17 +111,15 @@ def test_known_order_recovers_during_quote_rate_limit_without_duplicate_submissi
 
 
 @pytest.mark.parametrize("change", ["price", "depth", "direction", "disconnect", "cutoff"])
-def test_quote_or_cutoff_change_inside_preview_never_creates_order(
-    venue, journal, books, stream_feed, monkeypatch, clock, change
+def test_quote_or_cutoff_change_inside_final_validation_never_creates_order(
+    before_validation, venue, journal, books, stream_feed, monkeypatch, clock, change
 ):
     from bot import TradingBot
 
     trader = TradingBot(venue.client, journal, books, live=True)
     monkeypatch.setattr(trader.strategy, "decide", lambda *_: "up")
 
-    def during_preview(request):
-        if request.url.path != "/v1/order/preview":
-            return None
+    def during_final_validation(plan):
         if change == "price":
             venue.ask = "0.66"
             stream_feed.publish()
@@ -130,7 +128,7 @@ def test_quote_or_cutoff_change_inside_preview_never_creates_order(
                 offers=[{"px": {"value": "0.65", "currency": "USD"}, "qty": "0.01"}]
             )
         elif change == "direction":
-            venue.bid, venue.ask = "0.39", "0.41"
+            venue.bid, venue.ask = ("0.39", "0.41")
             stream_feed.publish()
         elif change == "disconnect":
             stream_feed.disconnect()
@@ -138,9 +136,8 @@ def test_quote_or_cutoff_change_inside_preview_never_creates_order(
             clock.current += timedelta(seconds=50)
         return None
 
-    venue.on_request = during_preview
+    before_validation(during_final_validation)
     trader.tick()
-    assert any(path == "/v1/order/preview" for _, path, _ in venue.calls)
     assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
     row = journal.records()[0]
     assert row["state"] == "unfilled"
@@ -161,13 +158,13 @@ def test_elapsed_entry_cutoff_during_account_check_prevents_reservation(
     def delayed_account(request):
         if request.url.path == "/v1/account/balances":
             accounts[0] += 1
-            if accounts[0] == 2:
+            if accounts[0] == 1:
                 clock.current += timedelta(seconds=50)
         return None
 
     venue.on_request = delayed_account
     trader.tick()
-    assert accounts[0] == 2
+    assert accounts[0] == 1
     assert journal.records() == []
     assert not any(method == "POST" for method, _, _ in venue.calls)
 

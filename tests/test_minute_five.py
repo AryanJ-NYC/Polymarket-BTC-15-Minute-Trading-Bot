@@ -224,30 +224,28 @@ def test_first_decision_survives_restart_and_never_resamples(
 
 @pytest.mark.parametrize("change", ["deadline", "upper_band", "side", "depth"])
 def test_final_preflight_rejection_is_terminal(
-    venue, journal, stream_feed, clock, future_market, actual_fills, change
+    before_validation, venue, journal, stream_feed, clock, future_market, actual_fills, change
 ):
     clock.current = future_market.start + timedelta(seconds=300)
     venue.bid, venue.ask, venue.fill_price = "0.88", "0.90", "0.90"
     publish(venue, stream_feed, clock)
     handler = venue.on_request
 
-    def during_preview(request):
-        if request.url.path == "/v1/order/preview":
-            if change == "deadline":
-                clock.current += timedelta(seconds=5)
-            elif change == "upper_band":
-                venue.bid, venue.ask = "0.96", "0.98"
-            elif change == "side":
-                venue.bid, venue.ask = "0.10", "0.12"
-            if change == "depth":
-                stream_feed.publish(
-                    offers=[{"px": {"value": "0.90", "currency": "USD"}, "qty": "0.01"}]
-                )
-            else:
-                publish(venue, stream_feed, clock)
-        return handler(request)
+    def during_final_validation(plan):
+        if change == "deadline":
+            clock.current += timedelta(seconds=5)
+        elif change == "upper_band":
+            venue.bid, venue.ask = ("0.96", "0.98")
+        elif change == "side":
+            venue.bid, venue.ask = ("0.10", "0.12")
+        if change == "depth":
+            stream_feed.publish(
+                offers=[{"px": {"value": "0.90", "currency": "USD"}, "qty": "0.01"}]
+            )
+        else:
+            publish(venue, stream_feed, clock)
 
-    venue.on_request = during_preview
+    before_validation(during_final_validation)
     bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
     assert not actual_fills
     assert journal.records()[0]["state"] == "unfilled"
@@ -278,9 +276,11 @@ def test_final_preflight_rejection_is_terminal(
     assert not actual_fills
 
 
-@pytest.mark.parametrize("stage", ["local_validation", "post_preview", "preview_rejected"])
+@pytest.mark.parametrize(
+    "stage", ["local_validation", "post_final_validation", "final_validation_rejected"]
+)
 def test_rejected_reservation_is_released_before_diagnostic_write_failure(
-    venue, journal, stream_feed, clock, future_market, stage
+    before_validation, venue, journal, stream_feed, clock, future_market, stage
 ):
     clock.current = future_market.start + timedelta(seconds=300)
     venue.bid, venue.ask = "0.88", "0.90"
@@ -299,10 +299,12 @@ def test_rejected_reservation_is_released_before_diagnostic_write_failure(
                 clock.current = future_market.start + timedelta(seconds=305)
 
         journal.db.set_trace_callback(advance_after_reservation)
-    elif stage == "post_preview":
-        venue.preview_delay = 5
+    elif stage == "post_final_validation":
+        before_validation(
+            lambda plan: setattr(clock, "current", clock.current + timedelta(seconds=5))
+        )
     else:
-        venue.preview_mismatch = True
+        before_validation(lambda plan: plan.request.update(quantity="999"))
 
     with pytest.raises(sqlite3.IntegrityError, match="diagnostic write failure"):
         bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
@@ -435,15 +437,19 @@ def test_ambiguous_candidate_submission_preserves_reservation_without_retry(
     assert journal.records()[0] == row
 
 
-@pytest.mark.parametrize("stage", ["account", "preview"])
+@pytest.mark.parametrize("stage", ["account", "final_validation"])
 def test_account_outage_or_pause_consumes_candidate_decision(
-    venue, journal, stream_feed, clock, future_market, stage
+    before_validation, venue, journal, stream_feed, clock, future_market, stage
 ):
     clock.current = future_market.start + timedelta(seconds=300)
     venue.bid, venue.ask = "0.88", "0.90"
     publish(venue, stream_feed, clock)
-    path = "/v1/account/balances" if stage == "account" else "/v1/order/preview"
-    venue.failures[("GET" if stage == "account" else "POST", path)] = [503]
+    if stage == "account":
+        venue.failures[("GET", "/v1/account/balances")] = [503]
+    else:
+        before_validation(
+            lambda plan: setattr(clock, "current", clock.current + timedelta(seconds=5))
+        )
     trader = bot.TradingBot(venue.client, journal, stream_feed.books, live=True)
     trader.tick()
     assert journal.entry_decided(future_market.slug, "minute-five")

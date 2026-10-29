@@ -64,8 +64,17 @@ def training_rows():
 
 @pytest.mark.parametrize("moved", [False, True])
 @pytest.mark.parametrize("outcome", ["up", "down"])
-def test_live_gate_rechecks_after_preview_and_preserves_kelly_proposal(
-    venue, journal, books, tmp_path, clock, stream_feed, monkeypatch, moved, outcome
+def test_live_gate_rechecks_after_final_validation_and_preserves_kelly_proposal(
+    before_validation,
+    venue,
+    journal,
+    books,
+    tmp_path,
+    clock,
+    stream_feed,
+    monkeypatch,
+    moved,
+    outcome,
 ):
     from test_model_bot import warm_up
 
@@ -93,11 +102,11 @@ def test_live_gate_rechecks_after_preview_and_preserves_kelly_proposal(
     trader = TradingBot(venue.client, journal, books, live=True, model=model)
     warm_up(trader, venue, clock, stream_feed)
 
-    def change(request):
-        if moved and request.url.path == "/v1/order/preview":
+    def change(plan):
+        if moved:
             value[0] = D(".49")
 
-    venue.on_request = change
+    before_validation(change)
     trader.tick()
     creates = [
         body for method, path, body in venue.calls if method == "POST" and path == "/v1/orders"

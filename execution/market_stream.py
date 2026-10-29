@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from random import uniform
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from time import monotonic
 
 from execution.polymarket_client import (
@@ -29,6 +29,7 @@ class MarketStream:
 
     def __init__(self, socket_factory: Callable):
         self._factory = socket_factory
+        self.updates = Event()
         self._lock = Lock()
         self._desired: dict[str, Market] = {}
         self._subscriptions: dict[str, tuple[str, Market]] = {}
@@ -58,6 +59,12 @@ class MarketStream:
                 return
             self._thread = Thread(target=lambda: asyncio.run(self._run()), name="market-stream")
             self._thread.start()
+
+    def wait_for_update(self, shutdown: Event, timeout: float) -> None:
+        deadline = monotonic() + timeout
+        while not shutdown.is_set() and monotonic() < deadline:
+            if self.updates.wait(min(0.1, max(0, deadline - monotonic()))):
+                return
 
     def set_markets(self, markets: list[Market]) -> None:
         desired = {market.slug: market for market in markets}
@@ -330,6 +337,7 @@ class MarketStream:
             self._timestamps[slug] = book.timestamp
             self._counts["snapshots"] += 1
             self._reason = "healthy"
+            self.updates.set()
 
     def _disconnect(self, generation: int, reason: str) -> None:
         with self._lock:

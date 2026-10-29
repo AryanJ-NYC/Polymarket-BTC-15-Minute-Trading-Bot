@@ -98,25 +98,24 @@ def test_saved_settlement_only_kelly_holds_through_price_stop_on_restart(
         journal.close()
 
 
-def test_preview_rechecks_kelly_size_even_when_edge_stays_positive(
-    venue, tmp_path, clock, books, stream_feed, monkeypatch
+def test_final_validation_rechecks_kelly_size_even_when_edge_stays_positive(
+    before_validation, venue, tmp_path, clock, books, stream_feed, monkeypatch
 ):
     venue.market["feeCoefficient"] = 0
     venue.bid, venue.ask = "0.49", "0.50"
     probability = [Decimal(".58")]
     monkeypatch.setattr(ProbabilityModel, "predict", lambda self, **kwargs: probability[0])
-    journal = TradeJournal(tmp_path / "preview.sqlite")
+    journal = TradeJournal(tmp_path / "final_validation.sqlite")
     try:
         trader = TradingBot(
             venue.client, journal, books, live=True, model=saved_model(tmp_path), kelly=True
         )
         warm_up(trader, venue, clock, stream_feed)
 
-        def change(request):
-            if request.url.path == "/v1/order/preview":
-                probability[0] = Decimal(".52")
+        def change(plan):
+            probability[0] = Decimal(".52")
 
-        venue.on_request = change
+        before_validation(change)
         trader.tick()
         assert journal.records()[0]["state"] == "unfilled"
         assert not any(path == "/v1/orders" for _, path, _ in venue.calls)
@@ -216,7 +215,6 @@ def test_kelly_rechecks_funds_and_reserves_fees_within_buying_power(
     )
     warm_up(trader, venue, clock, stream_feed)
     venue.balance_snapshots = [
-        {"currency": "USD", "currentBalance": "100", "buyingPower": "100"},
         {"currency": "USD", "currentBalance": "50", "buyingPower": "1"},
     ]
     trader.tick()

@@ -327,7 +327,9 @@ def test_shutdown_signal_finishes_tick_before_closing_journal(signum, tmp_path, 
     phases = []
     exchange = SimpleNamespace(
         account=lambda: SimpleNamespace(positions={}, orders=[]),
-        market_stream=lambda: SimpleNamespace(start=lambda: None, close=lambda: None),
+        market_stream=lambda: SimpleNamespace(
+            updates=bot.Event(), start=lambda: None, close=lambda: None
+        ),
         close=lambda: phases.append("closed"),
     )
     monkeypatch.setattr(bot.PolymarketClient, "connect", lambda _: exchange)
