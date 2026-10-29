@@ -218,7 +218,8 @@ snapshot history sampler remains unchanged, so receiving more messages cannot ac
 warmup. Disabled strategies, cooldowns, one-shot decisions and admission priority remain
 unchanged. This lowers scheduling wait, not a strategy window or price constraint.
 
-Live runs also subscribe through the pinned SDK's private order socket. A complete
+Live runs subscribe separately to order updates and an initial order snapshot through
+the pinned SDK's private socket. A complete
 connection-local open-order snapshot (`eof`) is required before notifications can shorten
 REST retry waits. Snapshot and update messages never establish cash, ownership, fees or
 fills. Partial and terminal updates for watched known IDs are advisory wakeups only;
@@ -227,7 +228,9 @@ or reordered hints may cause a bounded extra read, never an accounting mutation.
 incomplete or stale stream state leaves the bounded REST fallback in force.
 
 Each connection has a fresh generation and subscription. Invalid envelopes, disconnects,
-silence or incomplete snapshot timeout clear readiness and reconnect with capped backoff.
+incomplete snapshot timeout clear readiness and reconnect with capped backoff. A quiet
+account does not imply disconnection: transport ping/pong and close/error events establish
+socket liveness; no trading activity is required to keep a completed subscription ready.
 No replay cursor or REST/stream global ordering is assumed. The watched-ID map is capped
 at 64; terminal readback removes its ID. Private socket failure does not permit an order
 resubmission. Health logs contain readiness/generation/counts only. Private notifications

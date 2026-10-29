@@ -37,6 +37,9 @@ class FakeSocket:
     async def subscribe_orders(self, request_id):
         self.subscriptions.append((request_id, []))
 
+    async def subscribe_all(self, request_id, subscription_type):
+        self.subscriptions.append((request_id, subscription_type))
+
     async def subscribe_market_data(self, request_id, slugs):
         self.subscriptions.append((request_id, slugs))
 
