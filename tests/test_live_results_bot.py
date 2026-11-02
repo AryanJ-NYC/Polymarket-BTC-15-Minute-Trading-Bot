@@ -42,7 +42,7 @@ def test_entry_persists_policy_and_observation_before_submission(
         settings = journal.get(plan.slug)["settings"]
         assert settings["entry_bankroll_fraction"] == "0.10"
         assert settings["max_exposure_fraction"] == "0.10"
-        assert settings["daily_loss_fraction"] == "0.10"
+        assert "daily_loss_fraction" not in settings
         return submit(plan, validate=validate)
 
     monkeypatch.setattr(venue.client, "submit", checked_submit)

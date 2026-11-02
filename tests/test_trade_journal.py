@@ -25,7 +25,7 @@ def journal(tmp_path):
         ("100", "0", "0", "buying power"),
     ],
 )
-def test_entry_budget_uses_bankroll_with_available_funds_and_existing_daily_guard(
+def test_entry_budget_uses_bankroll_and_available_funds(
     journal, bankroll, buying_power, expected, reason
 ):
     assert journal.entry_budget(Decimal(bankroll), Decimal(buying_power)) == (
@@ -48,7 +48,7 @@ def test_exposure_tracks_funded_remaining_cost_and_buy_fees_after_partial_exit(v
     assert journal.exposure() == Decimal("0.495")
     # A very low sale price changes proceeds, never the retained funded cost.
     assert journal.get(market.slug)["entry_cost"] == "0.66"
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("9.34")
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("9.505")
 
 
 def test_pending_buy_reservation_is_counted_once_and_stops_entries(venue, journal):
@@ -87,7 +87,7 @@ def test_risk_check_enforces_entry_target_even_with_large_available_exposure(jou
         journal.risk_check(Decimal("10.01"), Decimal("100"))
 
 
-def test_daily_guard_keeps_full_original_cost_reserved_after_partial_exit(venue, journal):
+def test_partial_exit_releases_funded_exposure_for_new_entries(venue, journal):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
     _record_buy(journal, plan, Decimal("4.50"))
@@ -95,52 +95,15 @@ def test_daily_guard_keeps_full_original_cost_reserved_after_partial_exit(venue,
     journal.finish_order(market.slug, Decimal("5"), Decimal("1"), Decimal("0"))
     assert journal.exposure() == Decimal("2.25")
     assert journal.entry_budget(Decimal("50"), Decimal("50")) == (
-        Decimal("0.50"),
-        "daily 10% loss budget",
+        Decimal("2.75"),
+        "10% exposure room",
     )
-    journal.risk_check(Decimal("0.50"), Decimal("50"))
-    with pytest.raises(ValueError, match="loss budget"):
-        journal.risk_check(Decimal("0.51"), Decimal("50"))
+    journal.risk_check(Decimal("2.75"), Decimal("50"))
+    with pytest.raises(ValueError, match="exposure"):
+        journal.risk_check(Decimal("2.76"), Decimal("50"))
 
 
-def test_realized_daily_profit_replenishes_loss_budget(venue, journal):
-    market = parse_market(venue.market)
-    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
-    _record_buy(journal, plan, Decimal("9.75"))
-    journal.settle(market.slug, Decimal("0"))
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.25")
-    profitable = replace(plan, slug="profitable-contract")
-    _record_buy(journal, profitable, Decimal("9"))
-    journal.settle(profitable.slug, Decimal("1"))
-    assert journal.exposure() == Decimal("0")
-    assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
-        Decimal("1.25"),
-        "daily 10% loss budget",
-    )
-    journal.risk_check(Decimal("1.25"), Decimal("100"))
-    with pytest.raises(ValueError, match="loss budget"):
-        journal.risk_check(Decimal("1.26"), Decimal("100"))
-
-
-def test_only_closed_trade_profit_replenishes_budget_after_partial_exit(venue, journal):
-    market = parse_market(venue.market)
-    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
-    _record_buy(journal, plan, Decimal("9.50"))
-    journal.settle(plan.slug, Decimal("0"))
-    profitable = replace(plan, slug="partially-sold")
-    _record_buy(journal, profitable, Decimal("0.30"))
-    journal.reserve_exit(profitable.slug, replace(profitable, action="SELL", quantity=Decimal("5")))
-    journal.finish_order(profitable.slug, Decimal("5"), Decimal("1"), Decimal("0"))
-    # Even proceeds above the whole entry cost do not release an open trade's reserve.
-    assert journal.get(profitable.slug)["state"] == "open"
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.20")
-    journal.reserve_exit(profitable.slug, replace(profitable, action="SELL", quantity=Decimal("5")))
-    journal.finish_order(profitable.slug, Decimal("5"), Decimal("0.10"), Decimal("0"))
-    assert journal.get(profitable.slug)["pnl"] == "0.80"
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("1.30")
-
-
-def test_closed_sale_replenishes_only_profit_after_both_order_fees(venue, journal):
+def test_closed_sale_fees_do_not_change_entry_target(venue, journal):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
     _record_buy(journal, plan, Decimal("9.75"))
@@ -152,71 +115,34 @@ def test_closed_sale_replenishes_only_profit_after_both_order_fees(venue, journa
     journal.finish_order(profitable.slug, Decimal("10"), Decimal("9.50"), Decimal("0.20"))
     assert journal.get(profitable.slug)["pnl"] == "0.20"
     assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
-        Decimal("0.45"),
-        "daily 10% loss budget",
+        Decimal("10"),
+        "10% entry target",
     )
 
 
-def test_prior_utc_day_profit_does_not_replenish_todays_budget(venue, journal, clock):
-    market = parse_market(venue.market)
-    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
-    _record_buy(journal, plan, Decimal("1"))
-    journal.settle(plan.slug, Decimal("1"))
-    clock.current += timedelta(days=1)
-    losing = replace(plan, slug="todays-loss")
-    _record_buy(journal, losing, Decimal("9.75"))
-    journal.settle(losing.slug, Decimal("0"))
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.25")
-
-
-def test_profit_credit_uses_conservative_settled_cost_instead_of_raw_pnl(venue, journal):
-    market = parse_market(venue.market)
-    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
-    _record_buy(journal, plan, Decimal("9.75"))
-    journal.settle(plan.slug, Decimal("0"))
-    profitable = replace(plan, slug="tolerated-winning-cost")
-    journal.reserve_entry(profitable, market.end)
-    journal.finish_order(profitable.slug, Decimal("1.35"), Decimal("0.9585"), Decimal("0.02"))
-    journal.settle(
-        profitable.slug,
-        Decimal("1"),
-        resolution={
-            "beforePosition": {
-                "cost": {"value": "0.9885", "currency": "USD"},
-                "fees": {"value": "0.03", "currency": "USD"},
-            }
-        },
-    )
-    row = journal.get(profitable.slug)
-    assert row["pnl"] is None and row["accounting_issues"]
-    # A legacy raw result must not replace the higher fee-inclusive risk cost.
-    journal.update(profitable.slug, pnl="0.3715")
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.6115")
-    journal.risk_check(Decimal("0.6115"), Decimal("100"))
-    with pytest.raises(ValueError, match="loss budget"):
-        journal.risk_check(Decimal("0.6116"), Decimal("100"))
-
-
-@pytest.mark.parametrize("loss,room", [("9.75", "0.25"), ("10", "0"), ("10.25", "0")])
-def test_daily_percentage_budget_at_and_above_loss_limit(venue, journal, loss, room):
+@pytest.mark.parametrize("loss", ["9.75", "10", "10.25", "1000"])
+def test_closed_losses_do_not_limit_new_entries(venue, journal, loss):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("20"))
     _record_buy(journal, plan, Decimal(loss))
     journal.settle(market.slug, Decimal("0"))
     assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
-        Decimal(room),
-        "daily 10% loss budget",
+        Decimal("10"),
+        "10% entry target",
     )
+    journal.risk_check(Decimal("10"), Decimal("100"))
+    with pytest.raises(ValueError, match="entry target"):
+        journal.risk_check(Decimal("10.01"), Decimal("100"))
 
 
-def test_daily_percentage_uses_current_bankroll_and_resets_losses_at_utc_day(venue, journal, clock):
+def test_entry_percentage_uses_current_bankroll_regardless_of_utc_day(venue, journal, clock):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("20"))
     _record_buy(journal, plan, Decimal("9.75"))
     journal.settle(market.slug, Decimal("0"))
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.25")
-    assert journal.entry_budget(Decimal("200"), Decimal("200"))[0] == Decimal("10.25")
-    assert journal.entry_budget(Decimal("50"), Decimal("50"))[0] == 0
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
+    assert journal.entry_budget(Decimal("200"), Decimal("200"))[0] == Decimal("20")
+    assert journal.entry_budget(Decimal("50"), Decimal("50"))[0] == Decimal("5")
     clock.current += timedelta(days=1)
     assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
 
@@ -271,7 +197,7 @@ def test_exposure_uses_existing_durable_order_records_after_reopen(venue, tmp_pa
         ("0.0070", "0.0060", True),
     ],
 )
-def test_settled_fee_tolerance_preserves_dispute_and_budgets_higher_cost(
+def test_settled_fee_tolerance_preserves_dispute_without_limiting_budget(
     venue, journal, clock, fee_delta, cost_delta, allowed
 ):
     market = parse_market(venue.market)
@@ -294,18 +220,12 @@ def test_settled_fee_tolerance_preserves_dispute_and_budgets_higher_cost(
             journal.entry_budget(Decimal("100"), Decimal("100"))
         return
     journal.risk_check(Decimal("1"), Decimal("100"))
-    higher_cost = max(Decimal("0.9785"), provider_cost)
-    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == max(
-        Decimal("0"), Decimal("1") - higher_cost
-    )
+    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1")
     assert journal.exposure() == 0
     assert journal.get(market.slug) == row
-    # Even a legacy exact-looking P&L must not hide the accepted fee difference
-    # from the daily guard; this only changes a synthetic test journal.
+    # A historical P&L value remains evidence; it cannot impose a daily allowance.
     journal.update(market.slug, pnl="-0.9785")
-    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == max(
-        Decimal("0"), Decimal("1") - higher_cost
-    )
+    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1")
     clock.current += timedelta(days=1)
     assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1")
 
@@ -464,12 +384,12 @@ def settled_market_without_provider_fee(venue, journal, clock, request):
 
 
 @pytest.mark.parametrize(
-    "settled_market_without_provider_fee,daily_budget",
-    [("0", "1.20"), ("1", "0.1503")],
+    "settled_market_without_provider_fee",
+    ["0", "1"],
     indirect=["settled_market_without_provider_fee"],
 )
 def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidence(
-    journal, settled_market_without_provider_fee, tmp_path, daily_budget
+    journal, settled_market_without_provider_fee, tmp_path
 ):
     market = settled_market_without_provider_fee
     rows = journal.records()
@@ -480,10 +400,8 @@ def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidenc
         Decimal("1.7565") + Decimal("1.44") * (1 - yes_value)
     )
     assert journal.exposure() == 0
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == (
-        Decimal("10") if yes_value == 0 else Decimal("8.9503")
-    )
-    assert journal.entry_budget(Decimal("12"), Decimal("100"))[0] == Decimal(daily_budget)
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
+    assert journal.entry_budget(Decimal("12"), Decimal("100"))[0] == Decimal("1.20")
     journal.risk_check(Decimal("2"), Decimal("100"))
     journal.settle_market(market.slug, yes_value, resolution=rows[0]["settlement"]["resolution"])
     assert journal.records() == rows
@@ -491,10 +409,8 @@ def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidenc
     reopened = TradeJournal(tmp_path / "risk.sqlite")
     try:
         assert reopened.exposure() == 0
-        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == (
-            Decimal("10") if yes_value == 0 else Decimal("8.9503")
-        )
-        assert reopened.entry_budget(Decimal("12"), Decimal("100"))[0] == Decimal(daily_budget)
+        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
+        assert reopened.entry_budget(Decimal("12"), Decimal("100"))[0] == Decimal("1.20")
         assert reopened.records() == rows
     finally:
         reopened.close()
@@ -593,18 +509,18 @@ def settled_fifo_market(venue, journal, clock, request):
 
 
 @pytest.mark.parametrize(
-    "settled_fifo_market,bankroll,daily_budget",
+    "settled_fifo_market,bankroll,entry_budget",
     [
-        (("0", "2.9064", "-.3111", "-.0975"), "1.75", ".0175"),
-        (("0", "2.91715", "-.36035", "-.1575"), "1.75", ".0175"),
-        (("1", "2.9064", "-.3111", "-3.2175"), "40", ".7225"),
-        (("0.0", "2.9064", "-.3111", "-.0975"), "1.75", ".0175"),
-        (("1.00", "2.9064", "-.3111", "-3.2175"), "40", ".7225"),
+        (("0", "2.9064", "-.3111", "-.0975"), "1.75", ".175"),
+        (("0", "2.91715", "-.36035", "-.1575"), "1.75", ".175"),
+        (("1", "2.9064", "-.3111", "-3.2175"), "40", "4"),
+        (("0.0", "2.9064", "-.3111", "-.0975"), "1.75", ".175"),
+        (("1.00", "2.9064", "-.3111", "-3.2175"), "40", "4"),
     ],
     indirect=["settled_fifo_market"],
 )
 def test_settled_provider_basis_does_not_block_reconciled_cashflows(
-    journal, settled_fifo_market, tmp_path, bankroll, daily_budget
+    journal, settled_fifo_market, tmp_path, bankroll, entry_budget
 ):
     rows = journal.records()
     assert len(rows) == 4
@@ -614,12 +530,12 @@ def test_settled_provider_basis_does_not_block_reconciled_cashflows(
     )
     assert journal.exposure() == 0
     assert journal.entry_budget(Decimal(bankroll), Decimal("100")) == (
-        Decimal(daily_budget),
-        "daily 10% loss budget",
+        Decimal(entry_budget),
+        "10% entry target",
     )
-    journal.risk_check(Decimal(daily_budget), Decimal(bankroll))
-    with pytest.raises(ValueError, match="daily"):
-        journal.risk_check(Decimal(daily_budget) + Decimal(".01"), Decimal(bankroll))
+    journal.risk_check(Decimal(entry_budget), Decimal(bankroll))
+    with pytest.raises(ValueError, match="entry target"):
+        journal.risk_check(Decimal(entry_budget) + Decimal(".01"), Decimal(bankroll))
     journal.settle_market(
         settled_fifo_market.slug,
         Decimal(rows[0]["settlement"]["yes_value"]),
@@ -630,7 +546,7 @@ def test_settled_provider_basis_does_not_block_reconciled_cashflows(
     reopened = TradeJournal(tmp_path / "risk.sqlite")
     try:
         assert reopened.exposure() == 0
-        assert reopened.entry_budget(Decimal(bankroll), Decimal("100"))[0] == Decimal(daily_budget)
+        assert reopened.entry_budget(Decimal(bankroll), Decimal("100"))[0] == Decimal(entry_budget)
         assert reopened.records() == rows
     finally:
         reopened.close()
@@ -687,7 +603,7 @@ def test_zero_fill_policy_does_not_hide_settled_cashflows(venue, journal, settle
             journal.entry_budget(Decimal("100"), Decimal("100"))
     else:
         assert journal.exposure() == 0
-        assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal(".8425")
+        assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1")
 
 
 @pytest.mark.parametrize(
@@ -764,7 +680,7 @@ def test_market_cashflow_admission_keeps_large_or_incomplete_disputes_blocking(
 
 
 @pytest.mark.parametrize("difference", [".01", ".03"])
-def test_ambiguous_gross_or_net_residual_uses_worse_daily_result(
+def test_bounded_settled_residual_does_not_limit_new_entries(
     journal, settled_fifo_market, difference
 ):
     for row in journal.records():
@@ -773,12 +689,12 @@ def test_ambiguous_gross_or_net_residual_uses_worse_daily_result(
             amount = resolution[position]["realized"]
             amount["value"] = str(Decimal(amount["value"]) - Decimal(difference))
         journal.update(row.pop("trade_id"), **row)
-    # Both fee conventions fall within five cents. Do not pick the favorable
-    # convention or reserve once per policy: charge the adverse delta once.
+    # Both fee conventions fall within tolerance. Preserve the settlement proof
+    # without converting the historical residual into a new-entry allowance.
     assert journal.exposure() == 0
     assert journal.entry_budget(Decimal("2"), Decimal("100")) == (
-        Decimal(".0425") - Decimal(difference),
-        "daily 10% loss budget",
+        Decimal(".2"),
+        "10% entry target",
     )
 
 

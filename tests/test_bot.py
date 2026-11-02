@@ -255,7 +255,7 @@ def test_journal_single_process_lock(tmp_path):
         first.close()
 
 
-def test_daily_loss_budget_counts_open_cost_and_new_order(venue, journal, clock):
+def test_closed_loss_does_not_block_entry_risk_check(venue, journal, clock):
     market = parse_market(venue.market)
     plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("1"))
     journal.reserve_entry(plan, market.end)
@@ -263,8 +263,7 @@ def test_daily_loss_budget_counts_open_cost_and_new_order(venue, journal, clock)
     journal.update(
         market.slug, state="closed", quantity="0", pnl="-9.50", closed_at=clock.current.isoformat()
     )
-    with pytest.raises(ValueError, match="loss budget"):
-        journal.risk_check(plan.budget, Decimal("100"))
+    journal.risk_check(plan.budget, Decimal("100"))
 
 
 def test_cli_check_does_not_open_journal_or_write_api(venue, tmp_path, monkeypatch):
@@ -452,7 +451,7 @@ def test_one_trade_restart_resumes_existing_position(venue, journal, clock, book
 
 @pytest.mark.parametrize("equity,maximum", [("100", "10"), ("500", "50"), ("25", "2.50")])
 @pytest.mark.parametrize("outcome", ["up", "down"])
-def test_live_runner_sizes_from_account_with_daily_limit(
+def test_live_runner_sizes_from_account_with_entry_and_exposure_limits(
     venue, journal, monkeypatch, equity, maximum, outcome, books, stream_feed
 ):
     venue.balance.update(currentBalance=equity, buyingPower=equity)
@@ -588,7 +587,7 @@ def test_low_equity_does_not_force_liquidation_or_block_normal_exit(
         ("1.90", "0", "0.14"),
         ("2.00", "0", None),
         ("2.10", "0", None),
-        ("2.10", "0.25", None),
+        ("2.10", "0.25", "0.11"),
     ],
 )
 def test_live_request_fits_remaining_exposure_after_partial_exits(
@@ -647,9 +646,9 @@ def test_live_request_fits_remaining_exposure_after_partial_exits(
         assert quantity * Decimal("0.65") + fee <= Decimal("2") - exposure
 
 
-@pytest.mark.parametrize("loss,enters", [("9.75", True), ("10", False), ("10.25", False)])
-def test_live_entry_obeys_daily_percentage_after_realized_losses(
-    venue, journal, monkeypatch, loss, enters, books, stream_feed
+@pytest.mark.parametrize("loss", ["9.75", "10", "10.25", "1000"])
+def test_live_entry_uses_full_target_after_realized_losses(
+    venue, journal, monkeypatch, loss, books, stream_feed
 ):
     market = parse_market(venue.market)
     plan = replace(
@@ -664,14 +663,10 @@ def test_live_entry_obeys_daily_percentage_after_realized_losses(
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     trader.tick()
     requests = [body for method, path, body in venue.calls if path == "/v1/orders"]
-    if enters:
-        assert len(requests) == 1
-        quantity = Decimal(str(requests[0]["quantity"]))
-        fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
-        assert Decimal("0.23") < quantity * Decimal("0.65") + fee <= Decimal("0.25")
-    else:
-        assert requests == []
-        assert journal.get(market.slug) is None
+    assert len(requests) == 1
+    quantity = Decimal(str(requests[0]["quantity"]))
+    fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
+    assert Decimal("9.98") < quantity * Decimal("0.65") + fee <= Decimal("10")
 
 
 def test_decision_delay_resizes_from_fresh_account_and_latest_stream_quote(

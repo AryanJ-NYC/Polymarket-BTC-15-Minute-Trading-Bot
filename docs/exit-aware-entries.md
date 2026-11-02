@@ -7,10 +7,13 @@ The original research candidate applies only to model entries 780–840 seconds 
 ## Runtime sizing update
 
 New entries retain quarter Kelly (0.25) with a 10% ceiling; baseline entries target
-10%. Both still share the 10% funded-exposure and UTC daily-loss budgets, so a
-full-size entry can consume the available allowance. Smaller estimated model edges
+10%. Both still share the 10% funded-exposure limit, so a
+full-size entry can consume the available exposure. There is no daily loss
+allowance or cumulative daily betting limit. Buying power, the five-position limit
+and order/accounting reconciliation guards remain. Smaller estimated model edges
 produce smaller stakes. The supplied experiment ID derives a new
-`.kelly-v3.stop15-v1.risk10-v1` cohort without changing old definitions or holdings.
+`.kelly-v3.stop15-v1.risk10-v2` cohort without changing old definitions or holdings.
+The previous `.risk10-v1` cohort records the policy with daily-loss budgeting.
 
 The artifact and payout identity keep the original 4% research policy. Explicit
 runtime settings permit the new cap while retaining the fitted entry window,

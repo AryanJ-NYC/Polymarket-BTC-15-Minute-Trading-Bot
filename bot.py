@@ -45,7 +45,6 @@ from execution.polymarket_client import (
     validate_book,
 )
 from execution.risk import (
-    DAILY_LOSS_FRACTION,
     ENTRY_BANKROLL_FRACTION,
     KELLY_MAX_BANKROLL_FRACTION,
     KELLY_MULTIPLIER,
@@ -312,7 +311,6 @@ class TradingBot:
             "entry_bankroll_fraction": str(ENTRY_BANKROLL_FRACTION),
             "max_open_positions": 5,
             "max_exposure_fraction": str(MAX_EXPOSURE_FRACTION),
-            "daily_loss_fraction": str(DAILY_LOSS_FRACTION),
             "fusion_weights": self.strategy.fusion.weights.copy(),
         }
         self._model_settings = self._baseline_settings.copy()
@@ -1937,8 +1935,8 @@ def _experiment_arm(experiment_id: str, slug: str) -> str:
 
 
 def _sizing_experiment_id(requested_id: str, *, kelly: bool) -> str:
-    """Keep the 10% sizing cohort separate from immutable historical comparisons."""
-    suffix = (".kelly-v3.stop15-v1" if kelly else "") + ".risk10-v1"
+    """Keep the current risk policy separate from immutable historical comparisons."""
+    suffix = (".kelly-v3.stop15-v1" if kelly else "") + ".risk10-v2"
     if len(requested_id) + len(suffix) <= 64:
         return requested_id + suffix
     digest = hashlib.sha256(requested_id.encode()).hexdigest()[:16]
@@ -1957,7 +1955,6 @@ MINUTE_FIVE_SETTINGS = {
     "entry_bankroll_fraction": str(ENTRY_BANKROLL_FRACTION),
     "max_open_positions": 5,
     "max_exposure_fraction": str(MAX_EXPOSURE_FRACTION),
-    "daily_loss_fraction": str(DAILY_LOSS_FRACTION),
     "extra_cost_usd": "0",
 }
 

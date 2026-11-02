@@ -87,37 +87,6 @@ def test_enrolling_an_experiment_preserves_existing_trades_and_opportunities(ven
         journal.close()
 
 
-def test_both_arms_and_legacy_activity_share_daily_loss_capacity(venue, tmp_path):
-    journal = TradeJournal(tmp_path / "combined.sqlite")
-    try:
-        market = parse_market(venue.market)
-        plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
-        for slug, settings, cost, close in (
-            ("legacy", None, "2", True),
-            ("baseline-arm", {"experiment": {"id": "ab", "arm": "baseline"}}, "1.5", True),
-            ("model-arm", {"experiment": {"id": "ab", "arm": "model"}}, "1.25", False),
-        ):
-            entry = replace(plan, slug=slug)
-            journal.reserve_entry(entry, market.end, settings=settings)
-            journal.finish_order(slug, Decimal("1"), Decimal(cost), Decimal("0"))
-            if close:
-                journal.settle(slug, Decimal("0"))
-        assert journal.exposure() == Decimal("1.25")
-        assert journal.entry_budget(Decimal("50"), Decimal("50")) == (
-            Decimal("0.25"),
-            "daily 10% loss budget",
-        )
-        with pytest.raises(ValueError, match="loss budget"):
-            journal.risk_check(Decimal("0.26"), Decimal("50"))
-        journal.reserve_exit(
-            "model-arm", replace(plan, slug="model-arm", action="SELL", quantity=Decimal("1"))
-        )
-        with pytest.raises(RuntimeError, match="unresolved"):
-            journal.entry_budget(Decimal("50"), Decimal("50"))
-    finally:
-        journal.close()
-
-
 def test_open_exposure_and_pending_admission_are_shared_across_both_arms(venue, tmp_path):
     journal = TradeJournal(tmp_path / "shared-exposure.sqlite")
     try:

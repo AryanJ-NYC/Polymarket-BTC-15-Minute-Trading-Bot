@@ -30,7 +30,7 @@ def test_experiment_baseline_arm_uses_baseline_through_live_preflight(
         live=True,
         model=saved_model(tmp_path, 0.1),
         kelly=False,
-        experiment_id="test-baseline-5",
+        experiment_id="test-baseline-5-v0",
     )
     clock.current = late
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
@@ -40,7 +40,7 @@ def test_experiment_baseline_arm_uses_baseline_through_live_preflight(
     assert row["outcome"] == "up"
     assert row["state"] == "open"
     assert row["settings"]["experiment"]["arm"] == "baseline"
-    assert row["settings"]["experiment"]["id"] == "test-baseline-5.risk10-v1"
+    assert row["settings"]["experiment"]["id"] == "test-baseline-5-v0.risk10-v2"
     assert "model_tag" not in row["settings"]
     assert "context" in row["settings"]
     assert Decimal(row["entry_cost"]) == Decimal("0.33")
@@ -56,7 +56,7 @@ def test_experiment_model_arm_places_live_order_without_consuming_baseline_conte
 
     model = saved_model(tmp_path, 0.8)
     trader = enrolled_trader(
-        venue, journal, clock, books, model, "test-model-0", context=UnusedContext()
+        venue, journal, clock, books, model, "test-model-0-v1", context=UnusedContext()
     )
 
     def unused_baseline(*_):
@@ -81,7 +81,7 @@ def test_model_no_edge_stays_in_its_assigned_arm_without_baseline_fallback(
     venue, journal, clock, tmp_path, books, stream_feed, monkeypatch
 ):
     trader = enrolled_trader(
-        venue, journal, clock, books, saved_model(tmp_path, 0.64), "test-model-0"
+        venue, journal, clock, books, saved_model(tmp_path, 0.64), "test-model-0-v1"
     )
 
     def unused_baseline(*_):
@@ -102,7 +102,7 @@ def test_one_live_runner_executes_both_assigned_arms_in_the_same_journal(
 ):
     monkeypatch.setattr(bot, "monotonic", lambda: clock.current.timestamp())
     trader = enrolled_trader(
-        venue, journal, clock, books, saved_model(tmp_path, 0.8), "ab-live-20261022-1"
+        venue, journal, clock, books, saved_model(tmp_path, 0.8), "ab-live-20261022-1-v0"
     )
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     warm_up(trader, venue, clock, stream_feed)
@@ -138,7 +138,7 @@ def test_assigned_model_rechecks_ev_after_final_validation_before_creating_live_
         means=[0.5, 0.02, 120.0],
         scales=[0.1, 0.01, 1.0],
     )
-    trader = enrolled_trader(venue, journal, clock, books, model, "test-model-0")
+    trader = enrolled_trader(venue, journal, clock, books, model, "test-model-0-v1")
     warm_up(trader, venue, clock, stream_feed)
     # Time alone changes this real saved model's prediction while the executable
     # quote remains identical and fresh, isolating the model pre-create EV check.
@@ -154,7 +154,7 @@ def test_assigned_model_rechecks_ev_after_final_validation_before_creating_live_
 
 
 @pytest.mark.parametrize(
-    "experiment_id,arm", [("test-baseline-5", "baseline"), ("test-model-0", "model")]
+    "experiment_id,arm", [("test-baseline-5-v0", "baseline"), ("test-model-0-v1", "model")]
 )
 @pytest.mark.parametrize("unavailable", ["book", "account"])
 def test_early_unavailable_opportunities_keep_their_experiment_and_arm(
@@ -185,7 +185,7 @@ def test_early_unavailable_opportunities_keep_their_experiment_and_arm(
         "book_unavailable" if unavailable == "book" else "plan_rejected"
     )
     assert observation["settings"]["experiment"] == {
-        "id": experiment_id + ".risk10-v1",
+        "id": experiment_id + ".risk10-v2",
         "arm": arm,
         "assignment_version": "sha256-contract-v1",
         "model_tag": model.tag,
@@ -201,7 +201,7 @@ def test_pending_model_order_attributes_the_next_baseline_contracts_rejection(
     monkeypatch.setattr(client_module, "sleep", lambda _: None)
     monkeypatch.setattr(bot, "monotonic", lambda: clock.current.timestamp())
     trader = enrolled_trader(
-        venue, journal, clock, books, saved_model(tmp_path, 0.8), "ab-live-20261022-1"
+        venue, journal, clock, books, saved_model(tmp_path, 0.8), "ab-live-20261022-1-v0"
     )
     trader.tick()
     previous = parse_market(venue.market)
@@ -235,7 +235,7 @@ def test_rate_limit_at_entry_boundary_and_following_backoff_keep_experiment_attr
 ):
     monkeypatch.setattr(bot, "monotonic", lambda: clock.current.timestamp())
     trader = enrolled_trader(
-        venue, journal, clock, books, saved_model(tmp_path, 0.8), "test-model-0"
+        venue, journal, clock, books, saved_model(tmp_path, 0.8), "test-model-0-v1"
     )
     market = parse_market(venue.market)
     clock.current = market.start + timedelta(seconds=779)
@@ -287,7 +287,7 @@ def test_rate_limit_at_entry_boundary_and_following_backoff_keep_experiment_attr
 
 
 @pytest.mark.parametrize(
-    "experiment_id,arm", [("test-baseline-5", "baseline"), ("test-model-0", "model")]
+    "experiment_id,arm", [("test-baseline-5-v0", "baseline"), ("test-model-0-v1", "model")]
 )
 @pytest.mark.parametrize("enrolled", [False, True])
 def test_unavailable_account_after_position_management_keeps_current_contract_attribution(
@@ -347,7 +347,7 @@ def test_new_experiment_waits_for_a_whole_contract_but_still_exits_legacy_holdin
         books,
         model=saved_model(tmp_path, 0.8),
         kelly=False,
-        experiment_id="test-model-0",
+        experiment_id="test-model-0-v1",
     )
     trader.tick()
     row = journal.get(market.slug)
@@ -361,7 +361,7 @@ def test_restarting_experiment_preserves_its_configuration_and_arm(
     venue, journal, clock, tmp_path, books
 ):
     model = saved_model(tmp_path, 0.8)
-    trader = enrolled_trader(venue, journal, clock, books, model, "test-model-0")
+    trader = enrolled_trader(venue, journal, clock, books, model, "test-model-0-v1")
     trader.tick()
     before = journal.opportunities()[-1]["settings"]["experiment"]
     clock.current += timedelta(seconds=3)
@@ -372,7 +372,7 @@ def test_restarting_experiment_preserves_its_configuration_and_arm(
         live=True,
         model=model,
         kelly=False,
-        experiment_id="test-model-0",
+        experiment_id="test-model-0-v1",
     )
     resumed.tick()
     assert journal.opportunities()[-1]["settings"]["experiment"] == before
@@ -383,7 +383,7 @@ def test_restarting_experiment_preserves_its_configuration_and_arm(
             books,
             model=saved_model(tmp_path, 0.2),
             kelly=False,
-            experiment_id="test-model-0",
+            experiment_id="test-model-0-v1",
         )
     assert journal.records() == []
     assert all(method == "GET" for method, _, _ in venue.calls)
@@ -438,7 +438,7 @@ def test_experiment_cli_starts_and_closes_supporting_context_for_both_arms(
             "--model",
             str(tmp_path / "model.json"),
             "--experiment-id",
-            "test-model-0",
+            "test-model-0-v1",
             *(["--simultaneous"] if simultaneous else []),
         ],
     )

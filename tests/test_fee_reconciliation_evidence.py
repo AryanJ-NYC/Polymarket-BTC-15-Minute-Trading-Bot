@@ -74,8 +74,8 @@ def test_captured_fee_disagreement_survives_recovery_and_report(
         if collected_fee is not None:
             journal.risk_check(Decimal("1"), Decimal("100"))
             assert journal.exposure() == 0
-            # Keep the disputed loss in the daily budget at the higher cost.
-            assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("0.0145")
+            # The settled fee proof permits admission without a daily-loss allowance.
+            assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1")
         else:
             with pytest.raises(RuntimeError, match="unknown or disputed"):
                 journal.risk_check(Decimal("1"), Decimal("100"))

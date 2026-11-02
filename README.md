@@ -124,11 +124,9 @@ Temporary read failures retain known order IDs and recover automatically.
   the same tick and recheck the saved exit trigger and account availability.
   Any submitted IOC, including zero or partial fills, ends that tick's attempt
   for the experiment trade. Persistent churn waits for the next tick.
-- Reserves a UTC daily loss budget of **10% of current bankroll** against recorded
-  net realized losses plus the full cost of still-open positions and the next order.
-  Realized profits replenish this budget. This is
-  the bot's own ledger, not
-  a claim about account-wide daily P&L or strategy profitability.
+- Applies no daily loss allowance or cumulative daily betting limit. New entries
+  remain subject to the per-entry target, shared funded exposure, buying power,
+  five-open-position limit, and order/accounting reconciliation guards.
 - Checks for 30% stop loss and 20% take profit using available exit depth and
   conservative fee bounds for successive IOC slices. Logs show sellable quantity,
   its net value, and the unpriced remainder. Take-profit requires depth for the
@@ -146,8 +144,8 @@ Temporary read failures retain known order IDs and recover automatically.
 
 ### Bankroll sizing
 
-The shared Decimal fractions in `execution/risk.py` are `0.10` (10% per baseline entry),
-`0.10` (10% aggregate exposure), and `0.10` (10% daily loss budget).
+The shared Decimal fractions in `execution/risk.py` are `0.10` (10% per baseline entry)
+and `0.10` (10% aggregate exposure).
 The formula and examples in this section describe baseline/`--no-kelly` sizing;
 default model sizing replaces the 10% target with the quarter-Kelly target below.
 All amounts are USD:
@@ -156,10 +154,8 @@ All amounts are USD:
 bankroll = credited currentBalance + sum(signed YES quantity * fresh YES midpoint)
 exposure = sum(entry cost including fees * remaining quantity / filled entry quantity)
            + still-unaccounted BUY reservations
-daily loss budget remaining = 0.10 * bankroll + realized net P&L today (UTC)
-                              - original full entry cost of open trades
 entry budget = max(0, min(0.10 * bankroll, buyingPower,
-                          0.10 * bankroll - exposure, daily loss budget remaining))
+                          0.10 * bankroll - exposure))
 ```
 
 This values the entire authenticated account, with short YES quantities negative.
@@ -181,17 +177,18 @@ or nonzero holdings awaiting settlement make bankroll unavailable and skip entry
 Zero equity or exhausted exposure room also skips entry. Existing position exits
 continue under their usual rules; a percentage breach does not force liquidation.
 
-$100 bankroll targets $10 with a $10 daily loss budget; $500 targets $50 with a
-$50 daily loss budget, before tighter limits. The five-open-position guard and
-remaining exposure/daily capacity can limit entries further. The daily percentage
-uses the same current account snapshot as entry and exposure sizing, rather than
-a balance frozen at the start of the day. Realized gains and losses are netted by UTC
-closing day, after collected fees. Only closed trades replenish the budget;
-unrealized gains and partial-exit proceeds do not. The daily guard conservatively
-keeps each open trade's original full entry cost reserved even after a partial
-exit; aggregate exposure releases cost
-proportionally. Falling quotes do not release funded cost. Unresolved orders
-continue to block new entries until reconciled.
+$100 bankroll targets $10; $500 targets $50, before tighter limits. The
+five-open-position guard, buying power and remaining funded exposure can limit
+entries further. Partial exits release funded cost proportionally; falling quotes
+do not release funded cost. Unresolved orders and unknown or disputed costs
+continue to block new entries until reconciled, except for the documented settled
+accounting proofs below.
+
+There is no daily loss allowance or cumulative daily betting limit. Closed losses
+do not consume a separate allowance, and UTC midnight does not reset admission
+capacity. Realized gains and losses still affect current account bankroll and
+remain in daily results reporting. Once exposure is released, another eligible
+entry may use it subject to all remaining guards.
 
 The planner floors quantity to the market increment and visible depth, reserving
 fees inside the budget. The log records bankroll, percentage target, affordable
@@ -288,7 +285,7 @@ python -m pip check
 Tests replace HTTP transport at the official SDK seam; they do not need your
 keys or submit real orders. They exercise YES/NO prices, fees and minimum sizes,
 direct create/terminal readback, partial fills, restart safety, real paper accounting,
-loss budgets, and read-only defaults.
+entry/exposure limits, and read-only defaults.
 
 Source map: [bot.py](bot.py) owns the loop; [the exchange client](execution/polymarket_client.py)
 owns US API details; [the journal](execution/trade_journal.py) owns durable order
@@ -344,7 +341,9 @@ flag or environment variable is needed. An explicitly enrolled baseline/model
 comparison keeps its frozen whole-contract baseline window; this timing change
 does not alter that separate experiment. Each eligible entry independently uses
 the existing 10% bankroll ceiling including fees. With the ordinary minute-five
-policy below, one full-size entry can use the entire 10% shared exposure allowance before exits. The shared 10% exposure and daily-loss fractions and five-open-trade limit still apply across all experiments.
+policy below, one full-size entry can use the entire 10% shared exposure allowance
+before exits. The shared 10% exposure and five-open-trade limit still apply across
+all experiments.
 Normal signal, warmup, quote and deadline checks can produce no entry.
 
 Same-side experiment trades can overlap. An opposing signal while another
@@ -388,12 +387,10 @@ when the provider's own
 before/after settlement identity is exact and its final realized amount differs
 from the recorded gross or fee-inclusive cashflows by at most five cents. All
 quantities, order fees, proceeds and shared resolution evidence must still agree.
-This allowance does not confirm exact P&L or rewrite saved accounting warnings.
-Favorable residuals add no daily capacity; an adverse residual is reserved once
-per market on its latest disputed closure's UTC day. If both gross and net fee
-conventions fit the allowance, use the worse plausible result. Exact matches
-retain the existing fee-inclusive result. Larger or incomplete disputes remain
-blocked. Paused known markets retain per-window reconciliation, backoff and account-unavailable skips.
+This allowance permits admission without confirming exact P&L or rewriting saved
+accounting warnings. Exact matches retain the existing fee-inclusive result.
+Larger or incomplete disputes remain blocked. Paused known markets retain
+per-window reconciliation, backoff and account-unavailable skips.
 
 Use `by_settings` in the existing results output to compare experiments. These
 groups separate the explicit saved timing, baseline, exit, sizing and extra-cost
@@ -443,8 +440,8 @@ quote quality. There is no fusion, warmup, model fitting or timing/threshold swe
 
 Five-minute admission precedes fifteen-minute admission within a tick, recorded as
 `five-minute-first-v1`; existing ordering within the fifteen-minute comparison is
-preserved. Every admission rechecks the shared 10% funded exposure, 10% UTC daily
-net-loss capacity and five-open-trade limit, including pending and legacy lots.
+preserved. Every admission rechecks the shared 10% funded exposure and
+five-open-trade limit, including pending and legacy lots.
 Opposite-side conflicts concern the same provider contract, not all BTC horizons.
 Existing exits cannot sell the five-minute policy's settlement-only shares. The
 usual `--duration`, `--one-trade`, paper and live controls remain in force; adding
@@ -504,7 +501,7 @@ The saved `settlement-only-v1` exit policy holds this trade's shares through pri
 moves until official settlement. Baseline price exits sell only their own shares.
 Same-side entries can coexist; opposing entries record conflicts. A baseline can
 retry inside its window, while the minute-five decision stays consumed. All four
-share the existing 10% exposure/daily-loss and five-open-trade limits; the early
+share the existing 10% funded-exposure and five-open-trade limits; the early
 holding can reduce later coverage. Old trades retain their saved exit settings.
 
 Inspect minute-five decisions/skips, actual timing, quotes, attempts, fills and
@@ -527,12 +524,12 @@ The three baseline timing entries and minute-five policy run alongside one model
 entry at 13:00–14:00. Each slot has its own durable attempt and saved policy, including a `model-current`
 trade key. Model entries use fee-aware quarter Kelly capped at 10% with a 15%
 loss exit, otherwise holding to settlement; baseline entries keep their 10% target and saved exits. There is no
-additional allowance: all five share the same 10% exposure/daily-loss fractions
+additional allowance: all five share the same 10% funded-exposure limit
 and five-open-trade guard. These shared limits can block later slots.
 
 Model comparisons default to quarter Kelly. The supplied ID becomes a separate
-Kelly stop cohort ending in `.kelly-v3.stop15-v1.risk10-v1`; a restart of the same command reuses it.
-`--no-kelly` derives a `.risk10-v1` cohort and uses the fixed 10% target.
+Kelly stop cohort ending in `.kelly-v3.stop15-v1.risk10-v2`; a restart of the same command reuses it.
+`--no-kelly` derives a `.risk10-v2` cohort and uses the fixed 10% target.
 Registration pins `same-contract-v1`, all timing windows, baseline/model settings,
 minute-five settings, model tag and the admission-order rule. A comparison enrolled
 before minute-five was added needs a new ID; its immutable definition is preserved.
@@ -609,7 +606,7 @@ existing conservative rounded fee bound, counted once. `--extra-cost-usd` may
 subtract one additional nonnegative modeled dollar cost per entry. Only a
 strictly positive result may enter. Baseline and `--no-kelly` model entries use
 a 10% target; default model entries use quarter Kelly capped at 10%, as below.
-All policies share 10% funded exposure and 10% daily loss budgets, with existing
+All policies share the 10% funded-exposure limit, with existing
 depth and five-position checks. Slow account reads and order
 final validation cannot extend the minute-14 cutoff.
 
@@ -639,18 +636,19 @@ optional explicit spelling of the default. `--no-kelly` selects the fixed
 10% model sizing and price exits.
 
 Assigned and simultaneous comparisons automatically use a separate immutable
-Kelly stop cohort: the supplied `--experiment-id` gains `.kelly-v3.stop15-v1.risk10-v1`. IDs too long
+Kelly stop cohort: the supplied `--experiment-id` gains `.kelly-v3.stop15-v1.risk10-v2`. IDs too long
 for that suffix use a readable prefix and stable hash to stay within 64 characters;
 the original ID is saved in the configuration. Logs show both IDs. Pass the
-original supplied ID again on restart. `--no-kelly` derives a separate `.risk10-v1` cohort. Historical definitions
-and holdings retain their recorded settings. Model/cost changes still require a new supplied ID.
+original supplied ID again on restart. `--no-kelly` derives a separate `.risk10-v2` cohort.
+This risk revision removes daily-loss admission budgeting; historical `.risk10-v1`
+definitions and holdings retain their recorded settings. Model/cost changes still require a new supplied ID.
 
 The existing DigitalOcean command already selects a model and runs without
 duration/trade-count limits. When this release reaches passing main CI, the
 enabled updater deploys it at the next flat-account quiet window and resumes the
 active service with default Kelly and the loss exit. No additional service flag is needed. Its
-current comparison becomes `btc-five-20261022-a0201afd.kelly-v3.stop15-v1.risk10-v1`, preserving
-the previous 4%-capped stop cohort, settlement cohort and legacy results. The updater checks every minute; merge does not bypass its
+current comparison derives the `.kelly-v3.stop15-v1.risk10-v2` suffix from the supplied ID, preserving
+the previous risk cohorts, settlement cohort and legacy results. Merge does not bypass the updater's
 CI, flat-account or reconciliation requirements. Existing recoverable-failure
 restart behavior and operator/reconciliation stops remain intact.
 
@@ -670,7 +668,7 @@ rounded-fee/positive-EV checks apply. Any `--extra-cost-usd` allowance is deduct
 from the target before sizing and remains part of the EV check.
 
 Sizing uses the refreshed account bankroll and available buying power. The
-existing shared 10% funded exposure, 10% daily net-loss budget and five-position
+existing shared 10% funded exposure and five-position
 limits still apply. Final quote checks, immediately before create, also reject a
 planned stake if the refreshed probability no longer supports its size.
 
@@ -686,9 +684,9 @@ Actual fills determine proceeds; missing liquidity, gaps or adverse movement can
 leave shares open or produce losses larger than 15%.
 
 The settlement-based Kelly formula is unchanged by this exit experiment. The
-stop does not make 15% the amount at risk: full funded exposure and the existing
-daily-loss reservations still apply. Saved policies survive restart and mode
-changes, including `--no-kelly`; old `model-settlement-v1` trades remain
+stop does not make 15% the amount at risk: full funded exposure still applies.
+Saved policies survive restart and mode changes, including `--no-kelly`;
+old `model-settlement-v1` trades remain
 settlement-only. Reports separate the new stop cohort from settlement-only and
 legacy sizing for the same model tag. No model refit, entry-window change, second
 runner, activation flag, experiment expiry or profitability gate is introduced.
@@ -723,10 +721,10 @@ using their saved settings, including positions opened before the experiment.
 
 Both arms share the same account and journal. Baseline targets 10% per entry;
 default model entries use quarter Kelly capped at 10%. Both share five open
-positions, 10% aggregate funded exposure and the 10% daily loss budget.
-Existing losses, legacy positions and pending orders count toward those
-limits across both arms. There is no separate allowance for the model. Do not
-start a second runner or use a second journal for the same account.
+positions and 10% aggregate funded exposure. Legacy positions and pending orders
+count toward those limits across both arms; realized losses affect current
+bankroll without a separate daily allowance. There is no separate allowance for
+the model. Do not start a second runner or use a second journal for the same account.
 
 Every observed experiment opportunity and entry retains its arm and experiment
 ID. The ordinary read-only report includes `by_experiment`, with each arm's
@@ -768,9 +766,8 @@ a journal or claim an authoritative cash debit. See the maintained
 A fully settled trade's cost or fee dispute does not block new entries when
 each reported difference is at most $0.05. Settlement may omit its fee field
 when the collected order fees and both cost amounts are known. The report keeps
-the dispute and unknown exact P&L; the daily loss budget uses the higher entry
-cost. Unknown order costs or collected fees, unsettled orders, other accounting
-issues, and larger differences still require review.
+the dispute and unknown exact P&L. Unknown order costs or collected fees,
+unsettled orders, other accounting issues, and larger differences still require review.
 
 For a market shared by multiple policy lots, an omitted settlement fee also
 allows admission when the provider's remaining cost matches the known order
@@ -785,9 +782,8 @@ provider to allocate its remaining cost like the journal's average-cost pool.
 Provider realized totals must match either gross cashflows or cashflows net of
 all collected fees, with consistent before/after cost and quantities. This
 read-time check also covers existing saved records; it preserves their raw
-warnings and unknown exact policy P&L. Daily risk still counts each losing
-policy conservatively. Missing evidence, pending/open holdings, delayed fills,
-and unexplained cashflow differences remain blocking; this adds no tolerance.
+warnings and unknown exact policy P&L. Missing evidence, pending/open holdings,
+delayed fills and unexplained cashflow differences remain blocking; this adds no tolerance.
 
 Reported residual fees also reconcile when explicit `baseCost` plus those fees
 equals provider cost, the fees fit within known collected order fees, and gross

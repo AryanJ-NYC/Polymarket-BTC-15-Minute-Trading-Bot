@@ -162,8 +162,9 @@ documented pagination; advertised incomplete responses fail closed. A sibling fa
 stops subsequent position pages; requests already in flight finish before the runner
 handles the error and any shared cooldown. Fresh marks follow the completed reads.
 Read the account once after an eligible decision, before definitive entry sizing;
-each subsequent serial admission gets its own fresh check. Funded exposure and daily
-loss capacity follow the [journal policy](../README.md#bankroll-sizing).
+each subsequent serial admission gets its own fresh check. Entry and funded-exposure
+limits follow the [journal policy](../README.md#bankroll-sizing); there is no daily
+loss allowance or cumulative daily betting limit.
 
 References: [balances](https://docs.polymarket.us/api-reference/account/get-account-balances),
 [positions](https://docs.polymarket.us/api-reference/portfolio/get-user-positions),
@@ -194,8 +195,8 @@ stop.
 
 Fully sold trades retain their fill-derived result while optional official
 outcome metadata is retried; that missing label does not pause new entries.
-Paper holdings awaiting an official outcome stay open and count toward exposure,
-daily loss capacity and the five-position limit; the missing outcome alone does
+Paper holdings awaiting an official outcome stay open and count toward exposure
+and the five-position limit; the missing outcome alone does
 not pause otherwise admissible paper entries.
 
 After partial sales, retain actual net sale proceeds and pay settlement only for
@@ -234,8 +235,8 @@ A fully closed, zero-quantity trade with known costs/proceeds and no pending
 order may pass entry guards if its only issues are resolution cost/fee
 differences, each within $0.05. The differences need not be equal. A missing
 resolution fee field is accepted when collected order fees and both cost
-amounts are known. The report retains disputed exact P&L. The daily loss
-budget uses the higher entry cost, so accepted uncertainty cannot hide losses.
+amounts are known. The report retains disputed exact P&L; this admission proof
+does not assert an exact result or change saved accounting evidence.
 This policy recognizes existing records on read without rewriting evidence.
 Unknown order costs/collected fees, missing resolution cost, unrelated issues,
 open positions and larger differences remain blocking. Reproducible synthetic

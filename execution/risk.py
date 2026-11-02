@@ -1,4 +1,4 @@
-"""Shared bankroll fractions for entry, exposure and daily loss budgets."""
+"""Shared bankroll fractions for entry and funded exposure budgets."""
 
 from decimal import Decimal
 
@@ -20,4 +20,3 @@ KELLY_MULTIPLIER = Decimal("0.25")
 KELLY_MAX_BANKROLL_FRACTION = Decimal("0.10")
 ENTRY_BANKROLL_FRACTION = Decimal("0.10")
 MAX_EXPOSURE_FRACTION = Decimal("0.10")
-DAILY_LOSS_FRACTION = Decimal("0.10")
