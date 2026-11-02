@@ -32,16 +32,16 @@ settle once. The bot does not promise a maximum realized loss of 15%.
 ## Sizing, identity and restarts
 
 The fitted probability model, entry selection/window, refreshed bankroll and
-buying power, quarter-Kelly formula, 4% ceiling, rounded fees, positive settlement
+buying power, quarter-Kelly formula, 10% ceiling, rounded fees, positive settlement
 EV and shared limits are unchanged. Early exit is an experiment applied to
 settlement-based sizing, not evidence that this Kelly fraction optimizes early
 exit returns. A stop does not reduce funded risk to 15% of the stake. Existing
 full-cost daily reservations and fill-based aggregate-exposure accounting remain.
 
 The supplied comparison ID derives a separate immutable identity ending in
-`.kelly-v3.stop15-v1`, with a stable hash for long IDs. The original supplied ID
+`.kelly-v3.stop15-v1.risk10-v1`, with a stable hash for long IDs. The original supplied ID
 is retained in the registration. An unchanged command reuses this identity on
-restart and preserves the previous `.kelly-v3` cohort. Existing
+restart and preserves the previous 4%-capped stop and `.kelly-v3` cohorts. Existing
 `model-settlement-v1` trades remain settlement-only. Existing stop trades keep
 their stop policy when restarted in a different mode.
 

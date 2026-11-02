@@ -26,15 +26,21 @@ def test_late_window_skip_is_retained_with_policy(venue, journal, books, stream_
 def test_entry_persists_policy_and_observation_before_submission(
     venue, journal, monkeypatch, books, stream_feed
 ):
+    venue.market["feeCoefficient"] = 0
+    venue.bid, venue.ask = "0.79", "0.80"
     trader = TradingBot(venue.client, journal, books, live=True)
+    trader.tick()
+    stream_feed.publish()
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: "up")
     submit = venue.client.submit
 
     def checked_submit(plan, *, validate=None):
+        assert plan.budget == Decimal("10")
+        assert plan.quantity == Decimal("12.50")
         assert journal.opportunities()[-1]["decision"] == "entry_reserved"
         assert journal.get(plan.slug)["settings"]["stop_loss"] == "-0.30"
         settings = journal.get(plan.slug)["settings"]
-        assert settings["entry_bankroll_fraction"] == "0.02"
+        assert settings["entry_bankroll_fraction"] == "0.10"
         assert settings["max_exposure_fraction"] == "0.10"
         assert settings["daily_loss_fraction"] == "0.10"
         return submit(plan, validate=validate)
@@ -207,15 +213,15 @@ def test_recovered_buy_over_budget_records_actual_fill_then_stops(
     row = journal.records()[0]
     assert row["order_id"] == "bot-order-1"
     assert row["pending"] is not None
-    venue.order["commissionNotionalTotalCollected"] = {"value": "1.70", "currency": "USD"}
+    venue.order["commissionNotionalTotalCollected"] = {"value": "9.70", "currency": "USD"}
     monkeypatch.setattr(venue.client, "cancel", cancel)
     with pytest.raises(RuntimeError, match="exceeded its reserved budget"):
         trader.tick()
     recorded = journal.get(row["slug"])
     assert recorded["pending"] is None
     assert Decimal(recorded["quantity"]) == Decimal("0.5")
-    assert Decimal(recorded["entry_cost"]) == Decimal("2.0200")
-    assert Decimal(recorded["orders"][0]["fee"]) == Decimal("1.70")
+    assert Decimal(recorded["entry_cost"]) == Decimal("10.0200")
+    assert Decimal(recorded["orders"][0]["fee"]) == Decimal("9.70")
     assert sum(method == "POST" and path == "/v1/orders" for method, path, _ in venue.calls) == 1
 
 

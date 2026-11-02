@@ -484,8 +484,8 @@ def test_candidate_leaves_all_three_baseline_slots_available_across_restarts(
     assert venue.positions[future_market.slug]["netPositionDecimal"] == "2.0"
 
 
-@pytest.mark.parametrize("depth,quantity", [("100", "2.17"), ("0.5", "0.5")])
-def test_candidate_uses_fee_reserve_and_depth_within_two_percent(
+@pytest.mark.parametrize("depth,quantity", [("100", "10.90"), ("0.5", "0.5")])
+def test_candidate_uses_fee_reserve_and_depth_within_ten_percent(
     venue, journal, stream_feed, clock, future_market, actual_fills, depth, quantity
 ):
     clock.current = future_market.start + timedelta(seconds=300)
@@ -495,7 +495,7 @@ def test_candidate_uses_fee_reserve_and_depth_within_two_percent(
     bot.TradingBot(venue.client, journal, stream_feed.books, live=True).tick()
     order = next(iter(actual_fills.values()))
     assert Decimal(str(order["quantity"])) == Decimal(quantity)
-    assert Decimal(journal.records()[0]["entry_cost"]) <= Decimal("2")
+    assert Decimal(journal.records()[0]["entry_cost"]) <= Decimal("10")
 
 
 def test_local_price_race_is_explained_without_submission_or_retry(

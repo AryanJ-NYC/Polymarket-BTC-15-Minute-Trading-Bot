@@ -9,11 +9,17 @@ from execution.trade_journal import TradeJournal, confirmed_cashflow_pnls
 from results_report import summarize
 
 
-@pytest.mark.parametrize("yes_value,net", [("0", "3.989"), ("1", "-5.231")])
+@pytest.mark.parametrize(
+    "yes_value,net,budget,reason",
+    [
+        ("0", "3.989", "10", "10% entry target"),
+        ("1", "-5.231", "4.769", "daily 10% loss budget"),
+    ],
+)
 @pytest.mark.parametrize("zero_fill", [False, True])
 @pytest.mark.parametrize("readback_delayed", [False, True])
 def test_exact_single_lot_cashflows_admit_and_report_after_reopen(
-    venue, tmp_path, yes_value, net, zero_fill, readback_delayed
+    venue, tmp_path, yes_value, net, budget, reason, zero_fill, readback_delayed
 ):
     path = tmp_path / "single-lot.sqlite"
     journal = TradeJournal(path)
@@ -27,8 +33,8 @@ def test_exact_single_lot_cashflows_admit_and_report_after_reopen(
         assert row["accounting_issues"] == ["Resolution cost differs from recorded entry cost"]
         assert "scope" not in row["settlement"]
         assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
-            Decimal("2"),
-            "2% entry target",
+            Decimal(budget),
+            reason,
         )
         assert journal.exposure() == 0
         report = summarize(journal.records())
@@ -40,7 +46,7 @@ def test_exact_single_lot_cashflows_admit_and_report_after_reopen(
         journal.close()
     reopened = TradeJournal(path)
     try:
-        reopened.risk_check(Decimal("2"), Decimal("100"))
+        reopened.risk_check(Decimal(budget), Decimal("100"))
         assert summarize(reopened.records())["total_net_pnl"] == net
         assert reopened.records() == original
     finally:
@@ -163,15 +169,15 @@ def test_confirmed_single_lot_keeps_independent_risk_limits(venue, tmp_path, clo
         )
         with pytest.raises(ValueError, match="daily"):
             journal.risk_check(Decimal(".27"), Decimal("55"))
-        with pytest.raises(ValueError, match="2%"):
-            journal.risk_check(Decimal("2.01"), Decimal("100"))
+        market = parse_market(venue.market)
+        plan = venue.client.buy_plan(market, venue.client.book(market), "down", Decimal("6"))
+        clock.current += timedelta(days=1)
+        with pytest.raises(ValueError, match="10% entry target"):
+            journal.risk_check(Decimal("10.01"), Decimal("100"))
         assert journal.entry_budget(Decimal("100"), Decimal(".50")) == (
             Decimal(".50"),
             "buying power",
         )
-        market = parse_market(venue.market)
-        plan = venue.client.buy_plan(market, venue.client.book(market), "down", Decimal("6"))
-        clock.current += timedelta(days=1)
         for index in range(5):
             other = replace(plan, slug=f"other-{index}")
             journal.reserve_entry(other, market.end)
@@ -260,10 +266,10 @@ def test_captured_recovered_buy_settlement_requires_exact_cashflows(
         }[shared, yes_value]
         assert sum(confirmed_cashflow_pnls(original).values()) == Decimal(expected_net)
         assert journal.exposure() == 0
-        expected_budget = min(Decimal("1.4"), Decimal("7") + Decimal(expected_net))
+        expected_budget = min(Decimal("7"), Decimal("7") + Decimal(expected_net))
         assert journal.entry_budget(Decimal("70"), Decimal("100"))[0] == expected_budget
         journal.risk_check(expected_budget, Decimal("70"))
-        with pytest.raises(ValueError, match="daily|2%"):
+        with pytest.raises(ValueError, match="daily|10%"):
             journal.risk_check(expected_budget + Decimal(".0001"), Decimal("70"))
         journal.settle_market(
             market.slug, Decimal(yes_value), resolution=original[0]["settlement"]["resolution"]

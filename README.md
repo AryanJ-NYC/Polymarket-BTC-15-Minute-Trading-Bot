@@ -110,11 +110,11 @@ Temporary read failures retain known order IDs and recover automatically.
 - Uses YES-denominated prices for both Up and Down US intents. Down entry cost
   is `1 - YES bid`; Up entry cost is `YES ask`. Prices must match the market tick.
 - Uses limit IOC orders at visible best prices, with fractional quantities
-  rounded down to the market increment and visible depth. **Targets at most 2%
+  rounded down to the market increment and visible depth. **Targets at most 10%
   of current account bankroll per entry, including a conservative fee reserve,
   with 10% aggregate funded exposure.** Never increases spend to meet minimum
   quantity. Maximum five open positions. The default model Kelly policy below
-  uses an edge-dependent target capped at 4% instead of the baseline's 2% target.
+  uses an edge-dependent target capped at 10% instead of the baseline's 10% target.
 - Rechecks eligible book generation, executable price/depth, freshness, and entry
   deadline after slow work and during final validation immediately before submission. Known preflight rejections safely release the reserved order;
   ambiguous create outcomes remain pending and are never retried automatically.
@@ -146,10 +146,10 @@ Temporary read failures retain known order IDs and recover automatically.
 
 ### Bankroll sizing
 
-The shared Decimal fractions in `execution/risk.py` are `0.02` (2% per baseline entry),
+The shared Decimal fractions in `execution/risk.py` are `0.10` (10% per baseline entry),
 `0.10` (10% aggregate exposure), and `0.10` (10% daily loss budget).
 The formula and examples in this section describe baseline/`--no-kelly` sizing;
-default model sizing replaces the 2% target with the quarter-Kelly target below.
+default model sizing replaces the 10% target with the quarter-Kelly target below.
 All amounts are USD:
 
 ```text
@@ -158,7 +158,7 @@ exposure = sum(entry cost including fees * remaining quantity / filled entry qua
            + still-unaccounted BUY reservations
 daily loss budget remaining = 0.10 * bankroll + realized net P&L today (UTC)
                               - original full entry cost of open trades
-entry budget = max(0, min(0.02 * bankroll, buyingPower,
+entry budget = max(0, min(0.10 * bankroll, buyingPower,
                           0.10 * bankroll - exposure, daily loss budget remaining))
 ```
 
@@ -181,7 +181,7 @@ or nonzero holdings awaiting settlement make bankroll unavailable and skip entry
 Zero equity or exhausted exposure room also skips entry. Existing position exits
 continue under their usual rules; a percentage breach does not force liquidation.
 
-$100 bankroll targets $2 with a $10 daily loss budget; $500 targets $10 with a
+$100 bankroll targets $10 with a $10 daily loss budget; $500 targets $50 with a
 $50 daily loss budget, before tighter limits. The five-open-position guard and
 remaining exposure/daily capacity can limit entries further. The daily percentage
 uses the same current account snapshot as entry and exposure sizing, rather than
@@ -272,7 +272,7 @@ python view_paper_trades.py
 
 For the provisioned DigitalOcean server, connection details, start/stop commands,
 and automatic main updates are in [deployment instructions](docs/digitalocean-deployment.md).
-GitHub CI validates each push; the Droplet checks every five minutes and deploys
+GitHub CI validates each push; the Droplet checks every minute and deploys
 passing main commits while flat, preserving stopped/failed services. No approval
 or deploy click is required for ordinary updates after setup.
 
@@ -343,8 +343,8 @@ The baseline runner evaluates all three fixed windows in every contract; no extr
 flag or environment variable is needed. An explicitly enrolled baseline/model
 comparison keeps its frozen whole-contract baseline window; this timing change
 does not alter that separate experiment. Each eligible entry independently uses
-the existing 2% bankroll ceiling including fees. With the ordinary minute-five
-policy below, four entries can fund roughly 8% of the same bankroll before exits. The shared 10% exposure and daily-loss fractions and five-open-trade limit still apply across all experiments.
+the existing 10% bankroll ceiling including fees. With the ordinary minute-five
+policy below, one full-size entry can use the entire 10% shared exposure allowance before exits. The shared 10% exposure and daily-loss fractions and five-open-trade limit still apply across all experiments.
 Normal signal, warmup, quote and deadline checks can produce no entry.
 
 Same-side experiment trades can overlap. An opposing signal while another
@@ -427,7 +427,7 @@ decision on the first normal tick at elapsed **100 seconds through strictly befo
 105 seconds**, buys the favorite only when its YES midpoint (or complement) is
 strictly above .80 and at most .95, and holds its owned lot to official settlement.
 Up buys at the YES ask; Down buys at one minus the YES bid. Visible side quantity,
-quantity increments, limit IOC execution and the fee-inclusive 2% bankroll ceiling
+quantity increments, limit IOC execution and the fee-inclusive 10% bankroll ceiling
 still apply. Skips, invalid quotes, risk blocks and zero fills consume the decision;
 missing the interval records `missed_window`. A newly subscribed contract waits
 for its first snapshot within that interval before consuming its decision; if no
@@ -488,7 +488,7 @@ python bot.py --live
 On the first normal tick at elapsed 300 seconds and before 305, save one durable
 eligibility decision. Require a fresh, open, correctly identified two-sided book
 and a favorite midpoint strictly above .80 and at most .95. Buy Up at the YES ask,
-or Down at one minus the YES bid, using the existing fee-inclusive 2% ceiling,
+or Down at one minus the YES bid, using the existing fee-inclusive 10% ceiling,
 quantity flooring and available depth. This policy needs no fusion signals,
 warmup or fitted model. Later baseline sampling and signal rules still apply.
 
@@ -525,14 +525,14 @@ python bot.py --live --model logs/candidate.json --experiment-id btc-four-compar
 
 The three baseline timing entries and minute-five policy run alongside one model
 entry at 13:00–14:00. Each slot has its own durable attempt and saved policy, including a `model-current`
-trade key. Model entries use fee-aware quarter Kelly capped at 4% with a 15%
-loss exit, otherwise holding to settlement; baseline entries keep their 2% target and saved exits. There is no
+trade key. Model entries use fee-aware quarter Kelly capped at 10% with a 15%
+loss exit, otherwise holding to settlement; baseline entries keep their 10% target and saved exits. There is no
 additional allowance: all five share the same 10% exposure/daily-loss fractions
 and five-open-trade guard. These shared limits can block later slots.
 
 Model comparisons default to quarter Kelly. The supplied ID becomes a separate
-Kelly stop cohort ending in `.kelly-v3.stop15-v1`; a restart of the same command reuses it.
-`--no-kelly` retains the original ID and legacy fixed-percentage model behavior.
+Kelly stop cohort ending in `.kelly-v3.stop15-v1.risk10-v1`; a restart of the same command reuses it.
+`--no-kelly` derives a `.risk10-v1` cohort and uses the fixed 10% target.
 Registration pins `same-contract-v1`, all timing windows, baseline/model settings,
 minute-five settings, model tag and the admission-order rule. A comparison enrolled
 before minute-five was added needs a new ID; its immutable definition is preserved.
@@ -608,7 +608,7 @@ both `Q*(q - YES ask) - F` for Up and `Q*(YES bid - q) - F` for Down. F is the
 existing conservative rounded fee bound, counted once. `--extra-cost-usd` may
 subtract one additional nonnegative modeled dollar cost per entry. Only a
 strictly positive result may enter. Baseline and `--no-kelly` model entries use
-a 2% target; default model entries use quarter Kelly capped at 4%, as below.
+a 10% target; default model entries use quarter Kelly capped at 10%, as below.
 All policies share 10% funded exposure and 10% daily loss budgets, with existing
 depth and five-position checks. Slow account reads and order
 final validation cannot extend the minute-14 cutoff.
@@ -625,7 +625,7 @@ Track each experiment's sample counts, checks, deployed revision, prediction
 metrics and actual execution results in its GitHub issue or PR. Automated fixture
 coverage, deployed behavior and live execution are separate evidence.
 
-### Quarter Kelly with a 4% ceiling
+### Quarter Kelly with a 10% ceiling
 
 Selecting a model automatically uses quarter Kelly:
 
@@ -635,22 +635,22 @@ python bot.py --model logs/model.json
 
 Add `--live` to place real orders. The bot runs continuously until stopped;
 there is no automatic experiment end or timed promotion. `--kelly` is an
-optional explicit spelling of the default. `--no-kelly` selects the legacy
-2% model sizing and price exits.
+optional explicit spelling of the default. `--no-kelly` selects the fixed
+10% model sizing and price exits.
 
 Assigned and simultaneous comparisons automatically use a separate immutable
-Kelly stop cohort: the supplied `--experiment-id` gains `.kelly-v3.stop15-v1`. IDs too long
+Kelly stop cohort: the supplied `--experiment-id` gains `.kelly-v3.stop15-v1.risk10-v1`. IDs too long
 for that suffix use a readable prefix and stable hash to stay within 64 characters;
 the original ID is saved in the configuration. Logs show both IDs. Pass the
-original supplied ID again on restart. `--no-kelly` uses that original ID and
-configuration. Model/cost changes still require a new supplied ID.
+original supplied ID again on restart. `--no-kelly` derives a separate `.risk10-v1` cohort. Historical definitions
+and holdings retain their recorded settings. Model/cost changes still require a new supplied ID.
 
 The existing DigitalOcean command already selects a model and runs without
 duration/trade-count limits. When this release reaches passing main CI, the
 enabled updater deploys it at the next flat-account quiet window and resumes the
 active service with default Kelly and the loss exit. No additional service flag is needed. Its
-current comparison becomes `btc-five-20261022-a0201afd.kelly-v3.stop15-v1`, preserving
-the previous `.kelly-v3` settlement cohort and legacy results. The updater checks every minute; merge does not bypass its
+current comparison becomes `btc-five-20261022-a0201afd.kelly-v3.stop15-v1.risk10-v1`, preserving
+the previous 4%-capped stop cohort, settlement cohort and legacy results. The updater checks every minute; merge does not bypass its
 CI, flat-account or reconciliation requirements. Existing recoverable-failure
 restart behavior and operator/reconciliation stops remain intact.
 
@@ -658,12 +658,12 @@ For each side's estimated settlement probability `q`, the target is:
 
 ```text
 c = executable side price + feeCoefficient / 4
-fraction = min(0.04, 0.25 * max(0, (q - c) / (1 - c)))
+fraction = min(0.10, 0.25 * max(0, (q - c) / (1 - c)))
 ```
 
-No bet is placed when `c >= 1` or the estimated edge is nonpositive. The 4% is
+No bet is placed when `c >= 1` or the estimated edge is nonpositive. The 10% is
 a ceiling, not a fixed bet: at a fee-inclusive cost of $0.50, probabilities of
-0.52 and 0.58 target 1% and 4% of bankroll respectively. This is approximate
+0.52, 0.58 and 0.80 target 1%, 4% and 10% of bankroll respectively. This is approximate
 fractional Kelly, not an exact optimum with uncertain probabilities and rounded
 fees. The fee reserve is conservative; quantity flooring and the existing
 rounded-fee/positive-EV checks apply. Any `--extra-cost-usd` allowance is deducted
@@ -721,8 +721,8 @@ original start and assignments. New enrollment begins with the first whole
 15-minute contract after registration. Existing positions continue to be managed
 using their saved settings, including positions opened before the experiment.
 
-Both arms share the same account and journal. Baseline targets 2% per entry;
-default model entries use quarter Kelly capped at 4%. Both share five open
+Both arms share the same account and journal. Baseline targets 10% per entry;
+default model entries use quarter Kelly capped at 10%. Both share five open
 positions, 10% aggregate funded exposure and the 10% daily loss budget.
 Existing losses, legacy positions and pending orders count toward those
 limits across both arms. There is no separate allowance for the model. Do not

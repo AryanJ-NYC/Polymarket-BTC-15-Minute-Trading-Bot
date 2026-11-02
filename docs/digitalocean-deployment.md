@@ -46,9 +46,9 @@ ssh -i ~/.ssh/polymarket_us_digitalocean \
 
 The following commands are for the user to run on the Droplet. Starting this
 service enables **real-money orders**, subject to the bot's existing limits:
-at most 2% of current account bankroll including the fee reserve per entry,
+at most 10% of current account bankroll including the fee reserve per entry,
 five open positions, 10% aggregate funded exposure, and its own daily loss budget
-of 10% of current bankroll. The daily/count guards may impose tighter limits.
+of 10% of current bankroll. Model entries use quarter Kelly capped at 10%; daily/count guards may impose tighter limits.
 The budget is not an account-wide guarantee. Check the trading service itself;
 an active Droplet does not establish that trading is running.
 
@@ -145,7 +145,7 @@ limits, including legacy losses and exposure. Unknown/disputed P&L stays unknown
 
 New quarter-Kelly model trades automatically save the 15% loss-exit policy after
 deployment. The unchanged supplied ID derives a distinct cohort ending in
-`.kelly-v3.stop15-v1`; the previous `.kelly-v3` settlement cohort and its holdings
+`.kelly-v3.stop15-v1.risk10-v1`; the previous `.kelly-v3` settlement cohort and its holdings
 are preserved. No new flag, runner or scheduled end is required. Verify the
 deployed revision and registration separately from provider fills and confirmed
 profitability. See [model loss-exit operation](model-loss-exit.md).

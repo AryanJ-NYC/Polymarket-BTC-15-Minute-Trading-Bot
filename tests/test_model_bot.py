@@ -16,8 +16,8 @@ from probability_model import load_model
 
 @pytest.fixture(autouse=True)
 def fixed_bankroll(venue):
-    # The arithmetic fixtures use a $1 budget: 2% of a $50 cash bankroll.
-    venue.balance.update(currentBalance=50.0, buyingPower=50.0)
+    # The arithmetic fixtures use a $1 budget: 10% of a $10 cash bankroll.
+    venue.balance.update(currentBalance=10.0, buyingPower=10.0)
 
 
 def test_skipped_contract_gets_official_outcome_without_trade(
@@ -347,7 +347,7 @@ def test_unavailable_old_outcomes_do_not_starve_newer_settlement(
         journal.close()
 
 
-@pytest.mark.parametrize("buying_power,expected_quantity", [(500.0, "14.98"), (0.4, "0.59")])
+@pytest.mark.parametrize("buying_power,expected_quantity", [(500.0, "74.92"), (0.4, "0.59")])
 def test_model_uses_refreshed_bankroll_and_buying_power(
     venue, tmp_path, clock, buying_power, expected_quantity, books, stream_feed
 ):
@@ -364,7 +364,7 @@ def test_model_uses_refreshed_bankroll_and_buying_power(
         row = journal.records()[0]
         candidate = row["settings"]["prediction"]["candidates"]["up"]
         assert Decimal(candidate["quantity"]) == Decimal(expected_quantity)
-        assert row["settings"]["entry_bankroll_fraction"] == "0.02"
+        assert row["settings"]["entry_bankroll_fraction"] == "0.10"
         assert row["settings"]["max_exposure_fraction"] == "0.10"
         assert row["settings"]["daily_loss_fraction"] == "0.10"
         assert "budget_usd" not in row["settings"]

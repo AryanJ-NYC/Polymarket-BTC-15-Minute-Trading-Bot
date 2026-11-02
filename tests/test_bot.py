@@ -19,7 +19,7 @@ def test_default_runner_is_read_only_even_when_it_paper_trades(venue, journal, m
     row = journal.records()[0]
     assert row["state"] == "open"
     assert Decimal(row["quantity"]) > 0
-    assert Decimal(row["entry_cost"]) <= 2
+    assert Decimal(row["entry_cost"]) <= 10
     assert row["pnl"] is None  # No fabricated immediate WIN/LOSS.
     assert all(method == "GET" for method, _, _ in venue.calls)
     trader.tick()
@@ -450,7 +450,7 @@ def test_one_trade_restart_resumes_existing_position(venue, journal, clock, book
     assert len(journal.records()) == 1
 
 
-@pytest.mark.parametrize("equity,maximum", [("100", "2"), ("500", "10"), ("25", "0.50")])
+@pytest.mark.parametrize("equity,maximum", [("100", "10"), ("500", "50"), ("25", "2.50")])
 @pytest.mark.parametrize("outcome", ["up", "down"])
 def test_live_runner_sizes_from_account_with_daily_limit(
     venue, journal, monkeypatch, equity, maximum, outcome, books, stream_feed
@@ -458,7 +458,10 @@ def test_live_runner_sizes_from_account_with_daily_limit(
     venue.balance.update(currentBalance=equity, buyingPower=equity)
     if outcome == "down":
         venue.bid, venue.ask, venue.fill_price = "0.35", "0.37", "0.36"
-    stream_feed.publish()
+    stream_feed.publish(
+        bids=[{"px": {"value": venue.bid, "currency": "USD"}, "qty": "100"}],
+        offers=[{"px": {"value": venue.ask, "currency": "USD"}, "qty": "100"}],
+    )
     trader = TradingBot(venue.client, journal, books, live=True)
     monkeypatch.setattr(trader.strategy, "decide", lambda market, book, context: outcome)
     trader.tick()
@@ -475,7 +478,7 @@ def test_live_runner_sizes_from_account_with_daily_limit(
 
 @pytest.mark.parametrize(
     "later_equity,later_power,maximum",
-    [("20", "20", "0.40"), ("100", "0.40", "0.40"), ("0", "0", "0")],
+    [("20", "20", "2"), ("100", "0.40", "0.40"), ("0", "0", "0")],
 )
 def test_fresh_admission_account_resizes_or_skips(
     venue, journal, monkeypatch, later_equity, later_power, maximum, books, stream_feed
@@ -493,7 +496,11 @@ def test_fresh_admission_account_resizes_or_skips(
         request = next(body for method, path, body in venue.calls if path == "/v1/orders")
         quantity = Decimal(str(request["quantity"]))
         fee = (quantity * Decimal("0.0695") / 4).quantize(Decimal("0.01"))
-        assert Decimal("0.38") < quantity * Decimal("0.65") + fee <= Decimal(maximum)
+        assert (
+            Decimal(maximum) - Decimal("0.02")
+            < quantity * Decimal("0.65") + fee
+            <= Decimal(maximum)
+        )
 
 
 @pytest.mark.parametrize("cash,buying_power", [("100", "0"), (None, "100"), ("0.01", "100")])
@@ -519,11 +526,11 @@ def test_live_entry_refreshes_initially_unusable_account(
     assert journal.get(venue.market["slug"])["state"] == "open"
     assert sum(path == "/v1/account/balances" for _, path, _ in venue.calls) == 2
     request = next(body for method, path, body in venue.calls if path == "/v1/orders")
-    assert request["quantity"] == 2.99
+    assert request["quantity"] == 14.98
 
 
 @pytest.mark.parametrize(
-    "cash,budget", [("125", "2.50"), ("75", "1.50"), ("150", "3"), ("50", "1")]
+    "cash,budget", [("125", "12.50"), ("75", "7.50"), ("150", "15"), ("50", "5")]
 )
 def test_later_credited_gain_loss_deposit_or_withdrawal_changes_entry(
     venue, journal, monkeypatch, cash, budget, books, stream_feed
@@ -685,11 +692,11 @@ def test_decision_delay_resizes_from_fresh_account_and_latest_stream_quote(
     trader.tick()
     request = next(body for _, path, body in venue.calls if path == "/v1/orders")
     assert request["price"]["value"] == "0.66"
-    assert Decimal(str(request["quantity"])) == Decimal("0.59")
+    assert Decimal(str(request["quantity"])) == Decimal("2.95")
     assert sum(path == "/v1/account/balances" for _, path, _ in venue.calls) == 1
     assert not any(path.endswith("/book") for _, path, _ in venue.calls)
     row = journal.get(venue.market["slug"])
-    assert row["settings"]["entry_bankroll_fraction"] == "0.02"
+    assert row["settings"]["entry_bankroll_fraction"] == "0.10"
     assert row["pending"] is None
     assert journal.opportunities()[-1]["book"]["ask"] == "0.66"
 
@@ -698,7 +705,7 @@ def test_decision_delay_resizes_from_fresh_account_and_latest_stream_quote(
 def test_minimum_sized_entry_keeps_its_valid_fee_rounded_reservation(
     venue, journal, books, stream_feed, monkeypatch, outcome
 ):
-    venue.balance.update(currentBalance="0.40", buyingPower="0.40")
+    venue.balance.update(currentBalance="0.08", buyingPower="0.08")
     if outcome == "down":
         venue.bid, venue.ask = "0.35", "0.37"
         stream_feed.publish()

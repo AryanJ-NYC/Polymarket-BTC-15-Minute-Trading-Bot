@@ -83,7 +83,7 @@ def test_real_baseline_submits_only_inside_each_named_window(
     if preset:
         settings = journal.records()[0]["settings"]
         assert settings["timing_preset"] == preset
-        assert settings["entry_bankroll_fraction"] == "0.02"
+        assert settings["entry_bankroll_fraction"] == "0.10"
         assert settings["stop_loss"] == "-0.30"
         assert settings["extra_cost_usd"] == "0"
     else:
@@ -367,7 +367,7 @@ def test_market_fee_dispute_is_not_duplicated_or_silently_made_exact(
     assert [row["pnl"] for row in journal.records()] == [None, None]
     if allowed:
         assert journal.exposure() == 0
-        assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+        assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
         assert sum(
             Decimal(row["settlement"]["risk_adjustment"]) for row in journal.records()
         ) == Decimal("0.02")
@@ -532,7 +532,7 @@ def test_enrolled_model_comparison_keeps_its_pinned_single_baseline_window(
         stream_feed.books,
         model=saved_model(tmp_path, 0.1),
         kelly=False,
-        experiment_id="test-baseline",
+        experiment_id="test-baseline-5",
         context=bullish_context(),
     )
     for seconds in (720, 780, 840):

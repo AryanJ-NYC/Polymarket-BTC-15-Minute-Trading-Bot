@@ -1,4 +1,5 @@
 import hashlib
+from copy import deepcopy
 from datetime import timedelta
 from decimal import Decimal
 
@@ -25,11 +26,13 @@ def sampling_clock(clock, monkeypatch):
         ("up", "0.50", None),
         ("up", "0.52", "2"),
         ("up", "0.58", "8"),
+        ("up", "0.80", "20"),
         ("down", "0.48", "2"),
         ("down", "0.42", "8"),
+        ("down", "0.20", "20"),
     ],
 )
-def test_kelly_live_order_uses_edge_and_four_percent_ceiling(
+def test_kelly_live_order_uses_edge_and_ten_percent_ceiling(
     venue, tmp_path, clock, books, stream_feed, monkeypatch, outcome, q, quantity
 ):
     venue.balance.update(currentBalance="100", buyingPower="100")
@@ -54,7 +57,7 @@ def test_kelly_live_order_uses_edge_and_four_percent_ceiling(
             assert Decimal(requests[0]["quantity"]) == Decimal(quantity)
             row = journal.records()[0]
             assert row["outcome"] == outcome
-            assert row["settings"]["entry_bankroll_fraction"] == "0.04"
+            assert row["settings"]["entry_bankroll_fraction"] == "0.10"
             assert row["settings"]["exit_policy"] == "model-loss-15-v1"
             assert row["settings"]["stop_loss"] == "-0.15"
             assert row["settings"]["sizing_policy"] == "quarter-kelly-v3"
@@ -164,12 +167,30 @@ def test_default_kelly_creates_separate_stable_cohort_without_changing_legacy(
         experiment_id=identifier,
         simultaneous=simultaneous,
     ).experiment
-    assert current["id"].endswith(".kelly-v3.stop15-v1")
+    assert current["id"].endswith(".kelly-v3.stop15-v1.risk10-v1")
     assert len(current["id"]) <= 64
     assert current["id"] not in {legacy["id"], saved_settlement["id"]}
     assert journal.start_experiment(old_id, saved_settlement["configuration"]) == saved_settlement
     assert current["configuration"]["requested_experiment_id"] == identifier
-    assert current["configuration"]["model_settings"]["entry_bankroll_fraction"] == "0.04"
+    assert current["configuration"]["model_settings"]["entry_bankroll_fraction"] == "0.10"
+    # Real prior-cap configurations must remain untouched under the same supplied ID.
+    prior_fixed = deepcopy(legacy["configuration"])
+    prior_fixed["baseline_settings"]["entry_bankroll_fraction"] = "0.02"
+    if simultaneous:
+        prior_fixed["minute_five_settings"]["entry_bankroll_fraction"] = "0.02"
+        prior_fixed["model_settings"]["entry_bankroll_fraction"] = "0.02"
+    saved_fixed = journal.start_experiment(identifier, prior_fixed)
+    prior_stop = deepcopy(current["configuration"])
+    prior_stop["baseline_settings"]["entry_bankroll_fraction"] = "0.02"
+    prior_stop["model_settings"]["entry_bankroll_fraction"] = "0.04"
+    if simultaneous:
+        prior_stop["minute_five_settings"]["entry_bankroll_fraction"] = "0.02"
+    suffix = ".kelly-v3.stop15-v1"
+    prior_id = identifier + suffix
+    if len(prior_id) > 64:
+        digest = hashlib.sha256(identifier.encode()).hexdigest()[:16]
+        prior_id = identifier[: 64 - len(suffix) - 17] + "." + digest + suffix
+    saved_stop = journal.start_experiment(prior_id, prior_stop)
     clock.current += timedelta(hours=1)
     assert (
         TradingBot(
@@ -194,6 +215,8 @@ def test_default_kelly_creates_separate_stable_cohort_without_changing_legacy(
         ).experiment
         == legacy
     )
+    assert journal.saved_experiment(identifier) == saved_fixed
+    assert journal.saved_experiment(prior_id) == saved_stop
     # A cohort rollover is not permission to reinterpret any existing definition.
     with pytest.raises(ValueError, match="different configuration"):
         TradingBot(
@@ -291,7 +314,7 @@ def test_deployed_cli_selects_default_sizing_and_runs_until_operator_stops(
     if experiment is not None:
         settings = experiment["configuration"].get("model_settings", settings)
         assert experiment["id"] == "btc-five-20261022-a0201afd" + (
-            "" if legacy else ".kelly-v3.stop15-v1"
+            ".risk10-v1" if legacy else ".kelly-v3.stop15-v1.risk10-v1"
         )
     assert settings["sizing_policy"] == ("bankroll-percentage-v1" if legacy else "quarter-kelly-v3")
     assert settings["exit_policy"] == ("price-thresholds-v1" if legacy else "model-loss-15-v1")
@@ -328,4 +351,4 @@ def test_new_model_entries_persist_stop_policy_in_every_runner_mode(
     assert "take_profit" not in settings
     if mode != "model-only":
         assert settings["experiment"]["arm"] == "model"
-        assert settings["experiment"]["id"] == "stop-policy.kelly-v3.stop15-v1"
+        assert settings["experiment"]["id"] == "stop-policy.kelly-v3.stop15-v1.risk10-v1"

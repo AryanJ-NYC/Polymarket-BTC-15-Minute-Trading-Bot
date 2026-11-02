@@ -4,7 +4,7 @@ from decimal import Decimal
 
 
 def kelly_fraction(probability: Decimal, unit_cost: Decimal) -> Decimal:
-    """Quarter Kelly for a settlement-only $1/zero payoff, capped at 4%."""
+    """Quarter Kelly for a settlement-only $1/zero payoff, capped at 10%."""
     if not probability.is_finite() or not 0 <= probability <= 1:
         raise ValueError("Settlement probability must be finite and between zero and one")
     if not unit_cost.is_finite() or unit_cost <= 0:
@@ -17,7 +17,7 @@ def kelly_fraction(probability: Decimal, unit_cost: Decimal) -> Decimal:
 
 
 KELLY_MULTIPLIER = Decimal("0.25")
-KELLY_MAX_BANKROLL_FRACTION = Decimal("0.04")
-ENTRY_BANKROLL_FRACTION = Decimal("0.02")
+KELLY_MAX_BANKROLL_FRACTION = Decimal("0.10")
+ENTRY_BANKROLL_FRACTION = Decimal("0.10")
 MAX_EXPOSURE_FRACTION = Decimal("0.10")
 DAILY_LOSS_FRACTION = Decimal("0.10")

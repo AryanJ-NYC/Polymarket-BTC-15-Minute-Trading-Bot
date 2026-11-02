@@ -2,7 +2,21 @@
 
 On October 24, 2026 the operator explicitly directed **activation of the paired candidate**. The continuous deployment now selects `models/exit-aware-20261023.json` through [the model service override](../deploy/exit-aware-model.conf), using the new immutable comparison ID `btc-exit-aware-20261024-dec25841`. This supersedes the initial research-based retention decision recorded in the saved evidence. The newer recorded-book sample still supplies no execution evidence for adoption; activation is an operator decision, not a new profitability finding. Zero trades, profitable simulations, deployed code and actual profitable fills are distinct outcomes.
 
-This first candidate applies only to model entries 780–840 seconds into a 900-second contract, quarter Kelly (0.25), the existing 4% cap and saved 15% loss exit. Baseline timing, minute-five favorites and actual five-minute contracts keep their own paths. It does not estimate a full Kelly payoff distribution or optimize sizing. A stop-trained payout mean must never be reused for settlement-only trading.
+The original research candidate applies only to model entries 780–840 seconds into a 900-second contract, quarter Kelly (0.25), the existing 4% cap and saved 15% loss exit. Baseline timing, minute-five favorites and actual five-minute contracts keep their own paths. It does not estimate a full Kelly payoff distribution or optimize sizing. A stop-trained payout mean must never be reused for settlement-only trading.
+
+## Runtime sizing update
+
+New entries retain quarter Kelly (0.25) with a 10% ceiling; baseline entries target
+10%. Both still share the 10% funded-exposure and UTC daily-loss budgets, so a
+full-size entry can consume the available allowance. Smaller estimated model edges
+produce smaller stakes. The supplied experiment ID derives a new
+`.kelly-v3.stop15-v1.risk10-v1` cohort without changing old definitions or holdings.
+
+The artifact and payout identity keep the original 4% research policy. Explicit
+runtime settings permit the new cap while retaining the fitted entry window,
+stop15 exit and actual-quantity fee-aware admission checks. This larger quantity
+range has not been validated by the saved replay; the ten-share payout target
+remains an approximation, and liquidity can reduce planned or filled size.
 
 ## Paired artifact and admission
 
