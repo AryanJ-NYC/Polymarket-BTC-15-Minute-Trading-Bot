@@ -54,6 +54,7 @@ from execution.risk import (
 )
 from execution.trade_journal import TradeJournal, entry_key, pending_plan
 from exit_candidate import POLICY as CANDIDATE_POLICY
+from exit_candidate import RUNTIME_SETTINGS as CANDIDATE_RUNTIME_SETTINGS
 from exit_candidate import ExitCandidate
 from probability_model import ProbabilityModel, UnavailableModel, load_model
 
@@ -82,7 +83,7 @@ def main() -> int:
         "--kelly",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Use 4%%-capped quarter Kelly with --model (default); --no-kelly restores legacy sizing",
+        help="Use 10%%-capped quarter Kelly with --model (default); --no-kelly selects a fixed 10%% target",
     )
     parser.add_argument(
         "--experiment-id",
@@ -348,9 +349,9 @@ class TradingBot:
         if isinstance(model, ExitCandidate):
             if not all(
                 self._model_settings.get(key) == value
-                for key, value in CANDIDATE_POLICY["settings"].items()
+                for key, value in CANDIDATE_RUNTIME_SETTINGS.items()
             ):
-                raise ValueError("Paired candidate requires quarter Kelly, 4% cap and stop15")
+                raise ValueError("Paired candidate requires quarter Kelly, 10% cap and stop15")
             self._model_settings.update(
                 policy_version="btc-15m-exit-aware-v1",
                 settlement_model=model.settlement_tag,
@@ -359,26 +360,18 @@ class TradingBot:
             )
         if experiment_id is not None:
             requested_id = experiment_id
-            if kelly:
-                experiment_id = _kelly_experiment_id(requested_id)
+            experiment_id = _sizing_experiment_id(requested_id, kelly=kelly)
             configuration = {
                 "assignment_version": "same-contract-v1" if simultaneous else "sha256-contract-v1",
                 "model_tag": model.tag,
                 "extra_cost_usd": str(extra_cost),
                 "baseline_settings": self._baseline_settings,
-                **(
-                    {
-                        "model_settings": self._model_settings,
-                        "requested_experiment_id": requested_id,
-                    }
-                    if kelly
-                    else {}
-                ),
+                **({"model_settings": self._model_settings} if kelly or simultaneous else {}),
+                "requested_experiment_id": requested_id,
                 **(
                     {
                         "baseline_windows": TIMING_WINDOWS,
                         "minute_five_settings": MINUTE_FIVE_SETTINGS,
-                        "model_settings": self._model_settings,
                         "entry_order": "sha256-contract-v1",
                     }
                     if simultaneous
@@ -1943,9 +1936,9 @@ def _experiment_arm(experiment_id: str, slug: str) -> str:
     return ("baseline", "model")[digest[0] % 2]
 
 
-def _kelly_experiment_id(requested_id: str) -> str:
-    """Keep saved cohorts separate when the service adopts the model loss exit."""
-    suffix = ".kelly-v3.stop15-v1"
+def _sizing_experiment_id(requested_id: str, *, kelly: bool) -> str:
+    """Keep the 10% sizing cohort separate from immutable historical comparisons."""
+    suffix = (".kelly-v3.stop15-v1" if kelly else "") + ".risk10-v1"
     if len(requested_id) + len(suffix) <= 64:
         return requested_id + suffix
     digest = hashlib.sha256(requested_id.encode()).hexdigest()[:16]

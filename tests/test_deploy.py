@@ -398,7 +398,7 @@ def test_selected_model_override_loads_paired_artifact_in_a_distinct_continuous_
         venue.client, journal, books, model=model, experiment_id=identifier, simultaneous=True
     )
     assert selected.experiment["id"] != old.experiment["id"]
-    assert selected._model_settings["entry_bankroll_fraction"] == "0.04"
+    assert selected._model_settings["entry_bankroll_fraction"] == "0.10"
     assert selected._model_settings["kelly_multiplier"] == "0.25"
     assert selected._model_settings["exit_policy"] == "model-loss-15-v1"
     assert selected._model_settings["entry_filter"] == "expected-net-proceeds-positive-v1"

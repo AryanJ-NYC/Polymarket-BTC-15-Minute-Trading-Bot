@@ -63,7 +63,7 @@ def test_assigned_ab_keeps_original_single_window_spot_warmup(
         context=context,
         model=saved_model(tmp_path, 0.8),
         kelly=False,
-        experiment_id="test-baseline",
+        experiment_id="test-baseline-5",
     )
     trader.strategy.processors = [PriceDivergenceProcessor()]
     clock.current = future_market.start + timedelta(seconds=720)

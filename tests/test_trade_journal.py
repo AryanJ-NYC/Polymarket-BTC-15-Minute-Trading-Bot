@@ -18,10 +18,10 @@ def journal(tmp_path):
 @pytest.mark.parametrize(
     ("bankroll", "buying_power", "expected", "reason"),
     [
-        ("100", "100", "2", "2% entry target"),
-        ("500", "500", "10", "2% entry target"),
+        ("100", "100", "10", "10% entry target"),
+        ("500", "500", "50", "10% entry target"),
         ("100", "1.25", "1.25", "buying power"),
-        ("0", "10", "0", "2% entry target"),
+        ("0", "10", "0", "10% entry target"),
         ("100", "0", "0", "buying power"),
     ],
 )
@@ -48,7 +48,7 @@ def test_exposure_tracks_funded_remaining_cost_and_buy_fees_after_partial_exit(v
     assert journal.exposure() == Decimal("0.495")
     # A very low sale price changes proceeds, never the retained funded cost.
     assert journal.get(market.slug)["entry_cost"] == "0.66"
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("9.34")
 
 
 def test_pending_buy_reservation_is_counted_once_and_stops_entries(venue, journal):
@@ -82,9 +82,9 @@ def test_entry_budget_clamps_at_funded_ten_percent_exposure(venue, journal, fund
 
 
 def test_risk_check_enforces_entry_target_even_with_large_available_exposure(journal):
-    journal.risk_check(Decimal("2"), Decimal("100"))
-    with pytest.raises(ValueError, match="2%"):
-        journal.risk_check(Decimal("2.01"), Decimal("100"))
+    journal.risk_check(Decimal("10"), Decimal("100"))
+    with pytest.raises(ValueError, match="10%"):
+        journal.risk_check(Decimal("10.01"), Decimal("100"))
 
 
 def test_daily_guard_keeps_full_original_cost_reserved_after_partial_exit(venue, journal):
@@ -215,10 +215,10 @@ def test_daily_percentage_uses_current_bankroll_and_resets_losses_at_utc_day(ven
     _record_buy(journal, plan, Decimal("9.75"))
     journal.settle(market.slug, Decimal("0"))
     assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("0.25")
-    assert journal.entry_budget(Decimal("200"), Decimal("200"))[0] == Decimal("4")
+    assert journal.entry_budget(Decimal("200"), Decimal("200"))[0] == Decimal("10.25")
     assert journal.entry_budget(Decimal("50"), Decimal("50"))[0] == 0
     clock.current += timedelta(days=1)
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
 
 
 def test_five_open_positions_remain_an_independent_entry_guard(venue, journal):
@@ -307,7 +307,7 @@ def test_settled_fee_tolerance_preserves_dispute_and_budgets_higher_cost(
         Decimal("0"), Decimal("1") - higher_cost
     )
     clock.current += timedelta(days=1)
-    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("0.2")
+    assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal("1")
 
 
 @pytest.mark.parametrize(
@@ -465,7 +465,7 @@ def settled_market_without_provider_fee(venue, journal, clock, request):
 
 @pytest.mark.parametrize(
     "settled_market_without_provider_fee,daily_budget",
-    [("0", "0.24"), ("1", "0.1503")],
+    [("0", "1.20"), ("1", "0.1503")],
     indirect=["settled_market_without_provider_fee"],
 )
 def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidence(
@@ -480,7 +480,9 @@ def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidenc
         Decimal("1.7565") + Decimal("1.44") * (1 - yes_value)
     )
     assert journal.exposure() == 0
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == (
+        Decimal("10") if yes_value == 0 else Decimal("8.9503")
+    )
     assert journal.entry_budget(Decimal("12"), Decimal("100"))[0] == Decimal(daily_budget)
     journal.risk_check(Decimal("2"), Decimal("100"))
     journal.settle_market(market.slug, yes_value, resolution=rows[0]["settlement"]["resolution"])
@@ -489,7 +491,9 @@ def test_missing_market_fee_allows_matching_saved_cost_without_rewriting_evidenc
     reopened = TradeJournal(tmp_path / "risk.sqlite")
     try:
         assert reopened.exposure() == 0
-        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == (
+            Decimal("10") if yes_value == 0 else Decimal("8.9503")
+        )
         assert reopened.entry_budget(Decimal("12"), Decimal("100"))[0] == Decimal(daily_budget)
         assert reopened.records() == rows
     finally:
@@ -664,7 +668,7 @@ def test_settled_policies_can_switch_outcome_after_complete_exit(venue, journal,
     assert {row["outcome"] for row in journal.records()} == {"up", "down"}
     assert all(row["pnl"] is None for row in journal.records())
     assert journal.exposure() == 0
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
 
 
 @pytest.mark.parametrize("fee", ["0", None])
@@ -683,7 +687,7 @@ def test_zero_fill_policy_does_not_hide_settled_cashflows(venue, journal, settle
             journal.entry_budget(Decimal("100"), Decimal("100"))
     else:
         assert journal.exposure() == 0
-        assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal(".20")
+        assert journal.entry_budget(Decimal("10"), Decimal("100"))[0] == Decimal(".8425")
 
 
 @pytest.mark.parametrize(

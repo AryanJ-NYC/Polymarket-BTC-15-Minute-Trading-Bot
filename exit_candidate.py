@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from execution.risk import KELLY_MAX_BANKROLL_FRACTION
+
 
 @dataclass(frozen=True)
 class ExitCandidate:
@@ -59,7 +61,7 @@ class ExitCandidate:
         return (
             horizon_seconds == POLICY["horizon_seconds"]
             and start >= _time(self._artifact["training"]["cutoff"])
-            and all(settings.get(k) == v for k, v in POLICY["settings"].items())
+            and all(settings.get(k) == v for k, v in RUNTIME_SETTINGS.items())
         )
 
     def admit(self, *, midpoint, spread, outcome, quantity, entry_cost):
@@ -350,4 +352,11 @@ POLICY = {
         "stop_loss": "-0.15",
         "extra_cost_usd": "0",
     },
+}
+
+# Keep the fitted artifact and payout identity bound to their original research policy.
+# Live sizing changes independently; admission still checks actual quantity and fees.
+RUNTIME_SETTINGS = {
+    **POLICY["settings"],
+    "entry_bankroll_fraction": str(KELLY_MAX_BANKROLL_FRACTION),
 }

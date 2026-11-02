@@ -16,7 +16,7 @@ def test_reported_fee_base_cost_reconciles_admission_and_results(
     original = journal.records()
     assert all(row["pnl"] is None and row["accounting_issues"] for row in original[:2])
     assert journal.exposure() == 0
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
     report = summarize(original)
     assert report["confirmed_cashflow_count"] == 2
     assert Decimal(report["total_net_pnl"]) == Decimal(".2072")
@@ -31,7 +31,7 @@ def test_reported_fee_base_cost_reconciles_admission_and_results(
     reopened = TradeJournal(tmp_path / "risk.sqlite")
     try:
         assert reopened.exposure() == 0
-        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
         assert summarize(reopened.records())["total_net_pnl"] == report["total_net_pnl"]
         assert reopened.records() == original
     finally:
@@ -142,7 +142,7 @@ def test_zero_or_positive_reported_fee_is_counted_once(journal, reported_fee_mar
             baseCost={"value": "0", "currency": "USD"},
         )
         journal.update(row["trade_id"], settlement=row["settlement"])
-    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("2")
+    assert journal.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
     assert Decimal(summarize(journal.records())["total_net_pnl"]) == Decimal(".2072")
 
 

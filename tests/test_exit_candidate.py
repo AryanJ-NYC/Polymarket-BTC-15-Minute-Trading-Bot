@@ -64,7 +64,7 @@ def training_rows():
 
 @pytest.mark.parametrize("moved", [False, True])
 @pytest.mark.parametrize("outcome", ["up", "down"])
-def test_live_gate_rechecks_after_final_validation_and_preserves_kelly_proposal(
+def test_live_gate_rechecks_after_final_validation_and_preserves_ten_percent_kelly_proposal(
     before_validation,
     venue,
     journal,
@@ -90,7 +90,7 @@ def test_live_gate_rechecks_after_final_validation_and_preserves_kelly_proposal(
     )
     model = load_model(path)
     monkeypatch.setattr(
-        ExitCandidate, "predict", lambda self, **kw: D(".58") if outcome == "up" else D(".42")
+        ExitCandidate, "predict", lambda self, **kw: D(".80") if outcome == "up" else D(".20")
     )
     value = [D(".55")]
     monkeypatch.setattr(ExitCandidate, "proceeds", lambda self, **kw: value[0])
@@ -123,8 +123,8 @@ def test_live_gate_rechecks_after_final_validation_and_preserves_kelly_proposal(
         assert row["settings"]["admission"]["reason"] == "predicted_net_nonpositive"
     else:
         assert len(creates) == 1
-        assert D(creates[0]["quantity"]) == 8
-        assert row["settings"]["admission"]["quantity"] == "8"
+        assert D(creates[0]["quantity"]) == 20
+        assert row["settings"]["admission"]["quantity"] == "20"
 
 
 def test_unavailable_model_blocks_entries_but_recovers_saved_stop(

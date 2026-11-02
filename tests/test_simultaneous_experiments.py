@@ -13,7 +13,7 @@ import bot
 from results_report import summarize
 
 
-@pytest.mark.parametrize("identity", ["all-four", "model-first"])
+@pytest.mark.parametrize("identity", ["all-four-10", "model-first-0"])
 def test_slow_first_final_validation_keeps_second_policys_expired_window_visible(
     before_validation,
     venue,
@@ -50,7 +50,9 @@ def test_slow_first_final_validation_keeps_second_policys_expired_window_visible
     assert observations[-1]["decision"] == "entry_window_closed"
 
 
-@pytest.mark.parametrize("identity,first_outcome", [("all-four", "down"), ("model-first", "up")])
+@pytest.mark.parametrize(
+    "identity,first_outcome", [("all-four-10", "down"), ("model-first-0", "up")]
+)
 def test_same_tick_opposing_policies_never_net_each_others_holdings(
     venue,
     journal,
@@ -213,7 +215,9 @@ def test_shared_outage_preserves_both_active_policy_observations(
     )
 
 
-@pytest.mark.parametrize("identity,priority", [("all-four", "model"), ("model-first", "baseline")])
+@pytest.mark.parametrize(
+    "identity,priority", [("all-four-10", "model"), ("model-first-0", "baseline")]
+)
 def test_four_experiments_share_one_account_and_survive_restart(
     venue,
     journal,
@@ -267,7 +271,7 @@ def test_four_experiments_share_one_account_and_survive_restart(
     assert report["contract_count"] == 1
     assert report["entry_priority_contract_counts"][priority] == 1
     assert len(report["by_settings"]) == 4
-    arms = report["by_experiment"][identity]["by_arm"]
+    arms = report["by_experiment"][identity + ".risk10-v1"]["by_arm"]
     assert arms["baseline"]["trade_count"] == 3
     assert arms["model"]["trade_count"] == 1
     assert arms["baseline"]["contract_count"] == arms["model"]["contract_count"] == 1
