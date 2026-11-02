@@ -376,7 +376,7 @@ def test_market_fee_dispute_is_not_duplicated_or_silently_made_exact(
             journal.exposure()
 
 
-def test_market_adjustment_reserves_the_losing_retained_trade_on_resolution_day(
+def test_market_adjustment_preserves_retained_trade_evidence_after_resolution(
     venue, journal, clock
 ):
     clock.current = clock.current.replace(hour=23, minute=58, second=0)
@@ -412,12 +412,12 @@ def test_market_adjustment_reserves_the_losing_retained_trade_on_resolution_day(
     )
     assert journal.get(earlier)["settlement"]["risk_adjustment"] == "0"
     assert Decimal(journal.get(market.slug)["settlement"]["risk_adjustment"]) == Decimal("0.02")
-    assert journal.entry_budget(Decimal("10"), Decimal("10"))[0] == Decimal("0.17")
+    assert journal.entry_budget(Decimal("10"), Decimal("10"))[0] == Decimal("1")
     rows = journal.records()
     clock.current += timedelta(seconds=1)
     journal.settle_market(market.slug, Decimal("0"), resolution=rows[1]["settlement"]["resolution"])
     assert journal.records() == rows
-    assert journal.entry_budget(Decimal("10"), Decimal("10"))[0] == Decimal("0.17")
+    assert journal.entry_budget(Decimal("10"), Decimal("10"))[0] == Decimal("1")
 
 
 @pytest.mark.parametrize(
@@ -532,7 +532,7 @@ def test_enrolled_model_comparison_keeps_its_pinned_single_baseline_window(
         stream_feed.books,
         model=saved_model(tmp_path, 0.1),
         kelly=False,
-        experiment_id="test-baseline-5",
+        experiment_id="test-baseline-2",
         context=bullish_context(),
     )
     for seconds in (720, 780, 840):

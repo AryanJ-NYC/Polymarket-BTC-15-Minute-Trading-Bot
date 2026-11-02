@@ -21,7 +21,7 @@ from execution.polymarket_client import (
     number,
     parse_time,
 )
-from execution.risk import DAILY_LOSS_FRACTION, ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
+from execution.risk import ENTRY_BANKROLL_FRACTION, MAX_EXPOSURE_FRACTION
 
 
 class TradeJournal:
@@ -536,10 +536,6 @@ class TradeJournal:
                 bankroll * MAX_EXPOSURE_FRACTION - self.exposure(),
                 f"{MAX_EXPOSURE_FRACTION.normalize():%} exposure room",
             ),
-            (
-                _daily_room(rows, bankroll),
-                f"daily {DAILY_LOSS_FRACTION.normalize():%} loss budget",
-            ),
             key=lambda candidate: candidate[0],
         )
         return max(Decimal("0"), budget), reason
@@ -792,25 +788,6 @@ def _market_resolution_check(rows: list[dict], resolution: dict) -> dict:
     }
 
 
-def _daily_room(rows: list[dict], bankroll: Decimal) -> Decimal:
-    today = datetime.now(timezone.utc).date().isoformat()
-    realized_pnl = Decimal("0")
-    costs = _risk_entry_costs(rows)
-    for row in rows:
-        if row["state"] != "closed" or not row.get("closed_at", "").startswith(today):
-            continue
-        pnl = row["pnl"]
-        if pnl is None or row.get("accounting_issues"):
-            entry_cost = costs[row["trade_id"]]
-            if entry_cost is not None and row["proceeds"] is not None:
-                pnl = number(row["proceeds"]) - entry_cost
-        if pnl is not None:
-            realized_pnl += number(pnl)
-    # Realized profits replenish the budget; partial exits keep the full cost reserved.
-    at_risk = sum(number(row["entry_cost"]) for row in rows if row["state"] == "open")
-    return bankroll * DAILY_LOSS_FRACTION + realized_pnl - at_risk
-
-
 def _risk_entry_costs(rows: list[dict]) -> dict[str, Decimal | None]:
     costs = {row["trade_id"]: _risk_entry_cost(row) for row in rows}
     markets: dict[str, list[dict]] = {}
@@ -831,16 +808,6 @@ def _risk_entry_costs(rows: list[dict]) -> dict[str, Decimal | None]:
                 )
                 for row in market
             }
-            # Preserve any existing reserve, and charge an adverse market residual
-            # once, on the latest disputed closure's UTC day. Favorable differences
-            # never replenish the daily budget or become confirmed policy P&L.
-            reserved = sum(
-                market_costs[row["trade_id"]] - number(row["entry_cost"]) for row in market
-            )
-            if adjustment > reserved:
-                disputed = [row for row in market if costs[row["trade_id"]] is None]
-                owner = max(disputed, key=lambda row: (row["closed_at"], row["trade_id"]))
-                market_costs[owner["trade_id"]] += adjustment - reserved
         except (KeyError, TypeError, ValueError, ArithmeticError):
             continue  # Malformed saved evidence remains blocked, never a proof.
         costs.update(market_costs)

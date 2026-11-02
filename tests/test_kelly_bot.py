@@ -167,7 +167,7 @@ def test_default_kelly_creates_separate_stable_cohort_without_changing_legacy(
         experiment_id=identifier,
         simultaneous=simultaneous,
     ).experiment
-    assert current["id"].endswith(".kelly-v3.stop15-v1.risk10-v1")
+    assert current["id"].endswith(".kelly-v3.stop15-v1.risk10-v2")
     assert len(current["id"]) <= 64
     assert current["id"] not in {legacy["id"], saved_settlement["id"]}
     assert journal.start_experiment(old_id, saved_settlement["configuration"]) == saved_settlement
@@ -191,6 +191,12 @@ def test_default_kelly_creates_separate_stable_cohort_without_changing_legacy(
         digest = hashlib.sha256(identifier.encode()).hexdigest()[:16]
         prior_id = identifier[: 64 - len(suffix) - 17] + "." + digest + suffix
     saved_stop = journal.start_experiment(prior_id, prior_stop)
+    prior_daily = deepcopy(current["configuration"])
+    for key in ("baseline_settings", "model_settings", "minute_five_settings"):
+        if key in prior_daily:
+            prior_daily[key]["daily_loss_fraction"] = "0.10"
+    prior_daily_id = current["id"].replace(".risk10-v2", ".risk10-v1")
+    saved_daily = journal.start_experiment(prior_daily_id, prior_daily)
     clock.current += timedelta(hours=1)
     assert (
         TradingBot(
@@ -217,6 +223,8 @@ def test_default_kelly_creates_separate_stable_cohort_without_changing_legacy(
     )
     assert journal.saved_experiment(identifier) == saved_fixed
     assert journal.saved_experiment(prior_id) == saved_stop
+    assert journal.saved_experiment(prior_daily_id) == saved_daily
+    assert "daily_loss_fraction" not in current["configuration"]["model_settings"]
     # A cohort rollover is not permission to reinterpret any existing definition.
     with pytest.raises(ValueError, match="different configuration"):
         TradingBot(
@@ -314,7 +322,7 @@ def test_deployed_cli_selects_default_sizing_and_runs_until_operator_stops(
     if experiment is not None:
         settings = experiment["configuration"].get("model_settings", settings)
         assert experiment["id"] == "btc-five-20261022-a0201afd" + (
-            ".risk10-v1" if legacy else ".kelly-v3.stop15-v1.risk10-v1"
+            ".risk10-v2" if legacy else ".kelly-v3.stop15-v1.risk10-v2"
         )
     assert settings["sizing_policy"] == ("bankroll-percentage-v1" if legacy else "quarter-kelly-v3")
     assert settings["exit_policy"] == ("price-thresholds-v1" if legacy else "model-loss-15-v1")
@@ -335,7 +343,7 @@ def test_new_model_entries_persist_stop_policy_in_every_runner_mode(
         journal,
         books,
         model=saved_model(tmp_path, 0.8),
-        experiment_id=None if mode == "model-only" else "stop-policy",
+        experiment_id=None if mode == "model-only" else "stop-policy-v3",
         simultaneous=mode == "simultaneous",
     )
     clock.current = late
@@ -351,4 +359,4 @@ def test_new_model_entries_persist_stop_policy_in_every_runner_mode(
     assert "take_profit" not in settings
     if mode != "model-only":
         assert settings["experiment"]["arm"] == "model"
-        assert settings["experiment"]["id"] == "stop-policy.kelly-v3.stop15-v1.risk10-v1"
+        assert settings["experiment"]["id"] == "stop-policy-v3.kelly-v3.stop15-v1.risk10-v2"

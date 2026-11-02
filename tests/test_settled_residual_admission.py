@@ -30,12 +30,8 @@ def residual_journal(venue, clock, tmp_path, request):
     journal.finish_order(
         market.slug + ":earlier", Decimal("7.79"), Decimal("6.7773"), Decimal(".06")
     )
-    parameters = getattr(request, "param", ("gross", ".01"))
-    basis, difference = parameters[:2]
-    if len(parameters) == 3:
-        clock.current = (clock.current + timedelta(days=1)).replace(hour=0, minute=0, second=0)
-    else:
-        clock.current += timedelta(seconds=1)
+    basis, difference = getattr(request, "param", ("gross", ".01"))
+    clock.current += timedelta(seconds=1)
     realized = Decimal("7.8325" if basis == "gross" else "7.3925") + Decimal(difference)
     journal.settle_market(
         market.slug,
@@ -61,20 +57,19 @@ def residual_journal(venue, clock, tmp_path, request):
 
 
 @pytest.mark.parametrize(
-    "residual_journal,reserve",
+    "residual_journal",
     [
-        (("gross", ".01"), "0"),
-        (("gross", "-.01"), ".01"),
-        (("net", ".01"), "0"),
-        (("net", "-.01"), ".01"),
-        (("gross", ".05"), "0"),
-        (("net", "-.05"), ".05"),
-        (("gross", "-.01", "cross_midnight"), ".01"),
+        ("gross", ".01"),
+        ("gross", "-.01"),
+        ("net", ".01"),
+        ("net", "-.01"),
+        ("gross", ".05"),
+        ("net", "-.05"),
     ],
     indirect=["residual_journal"],
 )
 def test_bounded_settled_residual_admits_conservatively_without_confirming_pnl(
-    residual_journal, venue, clock, tmp_path, reserve
+    residual_journal, tmp_path
 ):
     journal = residual_journal
     rows = journal.records()
@@ -90,39 +85,19 @@ def test_bounded_settled_residual_admits_conservatively_without_confirming_pnl(
     )
     assert journal.records() == rows
 
-    # A separate known loss makes daily room the limiting guard. The market's
-    # favorable residual earns nothing; its adverse residual is reserved once.
-    market = parse_market(venue.market)
-    venue.timestamp = clock.current.isoformat()
-    market = replace(market, start=clock.current, end=clock.current + timedelta(minutes=15))
-    plan = venue.client.buy_plan(market, venue.client.book(market), "up", Decimal("10"))
-    plan = replace(plan, slug="other-contract", quantity=Decimal("20"))
-    journal.reserve_entry(plan, market.end)
-    journal.finish_order(plan.slug, Decimal("20"), Decimal("15"), Decimal(".5"))
-    journal.settle(plan.slug, Decimal("0"))
-    # A fully exited earlier lot can close before UTC midnight while retained
-    # lots settle afterward. The reserve belongs to the settlement day's room.
-    earlier = next(row for row in rows if row["trade_id"].endswith(":earlier"))
-    settled = next(row for row in rows if row["trade_id"].endswith(":later"))
-    prior_profit = (
-        Decimal(earlier["proceeds"]) - Decimal(earlier["entry_cost"])
-        if earlier["closed_at"][:10] != settled["closed_at"][:10]
-        else Decimal("0")
-    )
-    expected = Decimal("1.8925") - prior_profit - Decimal(reserve)
     assert journal.entry_budget(Decimal("100"), Decimal("100")) == (
-        expected,
-        "daily 10% loss budget",
+        Decimal("10"),
+        "10% entry target",
     )
-    journal.risk_check(expected, Decimal("100"))
-    with pytest.raises(ValueError, match="daily"):
-        journal.risk_check(expected + Decimal(".0001"), Decimal("100"))
+    journal.risk_check(Decimal("10"), Decimal("100"))
+    with pytest.raises(ValueError, match="10% entry target"):
+        journal.risk_check(Decimal("10.0001"), Decimal("100"))
     saved = journal.records()
     journal.close()
     reopened = TradeJournal(tmp_path / "residual.sqlite")
     try:
         assert reopened.exposure() == 0
-        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == expected
+        assert reopened.entry_budget(Decimal("100"), Decimal("100"))[0] == Decimal("10")
         assert reopened.records() == saved
         assert confirmed_cashflow_pnls(reopened.records()) == {}
     finally:

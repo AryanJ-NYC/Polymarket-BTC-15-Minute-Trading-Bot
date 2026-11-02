@@ -366,7 +366,7 @@ def test_model_uses_refreshed_bankroll_and_buying_power(
         assert Decimal(candidate["quantity"]) == Decimal(expected_quantity)
         assert row["settings"]["entry_bankroll_fraction"] == "0.10"
         assert row["settings"]["max_exposure_fraction"] == "0.10"
-        assert row["settings"]["daily_loss_fraction"] == "0.10"
+        assert "daily_loss_fraction" not in row["settings"]
         assert "budget_usd" not in row["settings"]
     finally:
         journal.close()

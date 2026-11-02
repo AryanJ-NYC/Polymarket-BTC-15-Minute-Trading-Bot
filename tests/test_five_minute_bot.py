@@ -1162,7 +1162,7 @@ def test_ended_lot_settlement_waits_for_five_minute_admission_without_bypassing_
         assert entry["orders"][0]["recorded_at"] == decision_time.isoformat()
         assert entry["settings"]["entry_bankroll_fraction"] == "0.10"
         assert entry["settings"]["max_exposure_fraction"] == "0.10"
-        assert entry["settings"]["daily_loss_fraction"] == "0.10"
+        assert "daily_loss_fraction" not in entry["settings"]
     if live:
         assert create_times == ([decision_time] if expected_entry else [])
     if not expected_entry:
